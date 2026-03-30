@@ -5,6 +5,11 @@
 #include <string.h>
 #include <stdio.h>
 
+#define TATR_VERSION "0.1.0"
+
+#define HUID_FORMAT_CSTR "%Y%m%d-%H%M%S"
+#define HUID_LENGTH 16 // "20240630-235959" + null terminator
+
 #define TASKS_PATH_CSTR "tasks"
 #define TASK_FILE_NAME_CSTR "TASK.md"
 
@@ -253,25 +258,26 @@ defer:
     return result;
 }
 
-static Aids_String_Slice huid() {
+static Aids_Result huid(char *huid_str) {
+    Aids_Result result = AIDS_OK;
     time_t current_time;
     struct tm *time_info;
-    char time_buffer[20];
 
     time(&current_time);
     time_info = localtime(&current_time);
 
     if (time_info == NULL) {
         aids_log(AIDS_ERROR, "huid: Failed to get local time");
-        return (Aids_String_Slice) {0};
+        return_defer(AIDS_ERR);
     }
 
-    if (strftime(time_buffer, sizeof(time_buffer), "%Y%m%d-%H%M%S", time_info) == 0) {
+    if (strftime(huid_str, HUID_LENGTH, HUID_FORMAT_CSTR, time_info) == 0) {
         aids_log(AIDS_ERROR, "huid: Failed to format time string");
-        return (Aids_String_Slice) {0};
+        return_defer(AIDS_ERR);
     }
 
-    return aids_string_slice_from_cstr(time_buffer);
+defer:
+    return result;
 }
 
 static Aids_Result task_new(Aids_String_Slice huid, Task task) {
@@ -281,19 +287,15 @@ static Aids_Result task_new(Aids_String_Slice huid, Task task) {
     Aids_String_Slice serialized_task = {0};
     Aids_String_Slice tasks_dir = {0};
     Aids_String_Slice task_file_path = {0};
-    boolean temp_restored = false;
+    Aids_String_Slice cwd = {0};
 
     // Validate input
     if (huid.str == NULL || huid.len == 0) {
         aids_log(AIDS_ERROR, "task_new: Invalid huid provided");
-        return AIDS_ERR;
+        return_defer(AIDS_ERR);
     }
 
-    // Save temp allocator state to restore later (cwd uses temp allocator)
-    size_t temp_checkpoint = aids_temp_save();
-
-    // Get current working directory (allocates from temp allocator)
-    Aids_String_Slice cwd = {0};
+    // Get current working directory
     if (aids_io_getcwd(&cwd) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_new: Failed to get current working directory: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -306,10 +308,6 @@ static Aids_Result task_new(Aids_String_Slice huid, Task task) {
         return_defer(AIDS_ERR);
     }
     aids_string_builder_to_slice(&tasks_dir_sb, &tasks_dir);
-
-    // Restore temp allocator (cwd no longer needed)
-    aids_temp_load(temp_checkpoint);
-    temp_restored = true;
 
     // Create task directory
     if (aids_io_mkdir(&tasks_dir, true) != AIDS_OK) {
@@ -340,8 +338,8 @@ static Aids_Result task_new(Aids_String_Slice huid, Task task) {
     }
 
 defer:
-    if (!temp_restored) {
-        aids_temp_load(temp_checkpoint);
+    if (cwd.str != NULL) {
+        AIDS_FREE(cwd.str);
     }
     if (tasks_dir.str != NULL) {
         AIDS_FREE(tasks_dir.str);
@@ -356,12 +354,16 @@ defer:
 }
 
 static int main_new(int argc, char **argv) {
+    int result = 0;
     Argparse_Parser parser = {0};
-    argparse_parser_init(&parser, "tatr new", "Create a new task", "1.0.0");
+    Task task = {0};
+    boolean task_initialized = false;
+
+    argparse_parser_init(&parser, "tatr new", "Create a new task", TATR_VERSION);
 
     // Add positional argument for title
     argparse_add_argument(&parser, (Argparse_Options){
-        .short_name = 0,
+        .short_name = 'T',
         .long_name = "title",
         .description = "Task title",
         .type = ARGUMENT_TYPE_POSITIONAL,
@@ -397,13 +399,12 @@ static int main_new(int argc, char **argv) {
 
     // Parse arguments
     if (argparse_parse(&parser, argc, argv) != ARG_OK) {
-        argparse_parser_free(&parser);
-        return 1;
+        return_defer(1);
     }
 
     // Initialize task
-    Task task = {0};
     task_init_empty(&task);
+    task_initialized = true;
 
     // Get title
     char *title = argparse_get_value(&parser, "title");
@@ -421,13 +422,11 @@ static int main_new(int argc, char **argv) {
                 task.meta.priority = (unsigned int)priority;
             } else {
                 aids_log(AIDS_ERROR, "Priority must be a non-negative number");
-                argparse_parser_free(&parser);
-                return 1;
+                return_defer(1);
             }
         } else {
             aids_log(AIDS_ERROR, "Invalid priority value: %s", priority_str);
-            argparse_parser_free(&parser);
-            return 1;
+            return_defer(1);
         }
     }
 
@@ -438,9 +437,7 @@ static int main_new(int argc, char **argv) {
         Aids_String_Slice tag = aids_string_slice_from_cstr(tags[i]);
         if (aids_array_append(&task.meta.tags, &tag) != AIDS_OK) {
             aids_log(AIDS_ERROR, "Failed to append tag: %s", aids_failure_reason());
-            task_cleanup(&task);
-            argparse_parser_free(&parser);
-            return 1;
+            return_defer(1);
         }
     }
 
@@ -452,34 +449,42 @@ static int main_new(int argc, char **argv) {
     }
 
     // Generate HUID
-    Aids_String_Slice id = huid();
-    if (id.str == NULL || id.len == 0) {
+    char huid_str[HUID_LENGTH] = {0};
+    if (huid(huid_str) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to generate huid");
-        task_cleanup(&task);
-        argparse_parser_free(&parser);
-        return 1;
+        return_defer(1);
     }
+    Aids_String_Slice id = aids_string_slice_from_cstr(huid_str);
 
-    // Create task
+    // Create task (this will use and restore temp allocator internally)
     if (task_new(id, task) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to create new task: %s", aids_failure_reason());
-        task_cleanup(&task);
-        argparse_parser_free(&parser);
-        return 1;
+        return_defer(1);
     }
 
     printf("Task created successfully with ID: " SS_Fmt "\n", SS_Arg(id));
 
-    task_cleanup(&task);
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
     argparse_parser_free(&parser);
-    return 0;
+    return result;
+}
+
+static int main_ls(int argc, char **argv) {
+    // TODO(20260330-202358): Implement ls subcommand
+    AIDS_TODO("Implement listing tasks");
 }
 
 static void print_usage(const char *program) {
     fprintf(stderr, "Usage: %s <subcommand> [options]\n", program);
     fprintf(stderr, "\n");
     fprintf(stderr, "Subcommands:\n");
+    fprintf(stderr, "  help       Show this help message\n");
+    fprintf(stderr, "  version    Show version information\n");
     fprintf(stderr, "  new        Create a new task\n");
+    fprintf(stderr, "  ls         List tasks\n");
     fprintf(stderr, "\n");
 }
 
@@ -493,8 +498,16 @@ int main(int argc, char **argv) {
 
     const char *subcommand = argv[1];
 
-    if (strcmp(subcommand, "new") == 0) {
+    if (strcmp(subcommand, "help") == 0) {
+        print_usage(argv[0]);
+        return 0;
+    } else if (strcmp(subcommand, "version") == 0) {
+        printf("%s version %s\n", argv[0], TATR_VERSION);
+        return 0;
+    } else if (strcmp(subcommand, "new") == 0) {
         return main_new(argc - 1, argv + 1);
+    } else if (strcmp(subcommand, "ls") == 0) {
+        return main_ls(argc - 1, argv + 1);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);
         print_usage(argv[0]);
@@ -506,6 +519,5 @@ int main(int argc, char **argv) {
 
 #define ARGPARSE_IMPLEMENTATION
 #include "argparse.h"
-
 #define AIDS_IMPLEMENTATION
 #include "aids.h"

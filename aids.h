@@ -1489,17 +1489,13 @@ AIDSHDEF Aids_Result aids_io_getcwd(Aids_String_Slice *cwd) {
         return_defer(AIDS_ERR);
     }
 
-    size_t len = strlen(buffer);
-    char *temp_cwd = aids_temp_alloc(len + 1);
-    if (temp_cwd == NULL) {
-        aids__g_failure_reason = "Failed to allocate temporary memory for cwd";
+    Aids_String_Builder sb = {0};
+    aids_string_builder_init(&sb);
+    if (aids_string_builder_append(&sb, "%s", buffer) != AIDS_OK) {
+        aids__g_failure_reason = "Failed to append to string builder";
         return_defer(AIDS_ERR);
     }
-    memcpy(temp_cwd, buffer, len);
-    temp_cwd[len] = '\0';
-
-    cwd->str = (unsigned char *)temp_cwd;
-    cwd->len = len;
+    aids_string_builder_to_slice(&sb, cwd);
 
 defer:
     return result;
