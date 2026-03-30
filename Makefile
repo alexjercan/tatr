@@ -1,7 +1,7 @@
 .PHONY: all clean install
 
 CC = clang
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -O2 -g
 TARGET = tatr
 SRC = tatr.c
 PREFIX ?= /usr/local

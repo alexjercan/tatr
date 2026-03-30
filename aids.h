@@ -109,6 +109,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <unistd.h>
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -313,6 +316,7 @@ AIDSHDEF void aids_string_slice_trim(Aids_String_Slice *ss);
 AIDSHDEF boolean aids_string_slice_starts_with(Aids_String_Slice *ss, Aids_String_Slice prefix);
 AIDSHDEF boolean aids_string_slice_ends_with(Aids_String_Slice *ss, Aids_String_Slice suffix);
 AIDSHDEF void aids_string_slice_skip(Aids_String_Slice *ss, unsigned long count);
+AIDSHDEF void aids_string_slice_skip_while(Aids_String_Slice *ss, int (*predicate)(int));
 AIDSHDEF boolean aids_string_slice_atol(const Aids_String_Slice *ss, long *value, int base);
 AIDSHDEF int aids_string_slice_compare(const Aids_String_Slice *ss1, const Aids_String_Slice *ss2);
 AIDSHDEF void aids_string_slice_free(Aids_String_Slice *ss);
@@ -341,6 +345,8 @@ AIDSHDEF Aids_Result aids_io_read(const Aids_String_Slice *filename, Aids_String
 AIDSHDEF Aids_Result aids_io_write(const Aids_String_Slice *filename, const Aids_String_Slice *ss, const char *mode);
 AIDSHDEF Aids_Result aids_io_list(const Aids_String_Slice *path, Aids_Array *files, Aids_List_Files_Options *options);
 AIDSHDEF Aids_Result aids_io_basename(const Aids_String_Slice *filepath, Aids_String_Slice *filename);
+AIDSHDEF Aids_Result aids_io_mkdir(const Aids_String_Slice *path, boolean recursive);
+AIDSHDEF Aids_Result aids_io_getcwd(Aids_String_Slice *cwd);
 
 #endif // AIDS_H
 
@@ -1181,6 +1187,13 @@ AIDSHDEF void aids_string_slice_skip(Aids_String_Slice *ss, unsigned long count)
     }
 }
 
+AIDSHDEF void aids_string_slice_skip_while(Aids_String_Slice *ss, int (*predicate)(int)) {
+    while (ss->len > 0 && predicate(*ss->str)) {
+        ss->str++;
+        ss->len--;
+    }
+}
+
 AIDSHDEF boolean aids_string_slice_atol(const Aids_String_Slice *ss, long *value, int base) {
     if (ss->len == 0 || ss->str == NULL) {
         aids__g_failure_reason = "String slice is empty";
@@ -1423,6 +1436,73 @@ AIDSHDEF Aids_Result aids_io_basename(const Aids_String_Slice *filepath, Aids_St
     while (aids_string_slice_tokenize(&path_slice, '/', filename));
 
     return AIDS_OK;
+}
+
+AIDSHDEF Aids_Result aids_io_mkdir(const Aids_String_Slice *path, boolean recursive) {
+    Aids_Result result = AIDS_OK;
+
+    size_t temp = aids_temp_save();
+    char *temp_path = aids_temp_sprintf(SS_Fmt, SS_Arg(*path));
+    aids_temp_load(temp);
+
+    if (recursive) {
+        char *current_path = (char *)AIDS_REALLOC(NULL, 1);
+        current_path[0] = '\0';
+
+        Aids_String_Slice path_slice = *path;
+        Aids_String_Slice token;
+        while (aids_string_slice_tokenize(&path_slice, '/', &token)) {
+            size_t new_size = strlen(current_path) + token.len + 2; // +1 for '/' and +1 for '\0'
+            current_path = (char *)AIDS_REALLOC(current_path, new_size);
+            if (current_path == NULL) {
+                aids__g_failure_reason = "Memory allocation failed";
+                return_defer(AIDS_ERR);
+            }
+
+            strcat(current_path, "/");
+            strncat(current_path, (const char *)token.str, token.len);
+
+            if (mkdir(current_path, 0755) != 0 && errno != EEXIST) {
+                aids__g_failure_reason = aids_temp_sprintf("Failed to create directory '" SS_Fmt "': %s", SS_Arg(token), strerror(errno));
+                return_defer(AIDS_ERR);
+            }
+        }
+
+        AIDS_FREE(current_path);
+    } else {
+        if (mkdir(temp_path, 0755) != 0 && errno != EEXIST) {
+            aids__g_failure_reason = aids_temp_sprintf("Failed to create directory '" SS_Fmt "': %s", SS_Arg(*path), strerror(errno));
+            return_defer(AIDS_ERR);
+        }
+    }
+
+defer:
+    return result;
+}
+
+AIDSHDEF Aids_Result aids_io_getcwd(Aids_String_Slice *cwd) {
+    Aids_Result result = AIDS_OK;
+
+    char buffer[PATH_MAX] = {0};
+    if (getcwd(buffer, PATH_MAX) == NULL) {
+        aids__g_failure_reason = aids_temp_sprintf("Failed to get current working directory: %s", strerror(errno));
+        return_defer(AIDS_ERR);
+    }
+
+    size_t len = strlen(buffer);
+    char *temp_cwd = aids_temp_alloc(len + 1);
+    if (temp_cwd == NULL) {
+        aids__g_failure_reason = "Failed to allocate temporary memory for cwd";
+        return_defer(AIDS_ERR);
+    }
+    memcpy(temp_cwd, buffer, len);
+    temp_cwd[len] = '\0';
+
+    cwd->str = (unsigned char *)temp_cwd;
+    cwd->len = len;
+
+defer:
+    return result;
 }
 
 #endif // AIDS_IMPLEMENTATION
