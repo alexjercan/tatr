@@ -1,4 +1,5 @@
 #include "aids.h"
+#include "argparse.h"
 #include <time.h>
 #include <ctype.h>
 #include <string.h>
@@ -61,7 +62,7 @@ static void task_init_empty(Task *task) {
     aids_array_init(&task->meta.tags, sizeof(Aids_String_Slice));
 }
 
-static void task_free(Task *task) {
+static void task_cleanup(Task *task) {
     if (task == NULL) {
         return;
     }
@@ -247,7 +248,7 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
 
 defer:
     if (result != AIDS_OK) {
-        task_free(task);
+        task_cleanup(task);
     }
     return result;
 }
@@ -355,23 +356,122 @@ defer:
 }
 
 static int main_new(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    Argparse_Parser parser = {0};
+    argparse_parser_init(&parser, "tatr new", "Create a new task", "1.0.0");
 
+    // Add positional argument for title
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 0,
+        .long_name = "title",
+        .description = "Task title",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 0
+    });
+
+    // Add priority option
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'p',
+        .long_name = "priority",
+        .description = "Task priority (default: 0)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    // Add tags option
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 't',
+        .long_name = "tags",
+        .description = "Task tags (comma-separated)",
+        .type = ARGUMENT_TYPE_VALUE_ARRAY,
+        .required = 0
+    });
+
+    // Add status option
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 's',
+        .long_name = "status",
+        .description = "Task status (OPEN, IN_PROGRESS, CLOSED)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    // Parse arguments
+    if (argparse_parse(&parser, argc, argv) != ARG_OK) {
+        argparse_parser_free(&parser);
+        return 1;
+    }
+
+    // Initialize task
     Task task = {0};
     task_init_empty(&task);
 
+    // Get title
+    char *title = argparse_get_value(&parser, "title");
+    if (title != NULL) {
+        task.title = aids_string_slice_from_cstr(title);
+    }
+
+    // Get priority
+    char *priority_str = argparse_get_value(&parser, "priority");
+    if (priority_str != NULL) {
+        long priority;
+        Aids_String_Slice priority_slice = aids_string_slice_from_cstr(priority_str);
+        if (aids_string_slice_atol(&priority_slice, &priority, 10)) {
+            if (priority >= 0) {
+                task.meta.priority = (unsigned int)priority;
+            } else {
+                aids_log(AIDS_ERROR, "Priority must be a non-negative number");
+                argparse_parser_free(&parser);
+                return 1;
+            }
+        } else {
+            aids_log(AIDS_ERROR, "Invalid priority value: %s", priority_str);
+            argparse_parser_free(&parser);
+            return 1;
+        }
+    }
+
+    // Get tags
+    char *tags[ARGPARSE_CAPACITY];
+    unsigned long tag_count = argparse_get_values(&parser, "tags", tags);
+    for (unsigned long i = 0; i < tag_count; ++i) {
+        Aids_String_Slice tag = aids_string_slice_from_cstr(tags[i]);
+        if (aids_array_append(&task.meta.tags, &tag) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append tag: %s", aids_failure_reason());
+            task_cleanup(&task);
+            argparse_parser_free(&parser);
+            return 1;
+        }
+    }
+
+    // Get status
+    char *status_str = argparse_get_value(&parser, "status");
+    if (status_str != NULL) {
+        Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
+        task.meta.status = task_status_from_string(&status_slice);
+    }
+
+    // Generate HUID
     Aids_String_Slice id = huid();
     if (id.str == NULL || id.len == 0) {
         aids_log(AIDS_ERROR, "Failed to generate huid");
+        task_cleanup(&task);
+        argparse_parser_free(&parser);
         return 1;
     }
 
+    // Create task
     if (task_new(id, task) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to create new task: %s", aids_failure_reason());
+        task_cleanup(&task);
+        argparse_parser_free(&parser);
         return 1;
     }
 
+    printf("Task created successfully with ID: " SS_Fmt "\n", SS_Arg(id));
+
+    task_cleanup(&task);
+    argparse_parser_free(&parser);
     return 0;
 }
 
@@ -403,6 +503,9 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
+#define ARGPARSE_IMPLEMENTATION
+#include "argparse.h"
 
 #define AIDS_IMPLEMENTATION
 #include "aids.h"

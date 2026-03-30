@@ -8,7 +8,7 @@ PREFIX ?= /usr/local
 
 all: $(TARGET)
 
-$(TARGET): $(SRC) aids.h markdown.h
+$(TARGET): $(SRC) aids.h argparse.h
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
 clean:
