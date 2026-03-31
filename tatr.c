@@ -557,9 +557,7 @@ defer:
     return result;
 }
 
-static Aids_Result task_load(const Aids_String_Slice *task_file_path,
-                             Task *task,
-                             Aids_String_Slice *serialized_out) {
+static Aids_Result task_load(const Aids_String_Slice *task_file_path, Task *task) {
     Aids_Result result = AIDS_OK;
     Aids_String_Slice serialized_task = {0};
 
@@ -577,30 +575,26 @@ static Aids_Result task_load(const Aids_String_Slice *task_file_path,
         return_defer(AIDS_ERR);
     }
 
-    *serialized_out = serialized_task;
-
 defer:
     return result;
 }
 
-static void task_print(const Aids_String_Slice *cwd,
-                      const Aids_String_Slice *huid,
-                      const Task *task) {
+static void task_print(Aids_String_Slice cwd, Aids_String_Slice huid, Task task) {
     printf(SS_Fmt "/" SS_Fmt "/" SS_Fmt "/%s: [PRIORITY: %u, TAGS: ",
-           SS_Arg(*cwd), SS_Arg(TASKS_PATH), SS_Arg(*huid),
-           TASK_FILE_NAME_CSTR, task->meta.priority);
+           SS_Arg(cwd), SS_Arg(TASKS_PATH), SS_Arg(huid),
+           TASK_FILE_NAME_CSTR, task.meta.priority);
 
-    for (size_t i = 0; i < task->meta.tags.count; ++i) {
+    for (size_t i = 0; i < task.meta.tags.count; ++i) {
         Aids_String_Slice *tag = NULL;
-        AIDS_ASSERT(aids_array_get(&task->meta.tags, i, (void **)&tag) == AIDS_OK,
+        AIDS_ASSERT(aids_array_get(&task.meta.tags, i, (void **)&tag) == AIDS_OK,
                    "Failed to get tag at index %zu: %s", i, aids_failure_reason());
         printf(SS_Fmt, SS_Arg(*tag));
-        if (i < task->meta.tags.count - 1) {
+        if (i < task.meta.tags.count - 1) {
             printf(", ");
         }
     }
 
-    printf("] " SS_Fmt "\n", SS_Arg(task->title));
+    printf("] " SS_Fmt "\n", SS_Arg(task.title));
 }
 
 static void cleanup_string_slice_array(Aids_Array *array) {
@@ -617,14 +611,17 @@ static void cleanup_string_slice_array(Aids_Array *array) {
     aids_array_free(array);
 }
 
+typedef struct {
+    Aids_String_Slice huid;
+    Task task;
+} Task_Entry;
+
 static int main_ls(int argc, char **argv) {
     int result = 0;
     Aids_String_Slice tasks_dir = {0};
     Aids_String_Slice cwd = {0};
     Aids_Array tasks_files = {0};        /* Aids_String_Slice */
-    Aids_Array task_huids = {0};         /* Aids_String_Slice */
-    Aids_Array tasks = {0};              /* Task */
-    Aids_Array serialized_tasks = {0};   /* Aids_String_Slice */
+    Aids_Array tasks = {0};              /* Task_Entry */
     Argparse_Parser parser = {0};
 
     argparse_parser_init(&parser, "tatr ls", "List tasks", TATR_VERSION);
@@ -648,9 +645,7 @@ static int main_ls(int argc, char **argv) {
         return_defer(1);
     }
 
-    aids_array_init(&tasks, sizeof(Task));
-    aids_array_init(&task_huids, sizeof(Aids_String_Slice));
-    aids_array_init(&serialized_tasks, sizeof(Aids_String_Slice));
+    aids_array_init(&tasks, sizeof(Task_Entry));
 
     for (size_t i = 0; i < tasks_files.count; ++i) {
         Aids_String_Slice *huid = NULL;
@@ -667,33 +662,30 @@ static int main_ls(int argc, char **argv) {
         }
 
         Task task = {0};
-        Aids_String_Slice serialized_task = {0};
-        if (task_load(&task_file_path, &task, &serialized_task) != AIDS_OK) {
+        if (task_load(&task_file_path, &task) != AIDS_OK) {
             AIDS_FREE(task_file_path.str);
             return_defer(1);
         }
         AIDS_FREE(task_file_path.str);
+        Task_Entry entry = {
+            .huid = *huid,
+            .task = task
+        };
 
-        if (aids_array_append(&tasks, &task) != AIDS_OK ||
-            aids_array_append(&task_huids, huid) != AIDS_OK ||
-            aids_array_append(&serialized_tasks, &serialized_task) != AIDS_OK) {
+        if (aids_array_append(&tasks, &entry) != AIDS_OK) {
             aids_log(AIDS_ERROR, "Failed to append task data: %s", aids_failure_reason());
             task_cleanup(&task);
-            AIDS_FREE(serialized_task.str);
             return_defer(1);
         }
     }
 
     for (size_t i = 0; i < tasks.count; ++i) {
-        Task *task = NULL;
-        Aids_String_Slice *huid = NULL;
+        Task_Entry *entry = NULL;
 
-        AIDS_ASSERT(aids_array_get(&tasks, i, (void **)&task) == AIDS_OK,
+        AIDS_ASSERT(aids_array_get(&tasks, i, (void **)&entry) == AIDS_OK,
                    "Failed to get task at index %zu: %s", i, aids_failure_reason());
-        AIDS_ASSERT(aids_array_get(&task_huids, i, (void **)&huid) == AIDS_OK,
-                   "Failed to get huid at index %zu: %s", i, aids_failure_reason());
 
-        task_print(&cwd, huid, task);
+        task_print(cwd, entry->huid, entry->task);
     }
 
 defer:
@@ -705,16 +697,14 @@ defer:
     }
 
     cleanup_string_slice_array(&tasks_files);
-    cleanup_string_slice_array(&serialized_tasks);
 
     for (size_t i = 0; i < tasks.count; ++i) {
-        Task *task = NULL;
-        if (aids_array_get(&tasks, i, (void **)&task) == AIDS_OK) {
-            task_cleanup(task);
+        Task_Entry *entry = NULL;
+        if (aids_array_get(&tasks, i, (void **)&entry) == AIDS_OK) {
+            task_cleanup(&entry->task);
         }
     }
     aids_array_free(&tasks);
-    aids_array_free(&task_huids);
 
     argparse_parser_free(&parser);
     return result;
