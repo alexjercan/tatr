@@ -4,6 +4,8 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <limits.h>
 
 #define TATR_VERSION "0.1.0"
 
@@ -606,11 +608,24 @@ defer:
     return result;
 }
 
-static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task task) {
-    printf(SS_Fmt "/" SS_Fmt "/%s: [PRIORITY: %u, TAGS: ",
-           SS_Arg(tasks_dir), SS_Arg(huid),
-           TASK_FILE_NAME_CSTR, task.meta.priority);
+static void print_file_path(const char *path) {
+    if (isatty(STDOUT_FILENO)) {
+        printf(AIDS_TERMINAL_BLUE "\033]8;;editor://%s\033\\%s\033]8;;\033\\" AIDS_TERMINAL_RESET, path, path);
+    } else {
+        printf("%s", path);
+    }
+}
 
+static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task task) {
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s", SS_Arg(tasks_dir), SS_Arg(huid), TASK_FILE_NAME_CSTR) < 0) {
+        aids_log(AIDS_ERROR, "Failed to build task file path for printing: %s", strerror(errno));
+        return;
+    }
+
+    print_file_path(path_buffer);
+
+    printf(": [PRIORITY: %u, TAGS: ", task.meta.priority);
     for (size_t i = 0; i < task.meta.tags.count; ++i) {
         Aids_String_Slice *tag = NULL;
         AIDS_ASSERT(aids_array_get(&task.meta.tags, i, (void **)&tag) == AIDS_OK,
@@ -620,7 +635,6 @@ static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task
             printf(", ");
         }
     }
-
     printf("] " SS_Fmt "\n", SS_Arg(task.title));
 }
 
