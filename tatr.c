@@ -186,6 +186,11 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
         aids_log(AIDS_ERROR, "task_deserialize: Failed to parse title from buffer");
         return_defer(AIDS_ERR);
     }
+    if (!aids_string_slice_starts_with(&task->title, (Aids_String_Slice) { .str = (unsigned char *)"# ", .len = 2 })) {
+        aids_log(AIDS_ERROR, "task_deserialize: Title does not start with expected prefix '# '");
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip(&task->title, 2);
     aids_string_slice_skip_while(&buffer, isspace);
 
     // Metadata
@@ -278,6 +283,28 @@ static Aids_Result huid(char *huid_str) {
 
 defer:
     return result;
+}
+
+static boolean ishuid(const Aids_String_Slice *slice) {
+    if (slice->len != HUID_LENGTH - 1) {
+        return false;
+    }
+
+    // Check format YYYYMMDD-HHMMSS
+    for (size_t i = 0; i < slice->len; ++i) {
+        char c = slice->str[i];
+        if (i == 8) {
+            if (c != '-') {
+                return false;
+            }
+        } else {
+            if (!isdigit(c)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 static Aids_Result task_new(Aids_String_Slice huid, Task task) {
@@ -473,8 +500,140 @@ defer:
 }
 
 static int main_ls(int argc, char **argv) {
-    // TODO(20260330-202358): Implement ls subcommand
-    AIDS_TODO("Implement listing tasks");
+    int result = 0;
+    Aids_String_Builder tasks_dir_sb = {0};
+    Aids_String_Builder task_dir_sb = {0};
+    Aids_String_Builder task_file_sb = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice cwd = {0};
+    Aids_Array tasks_files = {0}; /* Aids_String_Slice */
+    Aids_Array task_huids = {0}; /* Aids_String_Slice */
+    Aids_Array tasks = {0}; /* Task */
+    Argparse_Parser parser = {0};
+
+    argparse_parser_init(&parser, "tatr ls", "List tasks", TATR_VERSION);
+
+    if (argparse_parse(&parser, argc, argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    // Get current working directory
+    if (aids_io_getcwd(&cwd) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_new: Failed to get current working directory: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+
+    // Build task directory path: cwd/tasks
+    aids_string_builder_init(&tasks_dir_sb);
+    if (aids_string_builder_append(&tasks_dir_sb, SS_Fmt "/" SS_Fmt, SS_Arg(cwd), SS_Arg(TASKS_PATH)) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_new: Failed to build task directory path: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    aids_string_builder_to_slice(&tasks_dir_sb, &tasks_dir);
+
+    // List task directories
+    aids_array_init(&tasks_files, sizeof(Aids_String_Slice));
+    if (aids_io_listdir(&tasks_dir, &tasks_files) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list tasks directory '" SS_Fmt "': %s", SS_Arg(tasks_dir), aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+
+    // For each task directory, read the TASK.md file and deserialize the task
+    aids_string_builder_init(&task_dir_sb);
+    aids_string_builder_init(&task_file_sb);
+    aids_array_init(&tasks, sizeof(Task));
+    aids_array_init(&task_huids, sizeof(Aids_String_Slice));
+    for (size_t i = 0; i < tasks_files.count; ++i) {
+        Aids_String_Slice *huid = NULL;
+        AIDS_ASSERT(aids_array_get(&tasks_files, i, (void **)&huid) == AIDS_OK, "Failed to get huid at index %zu: %s", i, aids_failure_reason());
+
+        // Build task directory path: cwd/tasks/huid
+        aids_string_builder_clear(&task_dir_sb);
+        if (aids_string_builder_append(&task_dir_sb, SS_Fmt "/" SS_Fmt "/" SS_Fmt, SS_Arg(cwd), SS_Arg(TASKS_PATH), SS_Arg(*huid)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to build task directory path for huid '" SS_Fmt "': %s", SS_Arg(*huid), aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+        Aids_String_Slice task_dir_path = {0};
+        aids_string_builder_to_slice(&task_dir_sb, &task_dir_path);
+
+        // Check that it's a directory and has a valid huid format
+        if (!ishuid(huid) || !aids_io_isdir(&task_dir_path)) {
+            continue; // Skip non-task directories
+        }
+
+        // Build task file path: cwd/tasks/huid/TASK.md
+        aids_string_builder_clear(&task_file_sb);
+        if (aids_string_builder_append(&task_file_sb, SS_Fmt "/" SS_Fmt, SS_Arg(task_dir_path), SS_Arg(TASK_FILE_NAME)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to build task file path for huid '" SS_Fmt "': %s", SS_Arg(*huid), aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+        Aids_String_Slice task_file_path = {0};
+        aids_string_builder_to_slice(&task_file_sb, &task_file_path);
+
+        // Read task file
+        Aids_String_Slice serialized_task = {0};
+        if (aids_io_read(&task_file_path, &serialized_task, "r") != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to read task file '" SS_Fmt "': %s", SS_Arg(task_file_path), aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+
+        // Deserialize task
+        Task task = {0};
+        if (task_deserialize(serialized_task, &task) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to deserialize task from file '" SS_Fmt ": %s", SS_Arg(task_file_path), aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+
+        // Append task to array
+        if (aids_array_append(&tasks, &task) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append task to array: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+
+        // Append huid to array
+        if (aids_array_append(&task_huids, huid) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append huid to array: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+    }
+
+    // ./tasks/20260330-202358/TASK.md: [PRIORITY: 100, TAGS: feature] Implement ls subcommand
+    for (size_t i = 0; i < tasks.count; ++i) {
+        Task *task = NULL;
+        AIDS_ASSERT(aids_array_get(&tasks, i, (void **)&task) == AIDS_OK, "Failed to get task at index %zu: %s", i, aids_failure_reason());
+        Aids_String_Slice *huid = NULL;
+        AIDS_ASSERT(aids_array_get(&task_huids, i, (void **)&huid) == AIDS_OK, "Failed to get huid at index %zu: %s", i, aids_failure_reason());
+
+        printf(SS_Fmt "/" SS_Fmt "/" SS_Fmt "/%s: [PRIORITY: %u, TAGS: ", SS_Arg(cwd), SS_Arg(TASKS_PATH), SS_Arg(*huid), TASK_FILE_NAME_CSTR, task->meta.priority);
+        for (size_t j = 0; j < task->meta.tags.count; ++j) {
+            Aids_String_Slice *tag = NULL;
+            AIDS_ASSERT(aids_array_get(&task->meta.tags, j, (void **)&tag) == AIDS_OK, "Failed to get tag at index %zu for task %zu: %s", j, i, aids_failure_reason());
+            printf(SS_Fmt, SS_Arg(*tag));
+            if (j < task->meta.tags.count - 1) {
+                printf(", ");
+            }
+        }
+        printf("] " SS_Fmt "\n", SS_Arg(task->title));
+    }
+
+defer:
+    if (cwd.str != NULL) {
+        AIDS_FREE(cwd.str);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    aids_string_builder_free(&task_file_sb);
+    aids_string_builder_free(&task_dir_sb);
+    for (size_t i = 0; i < tasks.count; ++i) {
+        Task *task = NULL;
+        if (aids_array_get(&tasks, i, (void **)&task) == AIDS_OK) {
+            task_cleanup(task);
+        }
+    }
+    aids_array_free(&tasks);
+    aids_array_free(&tasks_files);
+    return result;
 }
 
 static void print_usage(const char *program) {

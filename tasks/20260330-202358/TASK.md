@@ -1,6 +1,6 @@
 # Implement ls subcommand
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
 
@@ -16,3 +16,12 @@ Implement ls subcommand (status: OPEN, priority: 100, tags: feature) - tasks/202
 Still need to think about the parenthesis and what we put in there. Maybe some
 things are useless to see, unless you add something like `-l` for long format.
 We will see.
+
+Ok I see that the "official" way for `ls` is:
+
+```
+./tasks/20260330-202358/TASK.md:1: [PRIORITY: 100, TAGS: feature] Implement ls subcommand
+```
+
+Maybe we can exclude `[...]` and add it only if we use `-l` for long format.
+For now let's just keep the official way.

@@ -326,6 +326,7 @@ typedef struct {
 } Aids_String_Builder;
 
 AIDSHDEF void aids_string_builder_init(Aids_String_Builder *sb);
+AIDSHDEF void aids_string_builder_clear(Aids_String_Builder *sb);
 AIDSHDEF Aids_Result aids_string_builder_append(Aids_String_Builder *sb, const char *format, ...) AIDS_PRINTF_FORMAT(2, 3);
 AIDSHDEF Aids_Result aids_string_builder_append_slice(Aids_String_Builder *sb, Aids_String_Slice slice);
 AIDSHDEF Aids_Result aids_string_builder_appendc(Aids_String_Builder *sb, char c);
@@ -343,7 +344,8 @@ typedef struct {
 
 AIDSHDEF Aids_Result aids_io_read(const Aids_String_Slice *filename, Aids_String_Slice *ss, const char *mode);
 AIDSHDEF Aids_Result aids_io_write(const Aids_String_Slice *filename, const Aids_String_Slice *ss, const char *mode);
-AIDSHDEF Aids_Result aids_io_list(const Aids_String_Slice *path, Aids_Array *files, Aids_List_Files_Options *options);
+AIDSHDEF Aids_Result aids_io_listdir(const Aids_String_Slice *path, Aids_Array *names);
+AIDSHDEF boolean aids_io_isdir(const Aids_String_Slice *path);
 AIDSHDEF Aids_Result aids_io_basename(const Aids_String_Slice *filepath, Aids_String_Slice *filename);
 AIDSHDEF Aids_Result aids_io_mkdir(const Aids_String_Slice *path, boolean recursive);
 AIDSHDEF Aids_Result aids_io_getcwd(Aids_String_Slice *cwd);
@@ -1228,6 +1230,10 @@ AIDSHDEF void aids_string_builder_init(Aids_String_Builder *sb) {
     aids_array_init(&sb->items, sizeof(unsigned char));
 }
 
+AIDSHDEF void aids_string_builder_clear(Aids_String_Builder *sb) {
+    sb->items.count = 0;
+}
+
 AIDSHDEF Aids_Result aids_string_builder_append(Aids_String_Builder *sb, const char *format, ...) {
     Aids_Result result = AIDS_OK;
 
@@ -1382,48 +1388,51 @@ defer:
     return result;
 }
 
-AIDSHDEF Aids_Result aids_io_list(const Aids_String_Slice *path, Aids_Array *files /* Aids_String_Slice */, Aids_List_Files_Options *options) {
+AIDSHDEF Aids_Result aids_io_listdir(const Aids_String_Slice *path, Aids_Array *names) {
     Aids_Result result = AIDS_OK;
 
     size_t temp = aids_temp_save();
     char *temp_path = aids_temp_sprintf(SS_Fmt, SS_Arg(*path));
-    DIR * d = opendir(temp_path);
+    DIR *d = opendir(temp_path);
     aids_temp_load(temp);
 
-    if(d == NULL) {
-        aids__g_failure_reason = aids_temp_sprintf("Failed to open directory '" SS_Fmt "'", SS_Arg(*path));
+    if (d == NULL) {
+        aids__g_failure_reason = aids_temp_sprintf("Failed to open directory '" SS_Fmt "': %s", SS_Arg(*path), strerror(errno));
         return_defer(AIDS_ERR);
     }
 
-    struct dirent * dir;
+    struct dirent *dir;
     while ((dir = readdir(d)) != NULL) {
-        if(dir->d_type != DT_DIR) {
-            Aids_String_Builder sb = {0};
-            aids_string_builder_init(&sb);
-            if (aids_string_builder_append(&sb, SS_Fmt "/%s", SS_Arg(*path), dir->d_name) != AIDS_OK) {
-                aids__g_failure_reason = "Failed to append to string builder";
-                return_defer(AIDS_ERR);
-            }
-
-            Aids_String_Slice ss = {0};
-            aids_string_builder_to_slice(&sb, &ss);
-            if (aids_array_append(files, (unsigned char *)&ss) != AIDS_OK) {
-                aids__g_failure_reason = "Failed to append file to array";
-                return_defer(AIDS_ERR);
-            }
+        Aids_String_Builder sb = {0};
+        aids_string_builder_init(&sb);
+        if (aids_string_builder_append(&sb, "%s", dir->d_name) != AIDS_OK) {
+            aids__g_failure_reason = "Failed to append to string builder";
+            return_defer(AIDS_ERR);
         }
-    }
 
-    if (options != NULL) {
-        if (options->order_by_name) {
-            aids_array_sort(files, (int (*)(const void *, const void *))aids_string_slice_compare);
+        Aids_String_Slice ss = {0};
+        aids_string_builder_to_slice(&sb, &ss);
+        if (aids_array_append(names, (unsigned char *)&ss) != AIDS_OK) {
+            aids__g_failure_reason = "Failed to append name to array";
+            return_defer(AIDS_ERR);
         }
     }
 
 defer:
-    if (d != NULL) closedir(d);
-
     return result;
+}
+
+AIDSHDEF boolean aids_io_isdir(const Aids_String_Slice *path) {
+    size_t temp = aids_temp_save();
+    char *temp_path = aids_temp_sprintf(SS_Fmt, SS_Arg(*path));
+    struct stat path_stat;
+    if (stat(temp_path, &path_stat) != 0) {
+        aids__g_failure_reason = aids_temp_sprintf("Failed to stat path '" SS_Fmt "': %s", SS_Arg(*path), strerror(errno));
+        return false;
+    }
+    aids_temp_load(temp);
+
+    return S_ISDIR(path_stat.st_mode);
 }
 
 AIDSHDEF Aids_Result aids_io_basename(const Aids_String_Slice *filepath, Aids_String_Slice *filename) {
@@ -1548,12 +1557,14 @@ defer:
 #       define string_slice_starts_with aids_string_slice_starts_with
 #       define string_slice_ends_with aids_string_slice_ends_with
 #       define string_slice_skip aids_string_slice_skip
+#       define string_slice_skip_while aids_string_slice_skip_while
 #       define string_slice_atol aids_string_slice_atol
 #       define string_slice_compare aids_string_slice_compare
 #       define string_slice_free aids_string_slice_free
 
 #       define String_Builder Aids_String_Builder
 #       define string_builder_init aids_string_builder_init
+#       define string_builder_clear aids_string_builder_clear
 #       define string_builder_append aids_string_builder_append
 #       define string_builder_append_slice aids_string_builder_append_slice
 #       define string_builder_appendc aids_string_builder_appendc
@@ -1563,14 +1574,23 @@ defer:
 
 #       define io_read aids_io_read
 #       define io_write aids_io_write
-#       define io_list aids_io_list
+#       define io_listdir aids_io_listdir
+#       define io_isdir aids_io_isdir
 #       define io_basename aids_io_basename
+#       define io_mkdir aids_io_mkdir
+#       define io_getcwd aids_io_getcwd
 
 #   endif // AIDS_STRIP_PREFIX
 #endif // AIDS_STRIP_PREFIX_GUARD_
 
 /*
     Revision history:
+        1.2.0 (2026-04-31): Add aids_string_slice_skip_while()
+                            Add aids_io_listdir()
+                            Add aids_io_isdir()
+                            Add aids_io_mkdir()
+                            Add aids_io_getcwd()
+                            Remove aids_io_list()
         1.1.0 (2026-04-30): Add Aids_Hash_Map data structure and related functions
         1.0.0 (2026-03-29): Initial Release
 */
@@ -1615,3 +1635,4 @@ defer:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 */
+
