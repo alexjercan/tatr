@@ -616,6 +616,73 @@ typedef struct {
     Task task;
 } Task_Entry;
 
+typedef enum {
+    Sort_By_CREATED,
+    Sort_By_PRIORITY,
+    Sort_By_TITLE
+} Sort_By;
+
+static Aids_String_Slice Sort_By_Strings[] = {
+    [Sort_By_CREATED] = (Aids_String_Slice) { .str = (unsigned char *)"created", .len = 7 },
+    [Sort_By_PRIORITY] = (Aids_String_Slice) { .str = (unsigned char *)"priority", .len = 8 },
+    [Sort_By_TITLE] = (Aids_String_Slice) { .str = (unsigned char *)"title", .len = 5 }
+};
+
+static Sort_By sort_by_from_string(const Aids_String_Slice *slice) {
+    for (size_t i = 0; i < sizeof(Sort_By_Strings) / sizeof(Sort_By_Strings[0]); ++i) {
+        if (aids_string_slice_compare(slice, &Sort_By_Strings[i]) == 0) {
+            return (Sort_By)i;
+        }
+    }
+
+    return Sort_By_CREATED; // Default to CREATED if not found
+}
+
+static int tasks_compare_created(const void *a, const void *b) {
+    const Task_Entry *entry_a = (const Task_Entry *)a;
+    const Task_Entry *entry_b = (const Task_Entry *)b;
+    return aids_string_slice_compare(&entry_a->huid, &entry_b->huid);
+}
+
+static int tasks_compare_priority(const void *a, const void *b) {
+    const Task_Entry *entry_a = (const Task_Entry *)a;
+    const Task_Entry *entry_b = (const Task_Entry *)b;
+
+    // Descending order (higher priority first)
+    if (entry_a->task.meta.priority < entry_b->task.meta.priority) {
+        return 1;
+    } else if (entry_a->task.meta.priority > entry_b->task.meta.priority) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+static int tasks_compare_title(const void *a, const void *b) {
+    const Task_Entry *entry_a = (const Task_Entry *)a;
+    const Task_Entry *entry_b = (const Task_Entry *)b;
+    return aids_string_slice_compare(&entry_a->task.title, &entry_b->task.title);
+}
+
+typedef int (*Task_Compare_Fn)(const void *, const void *);
+
+static Task_Compare_Fn get_task_compare_fn(Sort_By sort_by) {
+    switch (sort_by) {
+        case Sort_By_CREATED:
+            return tasks_compare_created;
+        case Sort_By_PRIORITY:
+            return tasks_compare_priority;
+        case Sort_By_TITLE:
+            return tasks_compare_title;
+        default:
+            return tasks_compare_created; // Default to CREATED
+    }
+}
+
+typedef struct {
+    Sort_By sort_by;
+} List_Options;
+
 static int main_ls(int argc, char **argv) {
     int result = 0;
     Aids_String_Slice tasks_dir = {0};
@@ -623,11 +690,28 @@ static int main_ls(int argc, char **argv) {
     Aids_Array tasks_files = {0};        /* Aids_String_Slice */
     Aids_Array tasks = {0};              /* Task_Entry */
     Argparse_Parser parser = {0};
+    List_Options options = {0};
 
     argparse_parser_init(&parser, "tatr ls", "List tasks", TATR_VERSION);
 
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 's',
+        .long_name = "sort",
+        .description = "Sort by (created, priority, title; default: created)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
     if (argparse_parse(&parser, argc, argv) != ARG_OK) {
         return_defer(1);
+    }
+
+    char *sort_by_str = argparse_get_value(&parser, "sort");
+    if (sort_by_str != NULL) {
+        Aids_String_Slice sort_by_slice = aids_string_slice_from_cstr(sort_by_str);
+        options.sort_by = sort_by_from_string(&sort_by_slice);
+    } else {
+        options.sort_by = Sort_By_CREATED;
     }
 
     if (aids_io_getcwd(&cwd) != AIDS_OK) {
@@ -678,6 +762,8 @@ static int main_ls(int argc, char **argv) {
             return_defer(1);
         }
     }
+
+    aids_array_sort(&tasks, get_task_compare_fn(options.sort_by));
 
     for (size_t i = 0; i < tasks.count; ++i) {
         Task_Entry *entry = NULL;
