@@ -1390,10 +1390,11 @@ defer:
 
 AIDSHDEF Aids_Result aids_io_listdir(const Aids_String_Slice *path, Aids_Array *names) {
     Aids_Result result = AIDS_OK;
+    DIR *d = NULL;
 
     size_t temp = aids_temp_save();
     char *temp_path = aids_temp_sprintf(SS_Fmt, SS_Arg(*path));
-    DIR *d = opendir(temp_path);
+    d = opendir(temp_path);
     aids_temp_load(temp);
 
     if (d == NULL) {
@@ -1419,6 +1420,9 @@ AIDSHDEF Aids_Result aids_io_listdir(const Aids_String_Slice *path, Aids_Array *
     }
 
 defer:
+    if (d != NULL) {
+        closedir(d);
+    }
     return result;
 }
 
