@@ -1,6 +1,6 @@
 # Implement Task Tracker
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
 

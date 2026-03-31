@@ -808,8 +808,6 @@ static void print_usage(const char *program) {
 }
 
 int main(int argc, char **argv) {
-    // TODO(20260329-123700): Implement Task Tracker
-
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
