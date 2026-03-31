@@ -68,7 +68,7 @@
         # those are more easily expressed in perSystem.
         
         overlays.default = final: prev: {
-          tatr = self.packages.${final.system}.default;
+          tatr = self.packages.${final.stdenv.hostPlatform.system}.default;
         };
       };
     };
