@@ -50,6 +50,7 @@
 
           meta = with pkgs.lib; {
             description = "Task Tracker - A TODO management CLI tool for managing tasks in code";
+            homepage = "https://github.com/alexjercan/tatr";
             license = licenses.mit;
             platforms = platforms.unix;
           };
@@ -66,7 +67,7 @@
         # The usual flake attributes can be defined here, including system-
         # agnostic ones like nixosModule and system-enumerating ones, although
         # those are more easily expressed in perSystem.
-        
+
         overlays.default = final: prev: {
           tatr = self.packages.${final.stdenv.hostPlatform.system}.default;
         };
