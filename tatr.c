@@ -886,8 +886,6 @@ int main(int argc, char **argv) {
         return_defer(1);
     }
 
-    // Get the arguments for the subcommand
-    // We need to build a new argv array with the first element being "program subcommand"
     char **new_argv = argv + subcommand_offset;
     int new_argc = argc - subcommand_offset;
     ctx.argv = new_argv;
