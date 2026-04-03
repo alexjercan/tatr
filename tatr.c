@@ -870,6 +870,7 @@ int main(int argc, char **argv) {
     });
 
     if (argparse_parse(&parser, argc, argv) != ARG_OK) {
+        tatr_print_help(&parser);
         return_defer(1);
     }
 
