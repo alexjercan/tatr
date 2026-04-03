@@ -34,6 +34,7 @@ typedef enum {
     ARGUMENT_TYPE_POSITIONAL,      // Positional argument
     ARGUMENT_TYPE_POSITIONAL_REST, // Positional argument that consumes the rest
     ARGUMENT_TYPE_VALUE_ARRAY,     // Argument with an array of values
+    ARGUMENT_TYPE_SUBCOMMAND,      // Subcommand that stops further parsing
 } Argparse_Type;
 
 typedef struct {
@@ -56,6 +57,7 @@ typedef struct {
         unsigned int flag;      // set value for a flag
         Argparse_Array values;  // values for array arguments
     };
+    unsigned long offset;   // offset for subcommand (outside union)
 } Argparse_Argument;
 
 typedef struct {
@@ -74,6 +76,7 @@ ARGHDEF char *argparse_get_value(Argparse_Parser *parser, char *name);
 ARGHDEF char *argparse_get_value_or_default(Argparse_Parser *parser, char *name, char *default_value);
 ARGHDEF unsigned int argparse_get_flag(Argparse_Parser *parser, char *name);
 ARGHDEF unsigned long argparse_get_values(Argparse_Parser *parser, char *name, char **values);
+ARGHDEF char *argparse_get_subcommand(Argparse_Parser *parser, char *name, unsigned long *offset);
 
 ARGHDEF void argparse_print_help(Argparse_Parser *parser);
 ARGHDEF void argparse_print_version(Argparse_Parser *parser);
@@ -131,6 +134,10 @@ ARGHDEF void argparse_add_argument(Argparse_Parser *parser, Argparse_Options opt
         memset(&arg.values, 0, sizeof(Argparse_Array));
         arg.values.count = 0;
         break;
+    case ARGUMENT_TYPE_SUBCOMMAND:
+        arg.value = NULL;
+        arg.offset = 0;
+        break;
     default:
         fprintf(stderr, "Error: unknown argument type: %d\n", options.type);
         exit(EXIT_FAILURE);
@@ -142,6 +149,7 @@ ARGHDEF void argparse_add_argument(Argparse_Parser *parser, Argparse_Options opt
 static Argparse_Result argparse__validate_parser(Argparse_Parser *parser) {
     int found_optional_positional = 0;
     int found_positional_rest = 0;
+    int found_subcommand = 0;
 
     for (unsigned long i = 0; i < parser->count; i++) {
         Argparse_Argument item = parser->arguments[i];
@@ -152,14 +160,38 @@ static Argparse_Result argparse__validate_parser(Argparse_Parser *parser) {
             return ARG_ERR;
         }
 
+        if (options.type == ARGUMENT_TYPE_POSITIONAL && found_subcommand) {
+            fprintf(stderr, "Error: positional argument after subcommand: %s\n", options.long_name);
+            return ARG_ERR;
+        }
+
         if (options.type == ARGUMENT_TYPE_POSITIONAL_REST &&
             found_positional_rest) {
             fprintf(stderr, "Error: multiple positional rest arguments: %s\n", options.long_name);
             return ARG_ERR;
         }
 
+        if (options.type == ARGUMENT_TYPE_POSITIONAL_REST && found_subcommand) {
+            fprintf(stderr, "Error: positional rest argument cannot be used with subcommand: %s\n", options.long_name);
+            return ARG_ERR;
+        }
+
+        if (options.type == ARGUMENT_TYPE_SUBCOMMAND && found_subcommand) {
+            fprintf(stderr, "Error: multiple subcommand arguments: %s\n", options.long_name);
+            return ARG_ERR;
+        }
+
+        if (options.type == ARGUMENT_TYPE_SUBCOMMAND && found_positional_rest) {
+            fprintf(stderr, "Error: subcommand cannot be used with positional rest: %s\n", options.long_name);
+            return ARG_ERR;
+        }
+
         if (options.type == ARGUMENT_TYPE_POSITIONAL_REST && !found_positional_rest) {
             found_positional_rest = 1;
+        }
+
+        if (options.type == ARGUMENT_TYPE_SUBCOMMAND && !found_subcommand) {
+            found_subcommand = 1;
         }
 
         if (options.type == ARGUMENT_TYPE_POSITIONAL && !options.required) {
@@ -215,6 +247,13 @@ static Argparse_Result argparse__post_validate_parser(Argparse_Parser *parser) {
                 return ARG_ERR;
             }
         }
+
+        if (options.type == ARGUMENT_TYPE_SUBCOMMAND && options.required) {
+            if (item.value == NULL) {
+                fprintf(stderr, "Error: missing required subcommand: %s\n", options.long_name);
+                return ARG_ERR;
+            }
+        }
     }
 
     return ARG_OK;
@@ -254,6 +293,11 @@ static Argparse_Result argparse__get_positional_arg(Argparse_Parser *parser, con
         }
 
         if (item->options.type == ARGUMENT_TYPE_POSITIONAL_REST) {
+            *arg = item;
+            return ARG_OK;
+        }
+
+        if (item->options.type == ARGUMENT_TYPE_SUBCOMMAND && item->value == NULL) {
             *arg = item;
             return ARG_OK;
         }
@@ -329,6 +373,11 @@ ARGHDEF Argparse_Result argparse_parse(Argparse_Parser *parser, int argc, char *
                 assert(arg->values.count < ARGPARSE_CAPACITY && "Maximum number of values exceeded for positional rest argument");
                 arg->values.values[arg->values.count++] = name;
                 break;
+            case ARGUMENT_TYPE_SUBCOMMAND:
+                arg->value = name;
+                arg->offset = i;
+                // Stop parsing after subcommand
+                goto done_parsing;
             default:
                 fprintf(stderr, "Error: argument type not supported: %s\n", name);
                 return ARG_ERR;
@@ -336,6 +385,7 @@ ARGHDEF Argparse_Result argparse_parse(Argparse_Parser *parser, int argc, char *
         }
     }
 
+done_parsing:
     if (argparse__post_validate_parser(parser) != ARG_OK) {
         return ARG_ERR;
     }
@@ -387,6 +437,22 @@ ARGHDEF unsigned long argparse_get_values(Argparse_Parser *parser, char *name, c
     }
 
     assert(0 && "No values found for the given name");
+}
+
+ARGHDEF char *argparse_get_subcommand(Argparse_Parser *parser, char *name, unsigned long *offset) {
+    for (unsigned int i = 0; i < parser->count; i++) {
+        Argparse_Argument item = parser->arguments[i];
+        if (item.options.long_name != NULL &&
+            strcmp(name, item.options.long_name) == 0 &&
+            item.options.type == ARGUMENT_TYPE_SUBCOMMAND) {
+            if (offset != NULL) {
+                *offset = item.offset;
+            }
+            return item.value;
+        }
+    }
+
+    return NULL;
 }
 
 ARGHDEF void argparse_print_help(Argparse_Parser *parser) {
@@ -442,6 +508,19 @@ ARGHDEF void argparse_print_help(Argparse_Parser *parser) {
         }
     }
 
+    for (unsigned int i = 0; i < parser->count; i++) {
+        Argparse_Argument item = parser->arguments[i];
+        Argparse_Options options = item.options;
+
+        if (options.type == ARGUMENT_TYPE_SUBCOMMAND) {
+            if (options.required) {
+                fprintf(stdout, " <%s>", options.long_name);
+            } else {
+                fprintf(stdout, " [%s]", options.long_name);
+            }
+        }
+    }
+
     fprintf(stdout, "\n");
     fprintf(stdout, "%s\n", parser->description);
     fprintf(stdout, "\n");
@@ -474,6 +553,11 @@ ARGHDEF void argparse_print_help(Argparse_Parser *parser) {
             break;
         case ARGUMENT_TYPE_VALUE_ARRAY:
             fprintf(stdout, "  -%c, --%s <value>...\n", options.short_name, options.long_name);
+            fprintf(stdout, "      %s\n", options.description);
+            fprintf(stdout, "\n");
+            break;
+        case ARGUMENT_TYPE_SUBCOMMAND:
+            fprintf(stdout, "  %c, %s\n", options.short_name, options.long_name);
             fprintf(stdout, "      %s\n", options.description);
             fprintf(stdout, "\n");
             break;

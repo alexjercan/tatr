@@ -1,6 +1,6 @@
 # Add an optional flag that sets the root path of tatr
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 80
 - TAGS: feature
 

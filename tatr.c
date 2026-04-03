@@ -18,6 +18,12 @@
 static Aids_String_Slice TASKS_PATH = (Aids_String_Slice) { .str = (unsigned char *)TASKS_PATH_CSTR, .len = sizeof(TASKS_PATH_CSTR) - 1 };
 static Aids_String_Slice TASK_FILE_NAME = (Aids_String_Slice) { .str = (unsigned char *)TASK_FILE_NAME_CSTR, .len = sizeof(TASK_FILE_NAME_CSTR) - 1 };
 
+typedef struct {
+    Aids_String_Slice cwd;
+    int argc;
+    char **argv;
+} Tatr_Context;
+
 typedef enum {
     Task_Status_OPEN,
     Task_Status_IN_PROGRESS,
@@ -427,9 +433,8 @@ defer:
     return result;
 }
 
-static Aids_Result task_create(Aids_String_Slice huid, Task *task) {
+static Aids_Result task_create(const Aids_String_Slice *cwd, Aids_String_Slice huid, Task *task) {
     Aids_Result result = AIDS_OK;
-    Aids_String_Slice cwd = {0};
     Aids_String_Slice tasks_dir = {0};
     Aids_String_Slice task_dir = {0};
     Aids_String_Slice task_file_path = {0};
@@ -439,12 +444,7 @@ static Aids_Result task_create(Aids_String_Slice huid, Task *task) {
         return_defer(AIDS_ERR);
     }
 
-    if (aids_io_getcwd(&cwd) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "Failed to get current working directory: %s", aids_failure_reason());
-        return_defer(AIDS_ERR);
-    }
-
-    if (tasks_dir_path_build(&cwd, &tasks_dir) != AIDS_OK) {
+    if (tasks_dir_path_build(cwd, &tasks_dir) != AIDS_OK) {
         return_defer(AIDS_ERR);
     }
 
@@ -466,9 +466,6 @@ static Aids_Result task_create(Aids_String_Slice huid, Task *task) {
     }
 
 defer:
-    if (cwd.str != NULL) {
-        AIDS_FREE(cwd.str);
-    }
     if (tasks_dir.str != NULL) {
         AIDS_FREE(tasks_dir.str);
     }
@@ -481,7 +478,7 @@ defer:
     return result;
 }
 
-static int main_new(int argc, char **argv) {
+static int main_new(const Tatr_Context *ctx) {
     int result = 0;
     Argparse_Parser parser = {0};
     Task task = {0};
@@ -521,7 +518,7 @@ static int main_new(int argc, char **argv) {
         .required = 0
     });
 
-    if (argparse_parse(&parser, argc, argv) != ARG_OK) {
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
 
@@ -573,7 +570,7 @@ static int main_new(int argc, char **argv) {
     }
     Aids_String_Slice id = aids_string_slice_from_cstr(huid_str);
 
-    if (task_create(id, &task) != AIDS_OK) {
+    if (task_create(&ctx->cwd, id, &task) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to create new task: %s", aids_failure_reason());
         return_defer(1);
     }
@@ -724,10 +721,9 @@ typedef struct {
     Sort_By sort_by;
 } List_Options;
 
-static int main_ls(int argc, char **argv) {
+static int main_ls(const Tatr_Context *ctx) {
     int result = 0;
     Aids_String_Slice tasks_dir = {0};
-    Aids_String_Slice cwd = {0};
     Aids_Array tasks_files = {0};        /* Aids_String_Slice */
     Aids_Array tasks = {0};              /* Task_Entry */
     Argparse_Parser parser = {0};
@@ -743,7 +739,7 @@ static int main_ls(int argc, char **argv) {
         .required = 0
     });
 
-    if (argparse_parse(&parser, argc, argv) != ARG_OK) {
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
 
@@ -755,12 +751,7 @@ static int main_ls(int argc, char **argv) {
         options.sort_by = Sort_By_CREATED;
     }
 
-    if (aids_io_getcwd(&cwd) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "Failed to get current working directory: %s", aids_failure_reason());
-        return_defer(1);
-    }
-
-    if (tasks_dir_path_build(&cwd, &tasks_dir) != AIDS_OK) {
+    if (tasks_dir_path_build(&ctx->cwd, &tasks_dir) != AIDS_OK) {
         return_defer(1);
     }
 
@@ -816,9 +807,6 @@ static int main_ls(int argc, char **argv) {
     }
 
 defer:
-    if (cwd.str != NULL) {
-        AIDS_FREE(cwd.str);
-    }
     if (tasks_dir.str != NULL) {
         AIDS_FREE(tasks_dir.str);
     }
@@ -838,7 +826,10 @@ defer:
 }
 
 static void print_usage(const char *program) {
-    fprintf(stderr, "Usage: %s <subcommand> [options]\n", program);
+    fprintf(stderr, "Usage: %s [-r ROOT] <subcommand> [options]\n", program);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Global options:\n");
+    fprintf(stderr, "  -r, --root     Change working directory before running command\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Subcommands:\n");
     fprintf(stderr, "  help       Show this help message\n");
@@ -849,30 +840,82 @@ static void print_usage(const char *program) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Tatr_Context ctx = {0};
+    Aids_String_Slice cwd_allocated = {0};
+
+    argparse_parser_init(&parser, "tatr", "Task tracker", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'r',
+        .long_name = "root",
+        .description = "Change working directory",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'c',
+        .long_name = "command",
+        .description = "Subcommand to execute",
+        .type = ARGUMENT_TYPE_SUBCOMMAND,
+        .required = 1
+    });
+
+    if (argparse_parse(&parser, argc, argv) != ARG_OK) {
+        return_defer(1);
     }
 
-    const char *subcommand = argv[1];
+    char *root_str = argparse_get_value(&parser, "root");
+    if (root_str != NULL) {
+        ctx.cwd = aids_string_slice_from_cstr(root_str);
+    } else {
+        if (aids_io_getcwd(&cwd_allocated) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to get current working directory: %s", aids_failure_reason());
+            return_defer(1);
+        }
+        ctx.cwd = cwd_allocated;
+    }
+
+    unsigned long subcommand_offset = 0;
+    char *subcommand = argparse_get_subcommand(&parser, "command", &subcommand_offset);
+    if (subcommand == NULL) {
+        print_usage(argv[0]);
+        return_defer(1);
+    }
+
+    // Get the arguments for the subcommand
+    // We need to build a new argv array with the first element being "program subcommand"
+    char **new_argv = argv + subcommand_offset;
+    int new_argc = argc - subcommand_offset;
+    ctx.argv = new_argv;
+    ctx.argc = new_argc;
 
     if (strcmp(subcommand, "help") == 0) {
         print_usage(argv[0]);
-        return 0;
+        return_defer(0);
     } else if (strcmp(subcommand, "version") == 0) {
         printf("%s version %s\n", argv[0], TATR_VERSION);
-        return 0;
+        return_defer(0);
     } else if (strcmp(subcommand, "new") == 0) {
-        return main_new(argc - 1, argv + 1);
+        result = main_new(&ctx);
+        return_defer(result);
     } else if (strcmp(subcommand, "ls") == 0) {
-        return main_ls(argc - 1, argv + 1);
+        result = main_ls(&ctx);
+        return_defer(result);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);
         print_usage(argv[0]);
-        return 1;
+        return_defer(1);
     }
 
-    return 0;
+defer:
+    if (cwd_allocated.str != NULL) {
+        AIDS_FREE(cwd_allocated.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
 }
 
 #define ARGPARSE_IMPLEMENTATION
