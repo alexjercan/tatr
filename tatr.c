@@ -870,6 +870,7 @@ int main(int argc, char **argv) {
     char *root_str = argparse_get_value(&parser, "root");
     if (root_str != NULL) {
         ctx.cwd = aids_string_slice_from_cstr(root_str);
+        aids_string_slice_trim_char_right(&ctx.cwd, '/');
     } else {
         if (aids_io_getcwd(&cwd_allocated) != AIDS_OK) {
             aids_log(AIDS_ERROR, "Failed to get current working directory: %s", aids_failure_reason());

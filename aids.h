@@ -1,4 +1,4 @@
-/* Aids - v1.1.0 - Public Domain - github.com/alexjercan/aids.h
+/* Aids - v1.3.0 - Public Domain - github.com/alexjercan/aids.h
 
     # aids.h
 
@@ -313,6 +313,8 @@ AIDSHDEF Aids_String_Slice aids_string_slice_from_cstr(const char *cstr);
 AIDSHDEF void aids_string_slice_trim_left(Aids_String_Slice *ss);
 AIDSHDEF void aids_string_slice_trim_right(Aids_String_Slice *ss);
 AIDSHDEF void aids_string_slice_trim(Aids_String_Slice *ss);
+AIDSHDEF void aids_string_slice_trim_char_left(Aids_String_Slice *ss, char ch);
+AIDSHDEF void aids_string_slice_trim_char_right(Aids_String_Slice *ss, char ch);
 AIDSHDEF boolean aids_string_slice_starts_with(Aids_String_Slice *ss, Aids_String_Slice prefix);
 AIDSHDEF boolean aids_string_slice_ends_with(Aids_String_Slice *ss, Aids_String_Slice suffix);
 AIDSHDEF void aids_string_slice_skip(Aids_String_Slice *ss, unsigned long count);
@@ -1163,6 +1165,19 @@ AIDSHDEF void aids_string_slice_trim(Aids_String_Slice *ss) {
     aids_string_slice_trim_right(ss);
 }
 
+AIDSHDEF void aids_string_slice_trim_char_left(Aids_String_Slice *ss, char ch) {
+    while (ss->len > 0 && *ss->str == (unsigned char)ch) {
+        ss->str++;
+        ss->len--;
+    }
+}
+
+AIDSHDEF void aids_string_slice_trim_char_right(Aids_String_Slice *ss, char ch) {
+    while (ss->len > 0 && ss->str[ss->len - 1] == (unsigned char)ch) {
+        ss->len--;
+    }
+}
+
 AIDSHDEF boolean aids_string_slice_starts_with(Aids_String_Slice *ss, Aids_String_Slice prefix) {
     if (ss->len < prefix.len) {
         return false;
@@ -1558,6 +1573,8 @@ defer:
 #       define string_slice_trim_left aids_string_slice_trim_left
 #       define string_slice_trim_right aids_string_slice_trim_right
 #       define string_slice_trim aids_string_slice_trim
+#       define string_slice_trim_char_left aids_string_slice_trim_char_left
+#       define string_slice_trim_char_right aids_string_slice_trim_char_right
 #       define string_slice_starts_with aids_string_slice_starts_with
 #       define string_slice_ends_with aids_string_slice_ends_with
 #       define string_slice_skip aids_string_slice_skip
@@ -1589,6 +1606,8 @@ defer:
 
 /*
     Revision history:
+        1.3.0 (2026-05-03): Add aids_string_slice_trim_char_left()
+                            Add aids_string_slice_trim_char_right()
         1.2.0 (2026-04-31): Add aids_string_slice_skip_while()
                             Add aids_io_listdir()
                             Add aids_io_isdir()
