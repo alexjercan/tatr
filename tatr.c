@@ -825,8 +825,8 @@ defer:
     return result;
 }
 
-static void print_usage(const char *program) {
-    fprintf(stderr, "Usage: %s [-r ROOT] <subcommand> [options]\n", program);
+static void tatr_print_help(Argparse_Parser *parser) {
+    fprintf(stderr, "Usage: %s [-r ROOT] <subcommand> [options]\n", parser->name);
     fprintf(stderr, "\n");
     fprintf(stderr, "Global options:\n");
     fprintf(stderr, "  -r, --root     Change working directory before running command\n");
@@ -839,6 +839,10 @@ static void print_usage(const char *program) {
     fprintf(stderr, "\n");
 }
 
+static void tatr_print_version(Argparse_Parser *parser) {
+    printf("%s %s\n", parser->name, TATR_VERSION);
+}
+
 int main(int argc, char **argv) {
     int result = 0;
     Argparse_Parser parser = {0};
@@ -846,6 +850,8 @@ int main(int argc, char **argv) {
     Aids_String_Slice cwd_allocated = {0};
 
     argparse_parser_init(&parser, "tatr", "Task tracker", TATR_VERSION);
+    parser.help_fn = tatr_print_help;
+    parser.version_fn = tatr_print_version;
 
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'r',
@@ -882,7 +888,7 @@ int main(int argc, char **argv) {
     unsigned long subcommand_offset = 0;
     char *subcommand = argparse_get_subcommand(&parser, "command", &subcommand_offset);
     if (subcommand == NULL) {
-        print_usage(argv[0]);
+        tatr_print_help(&parser);
         return_defer(1);
     }
 
@@ -892,10 +898,10 @@ int main(int argc, char **argv) {
     ctx.argc = new_argc;
 
     if (strcmp(subcommand, "help") == 0) {
-        print_usage(argv[0]);
+        tatr_print_help(&parser);
         return_defer(0);
     } else if (strcmp(subcommand, "version") == 0) {
-        printf("%s version %s\n", argv[0], TATR_VERSION);
+        tatr_print_version(&parser);
         return_defer(0);
     } else if (strcmp(subcommand, "new") == 0) {
         result = main_new(&ctx);
@@ -905,7 +911,7 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);
-        print_usage(argv[0]);
+        tatr_print_help(&parser);
         return_defer(1);
     }
 

@@ -50,6 +50,8 @@ typedef struct {
     unsigned long count;
 } Argparse_Array;
 
+typedef struct Argparse_Parser Argparse_Parser;
+
 typedef struct {
     Argparse_Options options;
     union {
@@ -60,14 +62,17 @@ typedef struct {
     unsigned long offset;   // offset for subcommand (outside union)
 } Argparse_Argument;
 
-typedef struct {
+struct Argparse_Parser {
     char *name;
     char *description;
     char *version;
 
     Argparse_Argument arguments[ARGPARSE_CAPACITY];
     unsigned long count;
-} Argparse_Parser;
+
+    void (*help_fn)(Argparse_Parser *);
+    void (*version_fn)(Argparse_Parser *);
+};
 
 ARGHDEF void argparse_parser_init(Argparse_Parser *parser, char *name, char *description, char *version);
 ARGHDEF void argparse_add_argument(Argparse_Parser *parser, Argparse_Options options);
@@ -92,6 +97,8 @@ ARGHDEF void argparse_parser_init(Argparse_Parser *parser, char *name, char *des
     parser->version = version;
     memset(&parser->arguments, 0, ARGPARSE_CAPACITY * sizeof(Argparse_Argument));
     parser->count = 0;
+    parser->help_fn = NULL;
+    parser->version_fn = NULL;
 
     argparse_add_argument(
         parser,
@@ -320,12 +327,20 @@ ARGHDEF Argparse_Result argparse_parse(Argparse_Parser *parser, int argc, char *
         char *name = argv[i];
 
         if (strcmp(name, "-h") == 0 || strcmp(name, "--help") == 0) {
-            argparse_print_help(parser);
+            if (parser->help_fn != NULL) {
+                parser->help_fn(parser);
+            } else {
+                argparse_print_help(parser);
+            }
             exit(0);
         }
 
         if (strcmp(name, "-v") == 0 || strcmp(name, "--version") == 0) {
-            argparse_print_version(parser);
+            if (parser->version_fn != NULL) {
+                parser->version_fn(parser);
+            } else {
+                argparse_print_version(parser);
+            }
             exit(0);
         }
 
