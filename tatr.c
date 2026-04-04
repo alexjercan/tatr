@@ -60,6 +60,7 @@ typedef struct {
     Aids_String_Slice title;
     Aids_String_Slice description;
     Task_Meta meta;
+    unsigned char *_buffer; // Internal buffer that owns the memory for title/description/tags
 } Task;
 
 static void task_init_empty(Task *task) {
@@ -72,6 +73,7 @@ static void task_init_empty(Task *task) {
     task->description = (Aids_String_Slice) {0};
     task->meta.status = Task_Status_OPEN;
     task->meta.priority = 0;
+    task->_buffer = NULL;
     aids_array_init(&task->meta.tags, sizeof(Aids_String_Slice));
 }
 
@@ -80,6 +82,9 @@ static void task_cleanup(Task *task) {
         return;
     }
 
+    if (task->_buffer != NULL) {
+        AIDS_FREE(task->_buffer);
+    }
     aids_array_free(&task->meta.tags);
 }
 
@@ -108,10 +113,7 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
 
-    // Metadata
     // - STATUS: OPEN | IN_PROGRESS | CLOSED
-    // - PRIORITY: 100
-    // - TAGS: tag1, tag2, tag3
     if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(STATUS_FORMAT)) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append status format: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -124,6 +126,7 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append status newline: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
+    // - PRIORITY: 100
     if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(PRIORITY_FORMAT)) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append priority format: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -136,6 +139,7 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append priority newline: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
+    // - TAGS: tag1, tag2, tag3
     if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(TAGS_FORMAT)) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append tags format: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -163,7 +167,6 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
 
-    // Description
     if (aids_string_builder_append_slice(&builder, task.description) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append description: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -186,7 +189,6 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
         return AIDS_ERR;
     }
 
-    // Initialize task
     task_init_empty(task);
 
     // # Title
@@ -201,7 +203,6 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     aids_string_slice_skip(&task->title, 2);
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // Metadata
     // - STATUS: OPEN | IN_PROGRESS | CLOSED
     if (!aids_string_slice_starts_with(&buffer, STATUS_FORMAT)) {
         aids_log(AIDS_ERROR, "task_deserialize: Buffer does not start with expected status format");
@@ -261,7 +262,6 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     }
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // Description
     task->description = buffer;
 
 defer:
@@ -601,6 +601,9 @@ static Aids_Result task_load(const Aids_String_Slice *task_file_path, Task *task
         return_defer(AIDS_ERR);
     }
 
+    // Store the buffer so it can be freed when the task is cleaned up
+    task->_buffer = serialized_task.str;
+
 defer:
     return result;
 }
@@ -718,16 +721,239 @@ static Task_Compare_Fn get_task_compare_fn(Sort_By sort_by) {
 }
 
 typedef struct {
-    Sort_By sort_by;
-} List_Options;
+    Aids_String_Slice project_dir;
+    Aids_Array tasks; /* Task_Entry */
+} Project_Tasks;
+
+static void project_tasks_cleanup(Project_Tasks *project_tasks) {
+    if (project_tasks == NULL) {
+        return;
+    }
+
+    // NOTE: project_dir is NOT freed here because it's owned by the project_dirs array
+
+    for (size_t i = 0; i < project_tasks->tasks.count; ++i) {
+        Task_Entry *entry = NULL;
+        if (aids_array_get(&project_tasks->tasks, i, (void **)&entry) == AIDS_OK) {
+            task_cleanup(&entry->task);
+            if (entry->huid.str != NULL) {
+                AIDS_FREE(entry->huid.str);
+            }
+        }
+    }
+    aids_array_free(&project_tasks->tasks);
+}
+
+static Aids_Result find_tasks_dirs_recursive(const Aids_String_Slice *root_dir, Aids_Array *tasks_dirs) {
+    Aids_Result result = AIDS_OK;
+    Aids_Array entries = {0};
+    Aids_String_Builder path_sb = {0};
+    Aids_String_Slice candidate_path = {0};
+
+    aids_string_builder_init(&path_sb);
+    if (aids_string_builder_append(&path_sb, SS_Fmt "/" SS_Fmt,
+                                   SS_Arg(*root_dir), SS_Arg(TASKS_PATH)) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to build candidate tasks directory path: %s", aids_failure_reason());
+        aids_string_builder_free(&path_sb);
+        return_defer(AIDS_ERR);
+    }
+    aids_string_builder_to_slice(&path_sb, &candidate_path);
+
+    if (aids_io_isdir(&candidate_path)) {
+        Aids_String_Slice root_copy = {0};
+        Aids_String_Builder root_sb = {0};
+        aids_string_builder_init(&root_sb);
+        if (aids_string_builder_append(&root_sb, SS_Fmt, SS_Arg(*root_dir)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to copy root directory path: %s", aids_failure_reason());
+            aids_string_builder_free(&root_sb);
+            AIDS_FREE(candidate_path.str);
+            return_defer(AIDS_ERR);
+        }
+        aids_string_builder_to_slice(&root_sb, &root_copy);
+
+        if (aids_array_append(tasks_dirs, &root_copy) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append tasks directory: %s", aids_failure_reason());
+            AIDS_FREE(root_copy.str);
+            AIDS_FREE(candidate_path.str);
+            return_defer(AIDS_ERR);
+        }
+    }
+    AIDS_FREE(candidate_path.str);
+
+    aids_array_init(&entries, sizeof(Aids_String_Slice));
+    if (aids_io_listdir(root_dir, &entries) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list directory '" SS_Fmt "': %s",
+                SS_Arg(*root_dir), aids_failure_reason());
+        cleanup_string_slice_array(&entries);
+        return_defer(AIDS_ERR);
+    }
+
+    for (size_t i = 0; i < entries.count; ++i) {
+        Aids_String_Slice *entry = NULL;
+        if (aids_array_get(&entries, i, (void **)&entry) != AIDS_OK) {
+            continue;
+        }
+
+        if (entry->len > 0 && entry->str[0] == '.') {
+            continue;
+        }
+
+        static const char *skip_dirs[] = {"node_modules", "target", "build", "dist", ".git"};
+        boolean should_skip = false;
+        for (size_t j = 0; j < sizeof(skip_dirs) / sizeof(skip_dirs[0]); ++j) {
+            Aids_String_Slice skip_dir = aids_string_slice_from_cstr((char *)skip_dirs[j]);
+            if (aids_string_slice_compare(entry, &skip_dir) == 0) {
+                should_skip = true;
+                break;
+            }
+        }
+        if (should_skip) {
+            continue;
+        }
+
+        Aids_String_Builder subdir_sb = {0};
+        Aids_String_Slice subdir_path = {0};
+        aids_string_builder_init(&subdir_sb);
+        if (aids_string_builder_append(&subdir_sb, SS_Fmt "/" SS_Fmt,
+                                       SS_Arg(*root_dir), SS_Arg(*entry)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to build subdirectory path: %s", aids_failure_reason());
+            aids_string_builder_free(&subdir_sb);
+            continue;
+        }
+        aids_string_builder_to_slice(&subdir_sb, &subdir_path);
+
+        if (aids_io_isdir(&subdir_path)) {
+            if (find_tasks_dirs_recursive(&subdir_path, tasks_dirs) != AIDS_OK) {
+                aids_log(AIDS_WARNING, "Failed to search directory '" SS_Fmt "': %s",
+                        SS_Arg(subdir_path), aids_failure_reason());
+            }
+        }
+        AIDS_FREE(subdir_path.str);
+    }
+
+    cleanup_string_slice_array(&entries);
+
+defer:
+    return result;
+}
+
+static Aids_Result load_tasks_from_dir(const Aids_String_Slice *tasks_dir,
+                                       Aids_Array *tasks,
+                                       Sort_By sort_by) {
+    Aids_Result result = AIDS_OK;
+    Aids_Array tasks_files = {0};
+
+    aids_array_init(&tasks_files, sizeof(Aids_String_Slice));
+    if (aids_io_listdir(tasks_dir, &tasks_files) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list tasks directory: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+
+    for (size_t i = 0; i < tasks_files.count; ++i) {
+        Aids_String_Slice *huid = NULL;
+        if (aids_array_get(&tasks_files, i, (void **)&huid) != AIDS_OK) {
+            continue;
+        }
+
+        if (!ishuid(huid)) {
+            continue;
+        }
+
+        Aids_String_Slice task_file_path = {0};
+        if (task_file_path_build(tasks_dir, huid, &task_file_path) != AIDS_OK) {
+            cleanup_string_slice_array(&tasks_files);
+            return_defer(AIDS_ERR);
+        }
+
+        Task task = {0};
+        if (task_load(&task_file_path, &task) != AIDS_OK) {
+            AIDS_FREE(task_file_path.str);
+            cleanup_string_slice_array(&tasks_files);
+            return_defer(AIDS_ERR);
+        }
+        AIDS_FREE(task_file_path.str);
+
+        // Make a copy of the HUID since tasks_files will be cleaned up
+        Aids_String_Slice huid_copy = {0};
+        Aids_String_Builder huid_sb = {0};
+        aids_string_builder_init(&huid_sb);
+        if (aids_string_builder_append(&huid_sb, SS_Fmt, SS_Arg(*huid)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to copy HUID: %s", aids_failure_reason());
+            task_cleanup(&task);
+            aids_string_builder_free(&huid_sb);
+            cleanup_string_slice_array(&tasks_files);
+            return_defer(AIDS_ERR);
+        }
+        aids_string_builder_to_slice(&huid_sb, &huid_copy);
+
+        Task_Entry entry = {
+            .huid = huid_copy,
+            .task = task
+        };
+
+        if (aids_array_append(tasks, &entry) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append task data: %s", aids_failure_reason());
+            task_cleanup(&task);
+            AIDS_FREE(huid_copy.str);
+            cleanup_string_slice_array(&tasks_files);
+            return_defer(AIDS_ERR);
+        }
+    }
+
+    aids_array_sort(tasks, get_task_compare_fn(sort_by));
+
+    cleanup_string_slice_array(&tasks_files);
+
+defer:
+    return result;
+}
+
+static Aids_Result find_current_tasks_dir(const Aids_String_Slice *cwd, Aids_Array *tasks_dirs) {
+    Aids_Result result = AIDS_OK;
+    Aids_String_Slice project_dir = {0};
+    Aids_String_Builder project_dir_sb = {0};
+    Aids_String_Slice found_tasks_dir = {0};
+    boolean project_dir_allocated = false;
+
+    if (tasks_dir_path_build(cwd, &found_tasks_dir) != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
+    Aids_String_Slice project_dir_slice = found_tasks_dir;
+    if (project_dir_slice.len >= TASKS_PATH.len + 1) {
+        project_dir_slice.len -= (TASKS_PATH.len + 1);
+    }
+
+    aids_string_builder_init(&project_dir_sb);
+    if (aids_string_builder_append(&project_dir_sb, SS_Fmt, SS_Arg(project_dir_slice)) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to copy project directory: %s", aids_failure_reason());
+        aids_string_builder_free(&project_dir_sb);
+        return_defer(AIDS_ERR);
+    }
+    aids_string_builder_to_slice(&project_dir_sb, &project_dir);
+    project_dir_allocated = true;
+
+    if (aids_array_append(tasks_dirs, &project_dir) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to append project directory: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    project_dir_allocated = false; // Ownership transferred to array
+
+defer:
+    if (found_tasks_dir.str != NULL) {
+        AIDS_FREE(found_tasks_dir.str);
+    }
+    if (project_dir_allocated && project_dir.str != NULL) {
+        AIDS_FREE(project_dir.str);
+    }
+    return result;
+}
 
 static int main_ls(const Tatr_Context *ctx) {
     int result = 0;
-    Aids_String_Slice tasks_dir = {0};
-    Aids_Array tasks_files = {0};        /* Aids_String_Slice */
-    Aids_Array tasks = {0};              /* Task_Entry */
     Argparse_Parser parser = {0};
-    List_Options options = {0};
+    Sort_By sort_by = Sort_By_CREATED;
+    boolean recursive = false;
 
     argparse_parser_init(&parser, "tatr ls", "List tasks", TATR_VERSION);
 
@@ -739,6 +965,14 @@ static int main_ls(const Tatr_Context *ctx) {
         .required = 0
     });
 
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'R',
+        .long_name = "recursive",
+        .description = "Recursively search for tasks directories in all subdirectories",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
     if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
@@ -746,80 +980,111 @@ static int main_ls(const Tatr_Context *ctx) {
     char *sort_by_str = argparse_get_value(&parser, "sort");
     if (sort_by_str != NULL) {
         Aids_String_Slice sort_by_slice = aids_string_slice_from_cstr(sort_by_str);
-        options.sort_by = sort_by_from_string(&sort_by_slice);
+        sort_by = sort_by_from_string(&sort_by_slice);
+    }
+
+    recursive = argparse_get_flag(&parser, "recursive");
+
+    Aids_Array project_dirs = {0};  /* Aids_String_Slice */
+    Aids_Array all_projects = {0};  /* Project_Tasks */
+
+    aids_array_init(&project_dirs, sizeof(Aids_String_Slice));
+
+    if (recursive) {
+        if (find_tasks_dirs_recursive(&ctx->cwd, &project_dirs) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to find tasks directories recursively");
+            return_defer(1);
+        }
     } else {
-        options.sort_by = Sort_By_CREATED;
+        if (find_current_tasks_dir(&ctx->cwd, &project_dirs) != AIDS_OK) {
+            return_defer(1);
+        }
     }
 
-    if (tasks_dir_path_build(&ctx->cwd, &tasks_dir) != AIDS_OK) {
-        return_defer(1);
-    }
+    aids_array_init(&all_projects, sizeof(Project_Tasks));
 
-    aids_array_init(&tasks_files, sizeof(Aids_String_Slice));
-    if (aids_io_listdir(&tasks_dir, &tasks_files) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "Failed to list tasks directory: %s", aids_failure_reason());
-        return_defer(1);
-    }
-
-    aids_array_init(&tasks, sizeof(Task_Entry));
-
-    for (size_t i = 0; i < tasks_files.count; ++i) {
-        Aids_String_Slice *huid = NULL;
-        AIDS_ASSERT(aids_array_get(&tasks_files, i, (void **)&huid) == AIDS_OK,
-                   "Failed to get huid at index %zu: %s", i, aids_failure_reason());
-
-        if (!ishuid(huid)) {
+    for (size_t i = 0; i < project_dirs.count; ++i) {
+        Aids_String_Slice *project_dir = NULL;
+        if (aids_array_get(&project_dirs, i, (void **)&project_dir) != AIDS_OK) {
             continue;
         }
 
-        Aids_String_Slice task_file_path = {0};
-        if (task_file_path_build(&tasks_dir, huid, &task_file_path) != AIDS_OK) {
-            return_defer(1);
+        Aids_String_Slice full_tasks_dir = {0};
+        Aids_String_Builder path_sb = {0};
+        aids_string_builder_init(&path_sb);
+        if (aids_string_builder_append(&path_sb, SS_Fmt "/" SS_Fmt,
+                                       SS_Arg(*project_dir), SS_Arg(TASKS_PATH)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to build tasks directory path: %s", aids_failure_reason());
+            aids_string_builder_free(&path_sb);
+            continue;
         }
+        aids_string_builder_to_slice(&path_sb, &full_tasks_dir);
 
-        Task task = {0};
-        if (task_load(&task_file_path, &task) != AIDS_OK) {
-            AIDS_FREE(task_file_path.str);
-            return_defer(1);
+        Project_Tasks pt = {0};
+        pt.project_dir = *project_dir;
+        aids_array_init(&pt.tasks, sizeof(Task_Entry));
+
+        if (load_tasks_from_dir(&full_tasks_dir, &pt.tasks, sort_by) != AIDS_OK) {
+            aids_log(AIDS_WARNING, "Failed to load tasks from '" SS_Fmt "': %s",
+                    SS_Arg(full_tasks_dir), aids_failure_reason());
+            AIDS_FREE(full_tasks_dir.str);
+            project_tasks_cleanup(&pt);
+            continue;
         }
-        AIDS_FREE(task_file_path.str);
-        Task_Entry entry = {
-            .huid = *huid,
-            .task = task
-        };
+        AIDS_FREE(full_tasks_dir.str);
 
-        if (aids_array_append(&tasks, &entry) != AIDS_OK) {
-            aids_log(AIDS_ERROR, "Failed to append task data: %s", aids_failure_reason());
-            task_cleanup(&task);
+        if (aids_array_append(&all_projects, &pt) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append project tasks: %s", aids_failure_reason());
+            project_tasks_cleanup(&pt);
             return_defer(1);
         }
     }
 
-    aids_array_sort(&tasks, get_task_compare_fn(options.sort_by));
+    for (size_t i = 0; i < all_projects.count; ++i) {
+        Project_Tasks *pt = NULL;
+        if (aids_array_get(&all_projects, i, (void **)&pt) != AIDS_OK) {
+            continue;
+        }
 
-    for (size_t i = 0; i < tasks.count; ++i) {
-        Task_Entry *entry = NULL;
+        if (pt->tasks.count == 0) {
+            continue;
+        }
 
-        AIDS_ASSERT(aids_array_get(&tasks, i, (void **)&entry) == AIDS_OK,
-                   "Failed to get task at index %zu: %s", i, aids_failure_reason());
+        if (recursive) {
+            printf(SS_Fmt "\n", SS_Arg(pt->project_dir));
+        }
 
-        task_print(tasks_dir, entry->huid, entry->task);
+        Aids_String_Slice full_tasks_dir = {0};
+        Aids_String_Builder path_sb = {0};
+        aids_string_builder_init(&path_sb);
+        if (aids_string_builder_append(&path_sb, SS_Fmt "/" SS_Fmt,
+                                       SS_Arg(pt->project_dir), SS_Arg(TASKS_PATH)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to build tasks directory path: %s", aids_failure_reason());
+            aids_string_builder_free(&path_sb);
+            continue;
+        }
+        aids_string_builder_to_slice(&path_sb, &full_tasks_dir);
+
+        for (size_t j = 0; j < pt->tasks.count; ++j) {
+            Task_Entry *entry = NULL;
+            if (aids_array_get(&pt->tasks, j, (void **)&entry) == AIDS_OK) {
+                task_print(full_tasks_dir, entry->huid, entry->task);
+            }
+        }
+
+        AIDS_FREE(full_tasks_dir.str);
     }
 
 defer:
-    if (tasks_dir.str != NULL) {
-        AIDS_FREE(tasks_dir.str);
-    }
-
-    cleanup_string_slice_array(&tasks_files);
-
-    for (size_t i = 0; i < tasks.count; ++i) {
-        Task_Entry *entry = NULL;
-        if (aids_array_get(&tasks, i, (void **)&entry) == AIDS_OK) {
-            task_cleanup(&entry->task);
+    for (size_t i = 0; i < all_projects.count; ++i) {
+        Project_Tasks *pt = NULL;
+        if (aids_array_get(&all_projects, i, (void **)&pt) == AIDS_OK) {
+            project_tasks_cleanup(pt);
         }
     }
-    aids_array_free(&tasks);
+    aids_array_free(&all_projects);
+
+    cleanup_string_slice_array(&project_dirs);
 
     argparse_parser_free(&parser);
     return result;
