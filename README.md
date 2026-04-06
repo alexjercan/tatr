@@ -182,6 +182,29 @@ make install  # Install to PREFIX (default: /usr/local)
 make clean    # Remove build artifacts
 ```
 
+## Testing
+
+tatr includes a comprehensive test suite to ensure functionality and prevent regressions:
+
+```bash
+# Run all tests
+./tests/checker.sh
+
+# Run with verbose output
+./tests/checker.sh -v
+
+# Run with memory leak checking (requires valgrind)
+./tests/checker.sh --memcheck
+```
+
+The test suite covers:
+- Basic task creation and listing
+- Task metadata (priority, tags, status)
+- Sorting functionality
+- Recursive directory search
+- Error handling
+- Memory leak detection
+
 ## Version Control
 
 Tasks are designed to be version-controlled alongside your code:
