@@ -85,7 +85,14 @@ tatr ls -s priority
 
 # Sort by title (alphabetically)
 tatr ls -s title
+
+# Recursively list tasks from all subdirectories
+tatr ls -R
 ```
+
+**Options:**
+- `-s, --sort <value>`: Sort by (created, priority, title; default: created)
+- `-R, --recursive`: Recursively search for tasks directories in all subdirectories
 
 **Output format:**
 ```

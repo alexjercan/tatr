@@ -1,6 +1,6 @@
 # Implement a filter system for tasks
 
-- STATUS: OPEN
+- STATUS: IN_PROGRESS
 - PRIORITY: 100
 - TAGS: feature
 
