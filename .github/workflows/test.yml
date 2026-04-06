@@ -1,0 +1,53 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang valgrind
+
+    - name: Build
+      run: make
+
+    - name: Run tests
+      run: ./checker.sh
+
+    - name: Run tests with valgrind
+      run: ./checker.sh --memcheck
+
+  test-multiple-compilers:
+    name: Test with ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ matrix.compiler }} valgrind
+
+    - name: Build with ${{ matrix.compiler }}
+      run: make CC=${{ matrix.compiler }}
+
+    - name: Run tests
+      run: ./checker.sh
