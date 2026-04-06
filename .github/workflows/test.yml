@@ -11,7 +11,7 @@ jobs:
   test:
     name: Build and Test
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
       run: ./checker.sh
 
     - name: Run tests with valgrind
-      run: ./checker.sh --memcheck
+      run: ./checker.sh -v --memcheck
 
   test-multiple-compilers:
     name: Test with ${{ matrix.compiler }}
@@ -36,7 +36,7 @@ jobs:
     strategy:
       matrix:
         compiler: [gcc, clang]
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
