@@ -9,7 +9,7 @@ TOTAL_TESTS=0
 PASSED_TESTS=0
 MEMCHECK=0
 VERBOSE=0
-TEST_DIR=$(mktemp -d)
+TEST_DIRS=()  # Array to track all test directories for cleanup
 
 # Colors
 RED='\e[31m'
@@ -27,9 +27,18 @@ usage() {
 }
 
 cleanup() {
-    if [ -d "$TEST_DIR" ]; then
-        rm -rf "$TEST_DIR"
-    fi
+    for dir in "${TEST_DIRS[@]}"; do
+        if [ -d "$dir" ]; then
+            rm -rf "$dir"
+        fi
+    done
+}
+
+# Helper function to create a new test directory
+create_test_dir() {
+    local test_dir=$(mktemp -d)
+    TEST_DIRS+=("$test_dir")
+    echo "$test_dir"
 }
 
 trap cleanup EXIT
@@ -109,7 +118,8 @@ test_version() {
 test_new_basic() {
     log_test "new task (basic)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     local output=$(run_tatr new "Test task" 2>&1)
@@ -132,7 +142,8 @@ test_new_basic() {
 test_new_priority() {
     log_test "new task (with priority)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     local output=$(run_tatr new "Priority task" -p 100 2>&1)
@@ -155,7 +166,8 @@ test_new_priority() {
 test_new_tags() {
     log_test "new task (with tags)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     local output=$(run_tatr new "Tagged task" -t feature -t bug 2>&1)
@@ -178,7 +190,8 @@ test_new_tags() {
 test_new_status() {
     log_test "new task (with status)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     local output=$(run_tatr new "In progress task" -s IN_PROGRESS 2>&1)
@@ -201,7 +214,8 @@ test_new_status() {
 test_new_full() {
     log_test "new task (all options)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     local output=$(run_tatr new "Full task" -p 50 -t test -t complete -s CLOSED 2>&1)
@@ -226,7 +240,8 @@ test_new_full() {
 test_ls_empty() {
     log_test "ls (empty tasks dir)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     local output=$(run_tatr ls 2>&1)
@@ -243,7 +258,8 @@ test_ls_empty() {
 test_ls_with_tasks() {
     log_test "ls (with tasks)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     run_tatr new "Task 1" > /dev/null 2>&1
@@ -266,7 +282,8 @@ test_ls_with_tasks() {
 test_ls_sort_priority() {
     log_test "ls (sort by priority)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     run_tatr new "Low priority" -p 10 > /dev/null 2>&1
@@ -295,7 +312,8 @@ test_ls_sort_priority() {
 test_ls_sort_title() {
     log_test "ls (sort by title)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p tasks
 
     run_tatr new "Zebra task" > /dev/null 2>&1
@@ -324,7 +342,8 @@ test_ls_sort_title() {
 test_ls_recursive() {
     log_test "ls (recursive)"
 
-    cd "$TEST_DIR"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
     mkdir -p project1/tasks
     mkdir -p project2/tasks
 
@@ -351,17 +370,16 @@ test_ls_recursive() {
 test_root_flag() {
     log_test "root flag (-r)"
 
-    local other_dir=$(mktemp -d)
+    local test_dir=$(create_test_dir)
+    local other_dir=$(create_test_dir)
     cd "$other_dir"
     mkdir -p tasks
 
     run_tatr new "Root task" > /dev/null 2>&1
 
-    cd "$TEST_DIR"
+    cd "$test_dir"
     local output=$(run_tatr -r "$other_dir" ls 2>&1)
     local exit_code=$?
-
-    rm -rf "$other_dir"
 
     if [ $exit_code -eq 0 ] && echo "$output" | grep -q "Root task"; then
         pass_test
@@ -374,15 +392,13 @@ test_root_flag() {
 test_error_no_tasks_dir() {
     log_test "error handling (no tasks dir)"
 
-    local no_tasks_dir=$(mktemp -d)
+    local no_tasks_dir=$(create_test_dir)
     cd "$no_tasks_dir"
 
     set +e
     run_tatr ls > /dev/null 2>&1
     local exit_code=$?
     set -e
-
-    rm -rf "$no_tasks_dir"
 
     if [ $exit_code -ne 0 ]; then
         pass_test
@@ -395,7 +411,7 @@ test_error_no_tasks_dir() {
 test_task_format() {
     log_test "task format validation"
 
-    local format_test_dir=$(mktemp -d)
+    local format_test_dir=$(create_test_dir)
     cd "$format_test_dir"
     mkdir -p tasks
 
@@ -412,8 +428,6 @@ test_task_format() {
     else
         fail_test "Task format incorrect"
     fi
-
-    rm -rf "$format_test_dir"
 }
 
 # Parse arguments

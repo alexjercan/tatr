@@ -949,11 +949,1097 @@ defer:
     return result;
 }
 
+static Aids_String_Slice FILTER_KEYWORD_EQ = (Aids_String_Slice) { .str = (unsigned char *)"eq", .len = 2 };
+static Aids_String_Slice FILTER_KEYWORD_IN = (Aids_String_Slice) { .str = (unsigned char *)"in", .len = 2 };
+static Aids_String_Slice FILTER_KEYWORD_CONTAINS = (Aids_String_Slice) { .str = (unsigned char *)"contains", .len = 8 };
+static Aids_String_Slice FILTER_KEYWORD_AND = (Aids_String_Slice) { .str = (unsigned char *)"and", .len = 3 };
+static Aids_String_Slice FILTER_KEYWORD_OR = (Aids_String_Slice) { .str = (unsigned char *)"or", .len = 2 };
+static Aids_String_Slice FILTER_KEYWORD_NOT = (Aids_String_Slice) { .str = (unsigned char *)"not", .len = 3 };
+
+typedef struct {
+    unsigned long index;
+} Tatr_Token_Info;
+
+typedef enum {
+    TATR_FILTER_TOKEN_KIND_EOF,
+    TATR_FILTER_TOKEN_KIND_EQ,
+    TATR_FILTER_TOKEN_KIND_IN,
+    TATR_FILTER_TOKEN_KIND_CONTAINS,
+    TATR_FILTER_TOKEN_KIND_AND,
+    TATR_FILTER_TOKEN_KIND_OR,
+    TATR_FILTER_TOKEN_KIND_NOT,
+    TATR_FILTER_TOKEN_KIND_LPAREN,
+    TATR_FILTER_TOKEN_KIND_RPAREN,
+    TATR_FILTER_TOKEN_KIND_LBRACKET,
+    TATR_FILTER_TOKEN_KIND_RBRACKET,
+    TATR_FILTER_TOKEN_KIND_COMMA,
+    TATR_FILTER_TOKEN_KIND_FIELD,
+    TATR_FILTER_TOKEN_KIND_IDENTIFIER,
+    TATR_FILTER_TOKEN_KIND_INVALID
+} Tatr_Filter_Token_Kind;
+
+typedef struct {
+    Tatr_Filter_Token_Kind kind;
+    Aids_String_Slice text;
+    Tatr_Token_Info info;
+} Tatr_Filter_Token;
+
+static void tatr_filter_token_print(Tatr_Filter_Token token) {
+    switch (token.kind) {
+        case TATR_FILTER_TOKEN_KIND_EOF:
+            printf("EOF");
+            break;
+        case TATR_FILTER_TOKEN_KIND_EQ:
+            printf("EQ");
+            break;
+        case TATR_FILTER_TOKEN_KIND_IN:
+            printf("IN");
+            break;
+        case TATR_FILTER_TOKEN_KIND_CONTAINS:
+            printf("CONTAINS");
+            break;
+        case TATR_FILTER_TOKEN_KIND_AND:
+            printf("AND");
+            break;
+        case TATR_FILTER_TOKEN_KIND_OR:
+            printf("OR");
+            break;
+        case TATR_FILTER_TOKEN_KIND_NOT:
+            printf("NOT");
+            break;
+        case TATR_FILTER_TOKEN_KIND_LPAREN:
+            printf("LPAREN");
+            break;
+        case TATR_FILTER_TOKEN_KIND_RPAREN:
+            printf("RPAREN");
+            break;
+        case TATR_FILTER_TOKEN_KIND_LBRACKET:
+            printf("LBRACKET");
+            break;
+        case TATR_FILTER_TOKEN_KIND_RBRACKET:
+            printf("RBRACKET");
+            break;
+        case TATR_FILTER_TOKEN_KIND_COMMA:
+            printf("COMMA");
+            break;
+        case TATR_FILTER_TOKEN_KIND_FIELD:
+            printf("FIELD(" SS_Fmt ")", SS_Arg(token.text));
+            break;
+        case TATR_FILTER_TOKEN_KIND_IDENTIFIER:
+            printf("IDENTIFIER(" SS_Fmt ")", SS_Arg(token.text));
+            break;
+        case TATR_FILTER_TOKEN_KIND_INVALID:
+            printf("INVALID(" SS_Fmt ")", SS_Arg(token.text));
+            break;
+        default:
+            printf("UNKNOWN");
+    }
+}
+
+typedef struct {
+    Aids_String_Slice input;
+    unsigned long pos;
+    unsigned long read_pos;
+    char ch;
+} Tatr_Filter_Lexer;
+
+// Convert index position to line and column
+static void tatr_filter_lexer_position_info(Tatr_Filter_Lexer *lexer, unsigned long index, unsigned long *line, unsigned long *column) {
+    *line = 1;
+    *column = 1;
+
+    for (unsigned long i = 0; i < index && i < lexer->input.len; ++i) {
+        if (lexer->input.str[i] == '\n') {
+            (*line)++;
+            *column = 1;
+        } else {
+            (*column)++;
+        }
+    }
+}
+
+static char tatr_filter_lexer_peek(Tatr_Filter_Lexer *lexer) {
+    if (lexer->read_pos >= lexer->input.len) {
+        return EOF;
+    }
+    return lexer->input.str[lexer->read_pos];
+}
+
+static char tatr_filter_lexer_read(Tatr_Filter_Lexer *lexer) {
+    lexer->ch = tatr_filter_lexer_peek(lexer);
+
+    lexer->pos = lexer->read_pos;
+    lexer->read_pos++;
+
+    return lexer->ch;
+}
+
+static void tatr_filter_lexer_skip_whitespace(Tatr_Filter_Lexer *lexer) {
+    while (isspace(lexer->ch)) {
+        tatr_filter_lexer_read(lexer);
+    }
+}
+
+static void tatr_filter_lexer_init(Tatr_Filter_Lexer *lexer, Aids_String_Slice input) {
+    lexer->input = input;
+    lexer->pos = 0;
+    lexer->read_pos = 0;
+    lexer->ch = 0;
+
+    tatr_filter_lexer_read(lexer);
+}
+
+static Aids_Result tatr_filter_lexer_next(Tatr_Filter_Lexer *lexer, Tatr_Filter_Token *token) {
+    Aids_Result result = AIDS_OK;
+    tatr_filter_lexer_skip_whitespace(lexer);
+
+    if (lexer->ch == EOF || lexer->ch == '\0') {
+        token->kind = TATR_FILTER_TOKEN_KIND_EOF;
+        token->text = (Aids_String_Slice){0};
+        token->info.index = lexer->pos;
+        return_defer(AIDS_OK);
+    }
+
+    unsigned long start = lexer->pos;
+
+    switch (lexer->ch) {
+        case '(':
+            token->kind = TATR_FILTER_TOKEN_KIND_LPAREN;
+            token->text = (Aids_String_Slice){0};
+            token->info.index = start;
+            tatr_filter_lexer_read(lexer);
+            return_defer(AIDS_OK);
+        case ')':
+            token->kind = TATR_FILTER_TOKEN_KIND_RPAREN;
+            token->text = (Aids_String_Slice){0};
+            token->info.index = start;
+            tatr_filter_lexer_read(lexer);
+            return_defer(AIDS_OK);
+        case '[':
+            token->kind = TATR_FILTER_TOKEN_KIND_LBRACKET;
+            token->text = (Aids_String_Slice){0};
+            token->info.index = start;
+            tatr_filter_lexer_read(lexer);
+            return_defer(AIDS_OK);
+        case ']':
+            token->kind = TATR_FILTER_TOKEN_KIND_RBRACKET;
+            token->text = (Aids_String_Slice){0};
+            token->info.index = start;
+            tatr_filter_lexer_read(lexer);
+            return_defer(AIDS_OK);
+        case ',':
+            token->kind = TATR_FILTER_TOKEN_KIND_COMMA;
+            token->text = (Aids_String_Slice){0};
+            token->info.index = start;
+            tatr_filter_lexer_read(lexer);
+            return_defer(AIDS_OK);
+    }
+
+    if (lexer->ch == ':') {
+        unsigned long field_start = lexer->pos;
+        tatr_filter_lexer_read(lexer); // consume ':'
+        start = lexer->pos;
+
+        if (!isalpha(lexer->ch) && lexer->ch != '_') {
+            token->kind = TATR_FILTER_TOKEN_KIND_INVALID;
+            token->text = aids_string_slice_from_parts(lexer->input.str + field_start, 1);
+            token->info.index = field_start;
+            return_defer(AIDS_ERR);
+        }
+
+        while (isalnum(lexer->ch) || lexer->ch == '_') {
+            tatr_filter_lexer_read(lexer);
+        }
+
+        token->kind = TATR_FILTER_TOKEN_KIND_FIELD;
+        token->text = aids_string_slice_from_parts(lexer->input.str + start, lexer->pos - start);
+        token->info.index = field_start;
+        return_defer(AIDS_OK);
+    }
+
+    if (isalpha(lexer->ch) || lexer->ch == '_' || isdigit(lexer->ch)) {
+        while (isalnum(lexer->ch) || lexer->ch == '_') {
+            tatr_filter_lexer_read(lexer);
+        }
+
+        Aids_String_Slice text = aids_string_slice_from_parts(lexer->input.str + start, lexer->pos - start);
+
+        if (aids_string_slice_compare(&text, &FILTER_KEYWORD_EQ) == 0) {
+            token->kind = TATR_FILTER_TOKEN_KIND_EQ;
+            token->text = (Aids_String_Slice){0};
+        } else if (aids_string_slice_compare(&text, &FILTER_KEYWORD_IN) == 0) {
+            token->kind = TATR_FILTER_TOKEN_KIND_IN;
+            token->text = (Aids_String_Slice){0};
+        } else if (aids_string_slice_compare(&text, &FILTER_KEYWORD_CONTAINS) == 0) {
+            token->kind = TATR_FILTER_TOKEN_KIND_CONTAINS;
+            token->text = (Aids_String_Slice){0};
+        } else if (aids_string_slice_compare(&text, &FILTER_KEYWORD_AND) == 0) {
+            token->kind = TATR_FILTER_TOKEN_KIND_AND;
+            token->text = (Aids_String_Slice){0};
+        } else if (aids_string_slice_compare(&text, &FILTER_KEYWORD_OR) == 0) {
+            token->kind = TATR_FILTER_TOKEN_KIND_OR;
+            token->text = (Aids_String_Slice){0};
+        } else if (aids_string_slice_compare(&text, &FILTER_KEYWORD_NOT) == 0) {
+            token->kind = TATR_FILTER_TOKEN_KIND_NOT;
+            token->text = (Aids_String_Slice){0};
+        } else {
+            token->kind = TATR_FILTER_TOKEN_KIND_IDENTIFIER;
+            token->text = text;
+        }
+
+        token->info.index = start;
+        return_defer(AIDS_OK);
+    }
+
+    token->kind = TATR_FILTER_TOKEN_KIND_INVALID;
+    token->text = aids_string_slice_from_parts(lexer->input.str + start, 1);
+    token->info.index = start;
+    tatr_filter_lexer_read(lexer);
+    return_defer(AIDS_ERR);
+
+defer:
+    return result;
+}
+
+// AST Node Types
+typedef enum {
+    TATR_FILTER_AST_NODE_KIND_BINARY_OP,
+    TATR_FILTER_AST_NODE_KIND_UNARY_OP,
+    TATR_FILTER_AST_NODE_KIND_COMPARISON,
+    TATR_FILTER_AST_NODE_KIND_FIELD,
+    TATR_FILTER_AST_NODE_KIND_IDENTIFIER,
+    TATR_FILTER_AST_NODE_KIND_LIST,
+} Tatr_Filter_Ast_Node_Kind;
+
+typedef enum {
+    TATR_FILTER_BINARY_OP_AND,
+    TATR_FILTER_BINARY_OP_OR,
+} Tatr_Filter_Binary_Op;
+
+typedef enum {
+    TATR_FILTER_UNARY_OP_NOT,
+} Tatr_Filter_Unary_Op;
+
+typedef enum {
+    TATR_FILTER_COMPARISON_OP_EQ,
+    TATR_FILTER_COMPARISON_OP_IN,
+    TATR_FILTER_COMPARISON_OP_CONTAINS,
+} Tatr_Filter_Comparison_Op;
+
+typedef struct Tatr_Filter_Ast_Node Tatr_Filter_Ast_Node;
+
+typedef struct {
+    Tatr_Filter_Binary_Op op;
+    Tatr_Filter_Ast_Node *left;
+    Tatr_Filter_Ast_Node *right;
+} Tatr_Filter_Binary_Op_Node;
+
+typedef struct {
+    Tatr_Filter_Unary_Op op;
+    Tatr_Filter_Ast_Node *operand;
+} Tatr_Filter_Unary_Op_Node;
+
+typedef struct {
+    Tatr_Filter_Comparison_Op op;
+    Tatr_Filter_Ast_Node *left;
+    Tatr_Filter_Ast_Node *right;
+} Tatr_Filter_Comparison_Node;
+
+typedef struct {
+    Aids_String_Slice name;
+} Tatr_Filter_Field_Node;
+
+typedef struct {
+    Aids_String_Slice value;
+} Tatr_Filter_Identifier_Node;
+
+typedef struct {
+    Aids_Array items; /* Tatr_Filter_Ast_Node* */
+} Tatr_Filter_List_Node;
+
+struct Tatr_Filter_Ast_Node {
+    Tatr_Filter_Ast_Node_Kind kind;
+    Tatr_Token_Info info;
+    union {
+        Tatr_Filter_Binary_Op_Node binary_op;
+        Tatr_Filter_Unary_Op_Node unary_op;
+        Tatr_Filter_Comparison_Node comparison;
+        Tatr_Filter_Field_Node field;
+        Tatr_Filter_Identifier_Node identifier;
+        Tatr_Filter_List_Node list;
+    } data;
+};
+
+// Parser
+typedef struct {
+    Tatr_Filter_Lexer lexer;
+    Tatr_Filter_Token current;
+    Tatr_Filter_Token peek;
+    boolean has_error;
+    char error_msg[256];
+} Tatr_Filter_Parser;
+
+static void tatr_filter_parser_init(Tatr_Filter_Parser *parser, Aids_String_Slice input) {
+    tatr_filter_lexer_init(&parser->lexer, input);
+    parser->has_error = false;
+    parser->error_msg[0] = '\0';
+
+    // Prime the parser with the first two tokens
+    tatr_filter_lexer_next(&parser->lexer, &parser->current);
+    tatr_filter_lexer_next(&parser->lexer, &parser->peek);
+}
+
+static void tatr_filter_parser_advance(Tatr_Filter_Parser *parser) {
+    parser->current = parser->peek;
+    tatr_filter_lexer_next(&parser->lexer, &parser->peek);
+}
+
+static const char* tatr_filter_token_kind_name(Tatr_Filter_Token_Kind kind) {
+    switch (kind) {
+        case TATR_FILTER_TOKEN_KIND_EOF: return "end of input";
+        case TATR_FILTER_TOKEN_KIND_EQ: return "'eq'";
+        case TATR_FILTER_TOKEN_KIND_IN: return "'in'";
+        case TATR_FILTER_TOKEN_KIND_CONTAINS: return "'contains'";
+        case TATR_FILTER_TOKEN_KIND_AND: return "'and'";
+        case TATR_FILTER_TOKEN_KIND_OR: return "'or'";
+        case TATR_FILTER_TOKEN_KIND_NOT: return "'not'";
+        case TATR_FILTER_TOKEN_KIND_LPAREN: return "'('";
+        case TATR_FILTER_TOKEN_KIND_RPAREN: return "')'";
+        case TATR_FILTER_TOKEN_KIND_LBRACKET: return "'['";
+        case TATR_FILTER_TOKEN_KIND_RBRACKET: return "']'";
+        case TATR_FILTER_TOKEN_KIND_COMMA: return "','";
+        case TATR_FILTER_TOKEN_KIND_FIELD: return "field";
+        case TATR_FILTER_TOKEN_KIND_IDENTIFIER: return "identifier";
+        case TATR_FILTER_TOKEN_KIND_INVALID: return "invalid token";
+        default: return "unknown token";
+    }
+}
+
+static void tatr_filter_parser_error(Tatr_Filter_Parser *parser, const char *message) {
+    parser->has_error = true;
+    unsigned long line, column;
+    tatr_filter_lexer_position_info(&parser->lexer, parser->current.info.index, &line, &column);
+    snprintf(parser->error_msg, sizeof(parser->error_msg),
+             "line %lu, col %lu: %s", line, column, message);
+}
+
+static void tatr_filter_parser_error_fmt(Tatr_Filter_Parser *parser, const char *fmt, ...) {
+    parser->has_error = true;
+    unsigned long line, column;
+    tatr_filter_lexer_position_info(&parser->lexer, parser->current.info.index, &line, &column);
+
+    char temp[200];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(temp, sizeof(temp), fmt, args);
+    va_end(args);
+
+    snprintf(parser->error_msg, sizeof(parser->error_msg), "line %lu, col %lu: %s", line, column, temp);
+}
+
+static boolean tatr_filter_parser_expect(Tatr_Filter_Parser *parser, Tatr_Filter_Token_Kind kind) {
+    if (parser->current.kind != kind) {
+        tatr_filter_parser_error_fmt(parser, "expected %s, got %s",
+                                     tatr_filter_token_kind_name(kind),
+                                     tatr_filter_token_kind_name(parser->current.kind));
+        return false;
+    }
+    tatr_filter_parser_advance(parser);
+    return true;
+}
+
+static Tatr_Filter_Ast_Node* tatr_filter_parse_expression(Tatr_Filter_Parser *parser);
+static Tatr_Filter_Ast_Node* tatr_filter_parse_or_expression(Tatr_Filter_Parser *parser);
+static Tatr_Filter_Ast_Node* tatr_filter_parse_and_expression(Tatr_Filter_Parser *parser);
+static Tatr_Filter_Ast_Node* tatr_filter_parse_unary_expression(Tatr_Filter_Parser *parser);
+static Tatr_Filter_Ast_Node* tatr_filter_parse_comparison(Tatr_Filter_Parser *parser);
+static Tatr_Filter_Ast_Node* tatr_filter_parse_primary(Tatr_Filter_Parser *parser);
+static Tatr_Filter_Ast_Node* tatr_filter_parse_list(Tatr_Filter_Parser *parser);
+static void tatr_filter_ast_free(Tatr_Filter_Ast_Node *node);
+
+// Parse a list: [ item1, item2, ... ]
+static Tatr_Filter_Ast_Node* tatr_filter_parse_list(Tatr_Filter_Parser *parser) {
+    Tatr_Filter_Ast_Node *node = malloc(sizeof(Tatr_Filter_Ast_Node));
+    node->kind = TATR_FILTER_AST_NODE_KIND_LIST;
+    node->info = parser->current.info;
+    aids_array_init(&node->data.list.items, sizeof(Tatr_Filter_Ast_Node*));
+
+    if (!tatr_filter_parser_expect(parser, TATR_FILTER_TOKEN_KIND_LBRACKET)) {
+        free(node);
+        return NULL;
+    }
+
+    // Empty list
+    if (parser->current.kind == TATR_FILTER_TOKEN_KIND_RBRACKET) {
+        tatr_filter_parser_advance(parser);
+        return node;
+    }
+
+    // Parse list items
+    while (true) {
+        if (parser->current.kind != TATR_FILTER_TOKEN_KIND_IDENTIFIER) {
+            tatr_filter_parser_error_fmt(parser, "expected identifier in list, got %s",
+                                        tatr_filter_token_kind_name(parser->current.kind));
+            aids_array_free(&node->data.list.items);
+            free(node);
+            return NULL;
+        }
+
+        Tatr_Filter_Ast_Node *item = malloc(sizeof(Tatr_Filter_Ast_Node));
+        item->kind = TATR_FILTER_AST_NODE_KIND_IDENTIFIER;
+        item->info = parser->current.info;
+        item->data.identifier.value = parser->current.text;
+
+        aids_array_append(&node->data.list.items, &item);
+        tatr_filter_parser_advance(parser);
+
+        if (parser->current.kind == TATR_FILTER_TOKEN_KIND_RBRACKET) {
+            tatr_filter_parser_advance(parser);
+            break;
+        }
+
+        if (parser->current.kind != TATR_FILTER_TOKEN_KIND_COMMA) {
+            tatr_filter_parser_error_fmt(parser, "expected ',' or ']' in list, got %s",
+                                        tatr_filter_token_kind_name(parser->current.kind));
+            aids_array_free(&node->data.list.items);
+            free(node);
+            return NULL;
+        }
+
+        tatr_filter_parser_advance(parser); // consume comma
+    }
+
+    return node;
+}
+
+// Parse primary expressions: field, identifier, list, or parenthesized expression
+static Tatr_Filter_Ast_Node* tatr_filter_parse_primary(Tatr_Filter_Parser *parser) {
+    Tatr_Filter_Ast_Node *node = NULL;
+
+    switch (parser->current.kind) {
+        case TATR_FILTER_TOKEN_KIND_FIELD: {
+            node = malloc(sizeof(Tatr_Filter_Ast_Node));
+            node->kind = TATR_FILTER_AST_NODE_KIND_FIELD;
+            node->info = parser->current.info;
+            node->data.field.name = parser->current.text;
+            tatr_filter_parser_advance(parser);
+            return node;
+        }
+
+        case TATR_FILTER_TOKEN_KIND_IDENTIFIER: {
+            node = malloc(sizeof(Tatr_Filter_Ast_Node));
+            node->kind = TATR_FILTER_AST_NODE_KIND_IDENTIFIER;
+            node->info = parser->current.info;
+            node->data.identifier.value = parser->current.text;
+            tatr_filter_parser_advance(parser);
+            return node;
+        }
+
+        case TATR_FILTER_TOKEN_KIND_LBRACKET: {
+            return tatr_filter_parse_list(parser);
+        }
+
+        case TATR_FILTER_TOKEN_KIND_LPAREN: {
+            tatr_filter_parser_advance(parser); // consume '('
+            node = tatr_filter_parse_expression(parser);
+            if (!tatr_filter_parser_expect(parser, TATR_FILTER_TOKEN_KIND_RPAREN)) {
+                return NULL;
+            }
+            return node;
+        }
+
+        default:
+            tatr_filter_parser_error_fmt(parser, "expected field, identifier, list, or '(', got %s",
+                                        tatr_filter_token_kind_name(parser->current.kind));
+            return NULL;
+    }
+}
+
+// Parse comparison: primary op primary
+static Tatr_Filter_Ast_Node* tatr_filter_parse_comparison(Tatr_Filter_Parser *parser) {
+    Tatr_Filter_Ast_Node *left = tatr_filter_parse_primary(parser);
+    if (!left || parser->has_error) {
+        return left;
+    }
+
+    Tatr_Filter_Comparison_Op op;
+    switch (parser->current.kind) {
+        case TATR_FILTER_TOKEN_KIND_EQ:
+            op = TATR_FILTER_COMPARISON_OP_EQ;
+            break;
+        case TATR_FILTER_TOKEN_KIND_IN:
+            op = TATR_FILTER_COMPARISON_OP_IN;
+            break;
+        case TATR_FILTER_TOKEN_KIND_CONTAINS:
+            op = TATR_FILTER_COMPARISON_OP_CONTAINS;
+            break;
+        default:
+            // Not a comparison, just return the primary expression
+            return left;
+    }
+
+    Tatr_Token_Info op_info = parser->current.info;
+    Tatr_Filter_Token_Kind op_kind = parser->current.kind;
+    tatr_filter_parser_advance(parser);
+
+    Tatr_Filter_Ast_Node *right = tatr_filter_parse_primary(parser);
+    if (!right) {
+        if (!parser->has_error) {
+            tatr_filter_parser_error_fmt(parser, "expected value after %s operator",
+                                        tatr_filter_token_kind_name(op_kind));
+        }
+        free(left);
+        return NULL;
+    }
+    if (parser->has_error) {
+        free(left);
+        return NULL;
+    }
+
+    Tatr_Filter_Ast_Node *node = malloc(sizeof(Tatr_Filter_Ast_Node));
+    node->kind = TATR_FILTER_AST_NODE_KIND_COMPARISON;
+    node->info = op_info;
+    node->data.comparison.op = op;
+    node->data.comparison.left = left;
+    node->data.comparison.right = right;
+
+    return node;
+}
+
+// Parse unary expression: not term | term
+static Tatr_Filter_Ast_Node* tatr_filter_parse_unary_expression(Tatr_Filter_Parser *parser) {
+    if (parser->current.kind == TATR_FILTER_TOKEN_KIND_NOT) {
+        Tatr_Token_Info info = parser->current.info;
+        tatr_filter_parser_advance(parser);
+
+        Tatr_Filter_Ast_Node *operand = tatr_filter_parse_unary_expression(parser);
+        if (!operand) {
+            if (!parser->has_error) {
+                tatr_filter_parser_error(parser, "expected expression after 'not' operator");
+            }
+            return NULL;
+        }
+        if (parser->has_error) {
+            return NULL;
+        }
+
+        Tatr_Filter_Ast_Node *node = malloc(sizeof(Tatr_Filter_Ast_Node));
+        node->kind = TATR_FILTER_AST_NODE_KIND_UNARY_OP;
+        node->info = info;
+        node->data.unary_op.op = TATR_FILTER_UNARY_OP_NOT;
+        node->data.unary_op.operand = operand;
+
+        return node;
+    }
+
+    return tatr_filter_parse_comparison(parser);
+}
+
+// Parse AND expression: unary (and unary)*
+static Tatr_Filter_Ast_Node* tatr_filter_parse_and_expression(Tatr_Filter_Parser *parser) {
+    Tatr_Filter_Ast_Node *left = tatr_filter_parse_unary_expression(parser);
+    if (!left || parser->has_error) {
+        return left;
+    }
+
+    while (parser->current.kind == TATR_FILTER_TOKEN_KIND_AND) {
+        Tatr_Token_Info info = parser->current.info;
+        tatr_filter_parser_advance(parser);
+
+        Tatr_Filter_Ast_Node *right = tatr_filter_parse_unary_expression(parser);
+        if (!right) {
+            if (!parser->has_error) {
+                tatr_filter_parser_error(parser, "expected expression after 'and' operator");
+            }
+            free(left);
+            return NULL;
+        }
+        if (parser->has_error) {
+            free(left);
+            return NULL;
+        }
+
+        Tatr_Filter_Ast_Node *node = malloc(sizeof(Tatr_Filter_Ast_Node));
+        node->kind = TATR_FILTER_AST_NODE_KIND_BINARY_OP;
+        node->info = info;
+        node->data.binary_op.op = TATR_FILTER_BINARY_OP_AND;
+        node->data.binary_op.left = left;
+        node->data.binary_op.right = right;
+
+        left = node;
+    }
+
+    return left;
+}
+
+// Parse OR expression: and (or and)*
+static Tatr_Filter_Ast_Node* tatr_filter_parse_or_expression(Tatr_Filter_Parser *parser) {
+    Tatr_Filter_Ast_Node *left = tatr_filter_parse_and_expression(parser);
+    if (!left || parser->has_error) {
+        return left;
+    }
+
+    while (parser->current.kind == TATR_FILTER_TOKEN_KIND_OR) {
+        Tatr_Token_Info info = parser->current.info;
+        tatr_filter_parser_advance(parser);
+
+        Tatr_Filter_Ast_Node *right = tatr_filter_parse_and_expression(parser);
+        if (!right) {
+            if (!parser->has_error) {
+                tatr_filter_parser_error(parser, "expected expression after 'or' operator");
+            }
+            free(left);
+            return NULL;
+        }
+        if (parser->has_error) {
+            free(left);
+            return NULL;
+        }
+
+        Tatr_Filter_Ast_Node *node = malloc(sizeof(Tatr_Filter_Ast_Node));
+        node->kind = TATR_FILTER_AST_NODE_KIND_BINARY_OP;
+        node->info = info;
+        node->data.binary_op.op = TATR_FILTER_BINARY_OP_OR;
+        node->data.binary_op.left = left;
+        node->data.binary_op.right = right;
+
+        left = node;
+    }
+
+    return left;
+}
+
+// Parse expression (entry point for recursive descent)
+static Tatr_Filter_Ast_Node* tatr_filter_parse_expression(Tatr_Filter_Parser *parser) {
+    return tatr_filter_parse_or_expression(parser);
+}
+
+// Main parse function
+static Tatr_Filter_Ast_Node* tatr_filter_parse(Aids_String_Slice input, char *error_msg, size_t error_msg_size) {
+    Tatr_Filter_Parser parser = {0};
+    tatr_filter_parser_init(&parser, input);
+
+    // Check for empty input
+    if (parser.current.kind == TATR_FILTER_TOKEN_KIND_EOF) {
+        if (error_msg && error_msg_size > 0) {
+            snprintf(error_msg, error_msg_size, "empty filter expression");
+        }
+        return NULL;
+    }
+
+    Tatr_Filter_Ast_Node *root = tatr_filter_parse_expression(&parser);
+
+    if (parser.has_error) {
+        if (error_msg && error_msg_size > 0) {
+            snprintf(error_msg, error_msg_size, "%s", parser.error_msg);
+        }
+        return NULL;
+    }
+
+    if (parser.current.kind != TATR_FILTER_TOKEN_KIND_EOF) {
+        if (error_msg && error_msg_size > 0) {
+            unsigned long line, column;
+            tatr_filter_lexer_position_info(&parser.lexer, parser.current.info.index, &line, &column);
+            snprintf(error_msg, error_msg_size,
+                     "line %lu, col %lu: unexpected %s after expression",
+                     line, column, tatr_filter_token_kind_name(parser.current.kind));
+        }
+        tatr_filter_ast_free(root);
+        return NULL;
+    }
+
+    return root;
+}
+
+// Type checker and interpreter
+
+// Field type definitions
+typedef enum {
+    TATR_FILTER_FIELD_TYPE_STATUS,
+    TATR_FILTER_FIELD_TYPE_TAGS,
+    TATR_FILTER_FIELD_TYPE_PRIORITY,
+    TATR_FILTER_FIELD_TYPE_TITLE,
+    TATR_FILTER_FIELD_TYPE_UNKNOWN
+} Tatr_Filter_Field_Type;
+
+// Value type definitions
+typedef enum {
+    TATR_FILTER_VALUE_TYPE_STATUS,
+    TATR_FILTER_VALUE_TYPE_STRING,
+    TATR_FILTER_VALUE_TYPE_NUMBER,
+    TATR_FILTER_VALUE_TYPE_LIST,
+    TATR_FILTER_VALUE_TYPE_BOOLEAN,
+    TATR_FILTER_VALUE_TYPE_UNKNOWN
+} Tatr_Filter_Value_Type;
+
+static Aids_String_Slice FIELD_NAME_STATUS = (Aids_String_Slice) { .str = (unsigned char *)"status", .len = 6 };
+static Aids_String_Slice FIELD_NAME_TAGS = (Aids_String_Slice) { .str = (unsigned char *)"tags", .len = 4 };
+static Aids_String_Slice FIELD_NAME_PRIORITY = (Aids_String_Slice) { .str = (unsigned char *)"priority", .len = 8 };
+static Aids_String_Slice FIELD_NAME_TITLE = (Aids_String_Slice) { .str = (unsigned char *)"title", .len = 5 };
+
+// Get field type from field name
+static Tatr_Filter_Field_Type tatr_filter_get_field_type(Aids_String_Slice field_name) {
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_STATUS) == 0) {
+        return TATR_FILTER_FIELD_TYPE_STATUS;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_TAGS) == 0) {
+        return TATR_FILTER_FIELD_TYPE_TAGS;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_PRIORITY) == 0) {
+        return TATR_FILTER_FIELD_TYPE_PRIORITY;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_TITLE) == 0) {
+        return TATR_FILTER_FIELD_TYPE_TITLE;
+    }
+    return TATR_FILTER_FIELD_TYPE_UNKNOWN;
+}
+
+// Type check the AST
+static boolean tatr_filter_typecheck_node(Tatr_Filter_Ast_Node *node, Tatr_Filter_Lexer *lexer, char *error_msg, size_t error_msg_size);
+
+static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr_Filter_Lexer *lexer, char *error_msg, size_t error_msg_size) {
+    Tatr_Filter_Ast_Node *left = node->data.comparison.left;
+    Tatr_Filter_Ast_Node *right = node->data.comparison.right;
+
+    // Left side must be a field
+    if (left->kind != TATR_FILTER_AST_NODE_KIND_FIELD) {
+        unsigned long line, column;
+        tatr_filter_lexer_position_info(lexer, left->info.index, &line, &column);
+        snprintf(error_msg, error_msg_size, "line %lu, col %lu: left side of comparison must be a field", line, column);
+        return false;
+    }
+
+    Tatr_Filter_Field_Type field_type = tatr_filter_get_field_type(left->data.field.name);
+    if (field_type == TATR_FILTER_FIELD_TYPE_UNKNOWN) {
+        unsigned long line, column;
+        tatr_filter_lexer_position_info(lexer, left->info.index, &line, &column);
+        snprintf(error_msg, error_msg_size, "line %lu, col %lu: unknown field '" SS_Fmt "'",
+                 line, column, SS_Arg(left->data.field.name));
+        return false;
+    }
+
+    // Type check based on operator and field type
+    Tatr_Filter_Comparison_Op op = node->data.comparison.op;
+
+    if (op == TATR_FILTER_COMPARISON_OP_EQ) {
+        // eq: field eq value
+        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
+            // Right side must be an identifier (status value like OPEN, CLOSED, IN_PROGRESS)
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: status comparison requires an identifier (OPEN, IN_PROGRESS, or CLOSED)", line, column);
+                return false;
+            }
+            // Validate status value
+            Task_Status status = task_status_from_string(&right->data.identifier.value);
+            Aids_String_Slice status_str = Task_Status_Strings[status];
+            if (aids_string_slice_compare(&right->data.identifier.value, &status_str) != 0) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid status value '" SS_Fmt "' (must be OPEN, IN_PROGRESS, or CLOSED)",
+                         line, column, SS_Arg(right->data.identifier.value));
+                return false;
+            }
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_PRIORITY) {
+            // Right side must be an identifier representing a number
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: priority comparison requires a number", line, column);
+                return false;
+            }
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_TITLE) {
+            // Right side must be an identifier (string value)
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: title comparison requires a string value", line, column);
+                return false;
+            }
+        } else {
+            unsigned long line, column;
+            tatr_filter_lexer_position_info(lexer, node->info.index, &line, &column);
+            snprintf(error_msg, error_msg_size, "line %lu, col %lu: 'eq' operator not supported for field '" SS_Fmt "'",
+                     line, column, SS_Arg(left->data.field.name));
+            return false;
+        }
+    } else if (op == TATR_FILTER_COMPARISON_OP_IN) {
+        // in: field in [list]
+        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
+            // Right side must be a list of status identifiers
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_LIST) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: 'in' operator requires a list", line, column);
+                return false;
+            }
+            // Validate all list items are valid status values
+            for (unsigned long i = 0; i < right->data.list.items.count; i++) {
+                Tatr_Filter_Ast_Node **item_ptr;
+                aids_array_get(&right->data.list.items, i, (void**)&item_ptr);
+                Tatr_Filter_Ast_Node *item = *item_ptr;
+
+                Task_Status status = task_status_from_string(&item->data.identifier.value);
+                Aids_String_Slice status_str = Task_Status_Strings[status];
+                if (aids_string_slice_compare(&item->data.identifier.value, &status_str) != 0) {
+                    unsigned long line, column;
+                    tatr_filter_lexer_position_info(lexer, item->info.index, &line, &column);
+                    snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid status value '" SS_Fmt "' in list",
+                             line, column, SS_Arg(item->data.identifier.value));
+                    return false;
+                }
+            }
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_TAGS) {
+            unsigned long line, column;
+            tatr_filter_lexer_position_info(lexer, node->info.index, &line, &column);
+            snprintf(error_msg, error_msg_size, "line %lu, col %lu: use 'contains' operator for tags, not 'in'", line, column);
+            return false;
+        } else {
+            unsigned long line, column;
+            tatr_filter_lexer_position_info(lexer, node->info.index, &line, &column);
+            snprintf(error_msg, error_msg_size, "line %lu, col %lu: 'in' operator not supported for field '" SS_Fmt "'",
+                     line, column, SS_Arg(left->data.field.name));
+            return false;
+        }
+    } else if (op == TATR_FILTER_COMPARISON_OP_CONTAINS) {
+        // contains: tags contains value or title contains value
+        if (field_type == TATR_FILTER_FIELD_TYPE_TAGS) {
+            // Right side must be an identifier (tag name)
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: tags 'contains' requires an identifier", line, column);
+                return false;
+            }
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_TITLE) {
+            // Right side must be an identifier (substring)
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: title 'contains' requires a string value", line, column);
+                return false;
+            }
+        } else {
+            unsigned long line, column;
+            tatr_filter_lexer_position_info(lexer, node->info.index, &line, &column);
+            snprintf(error_msg, error_msg_size, "line %lu, col %lu: 'contains' operator not supported for field '" SS_Fmt "'",
+                     line, column, SS_Arg(left->data.field.name));
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static boolean tatr_filter_typecheck_node(Tatr_Filter_Ast_Node *node, Tatr_Filter_Lexer *lexer, char *error_msg, size_t error_msg_size) {
+    if (!node) return true;
+
+    switch (node->kind) {
+        case TATR_FILTER_AST_NODE_KIND_BINARY_OP:
+            if (!tatr_filter_typecheck_node(node->data.binary_op.left, lexer, error_msg, error_msg_size)) {
+                return false;
+            }
+            if (!tatr_filter_typecheck_node(node->data.binary_op.right, lexer, error_msg, error_msg_size)) {
+                return false;
+            }
+            return true;
+
+        case TATR_FILTER_AST_NODE_KIND_UNARY_OP:
+            return tatr_filter_typecheck_node(node->data.unary_op.operand, lexer, error_msg, error_msg_size);
+
+        case TATR_FILTER_AST_NODE_KIND_COMPARISON:
+            return tatr_filter_typecheck_comparison(node, lexer, error_msg, error_msg_size);
+
+        case TATR_FILTER_AST_NODE_KIND_FIELD:
+        case TATR_FILTER_AST_NODE_KIND_IDENTIFIER:
+        case TATR_FILTER_AST_NODE_KIND_LIST:
+            return true;
+
+        default:
+            return true;
+    }
+}
+
+// Interpreter - evaluates AST to boolean
+static boolean tatr_filter_eval_node(Tatr_Filter_Ast_Node *node, const Task *task);
+
+static boolean tatr_filter_eval_comparison(Tatr_Filter_Ast_Node *node, const Task *task) {
+    Tatr_Filter_Ast_Node *left = node->data.comparison.left;
+    Tatr_Filter_Ast_Node *right = node->data.comparison.right;
+    Tatr_Filter_Comparison_Op op = node->data.comparison.op;
+
+    // Get field type
+    Tatr_Filter_Field_Type field_type = tatr_filter_get_field_type(left->data.field.name);
+
+    if (op == TATR_FILTER_COMPARISON_OP_EQ) {
+        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
+            Task_Status expected_status = task_status_from_string(&right->data.identifier.value);
+            return task->meta.status == expected_status;
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_PRIORITY) {
+            // Parse number from identifier
+            unsigned int expected_priority = 0;
+            for (unsigned long i = 0; i < right->data.identifier.value.len; i++) {
+                char c = right->data.identifier.value.str[i];
+                if (c >= '0' && c <= '9') {
+                    expected_priority = expected_priority * 10 + (c - '0');
+                } else {
+                    return false; // Invalid number
+                }
+            }
+            return task->meta.priority == expected_priority;
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_TITLE) {
+            return aids_string_slice_compare(&task->title, &right->data.identifier.value) == 0;
+        }
+    } else if (op == TATR_FILTER_COMPARISON_OP_IN) {
+        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
+            // Check if task status is in the list
+            for (unsigned long i = 0; i < right->data.list.items.count; i++) {
+                Tatr_Filter_Ast_Node **item_ptr;
+                aids_array_get(&right->data.list.items, i, (void**)&item_ptr);
+                Tatr_Filter_Ast_Node *item = *item_ptr;
+
+                Task_Status status = task_status_from_string(&item->data.identifier.value);
+                if (task->meta.status == status) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } else if (op == TATR_FILTER_COMPARISON_OP_CONTAINS) {
+        if (field_type == TATR_FILTER_FIELD_TYPE_TAGS) {
+            // Check if task has the tag
+            for (unsigned long i = 0; i < task->meta.tags.count; i++) {
+                Aids_String_Slice *tag;
+                aids_array_get(&task->meta.tags, i, (void**)&tag);
+                if (aids_string_slice_compare(tag, &right->data.identifier.value) == 0) {
+                    return true;
+                }
+            }
+            return false;
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_TITLE) {
+            // Check if title contains substring
+            if (right->data.identifier.value.len > task->title.len) {
+                return false;
+            }
+
+            // Simple substring search
+            for (unsigned long i = 0; i <= task->title.len - right->data.identifier.value.len; i++) {
+                boolean match = true;
+                for (unsigned long j = 0; j < right->data.identifier.value.len; j++) {
+                    if (task->title.str[i + j] != right->data.identifier.value.str[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    return false;
+}
+
+static boolean tatr_filter_eval_node(Tatr_Filter_Ast_Node *node, const Task *task) {
+    if (!node) return true;
+
+    switch (node->kind) {
+        case TATR_FILTER_AST_NODE_KIND_BINARY_OP:
+            if (node->data.binary_op.op == TATR_FILTER_BINARY_OP_AND) {
+                return tatr_filter_eval_node(node->data.binary_op.left, task) &&
+                       tatr_filter_eval_node(node->data.binary_op.right, task);
+            } else if (node->data.binary_op.op == TATR_FILTER_BINARY_OP_OR) {
+                return tatr_filter_eval_node(node->data.binary_op.left, task) ||
+                       tatr_filter_eval_node(node->data.binary_op.right, task);
+            }
+            return false;
+
+        case TATR_FILTER_AST_NODE_KIND_UNARY_OP:
+            if (node->data.unary_op.op == TATR_FILTER_UNARY_OP_NOT) {
+                return !tatr_filter_eval_node(node->data.unary_op.operand, task);
+            }
+            return false;
+
+        case TATR_FILTER_AST_NODE_KIND_COMPARISON:
+            return tatr_filter_eval_comparison(node, task);
+
+        default:
+            return false;
+    }
+}
+
+// Free AST nodes recursively
+static void tatr_filter_ast_free(Tatr_Filter_Ast_Node *node) {
+    if (!node) return;
+    
+    switch (node->kind) {
+        case TATR_FILTER_AST_NODE_KIND_BINARY_OP:
+            tatr_filter_ast_free(node->data.binary_op.left);
+            tatr_filter_ast_free(node->data.binary_op.right);
+            break;
+            
+        case TATR_FILTER_AST_NODE_KIND_UNARY_OP:
+            tatr_filter_ast_free(node->data.unary_op.operand);
+            break;
+            
+        case TATR_FILTER_AST_NODE_KIND_COMPARISON:
+            tatr_filter_ast_free(node->data.comparison.left);
+            tatr_filter_ast_free(node->data.comparison.right);
+            break;
+            
+        case TATR_FILTER_AST_NODE_KIND_LIST:
+            // Free all list items
+            for (unsigned long i = 0; i < node->data.list.items.count; i++) {
+                Tatr_Filter_Ast_Node **item_ptr;
+                if (aids_array_get(&node->data.list.items, i, (void**)&item_ptr) == AIDS_OK) {
+                    tatr_filter_ast_free(*item_ptr);
+                }
+            }
+            aids_array_free(&node->data.list.items);
+            break;
+            
+        case TATR_FILTER_AST_NODE_KIND_FIELD:
+        case TATR_FILTER_AST_NODE_KIND_IDENTIFIER:
+            // No child nodes to free
+            break;
+    }
+    
+    free(node);
+}
+
+// Main entry point: parse, typecheck, and create evaluator
+static Tatr_Filter_Ast_Node* tatr_filter_compile(Aids_String_Slice input, char *error_msg, size_t error_msg_size) {
+    // Parse
+    Tatr_Filter_Ast_Node *ast = tatr_filter_parse(input, error_msg, error_msg_size);
+    if (!ast) {
+        return NULL;
+    }
+
+    // Typecheck
+    Tatr_Filter_Lexer lexer;
+    tatr_filter_lexer_init(&lexer, input);
+    if (!tatr_filter_typecheck_node(ast, &lexer, error_msg, error_msg_size)) {
+        tatr_filter_ast_free(ast);
+        return NULL;
+    }
+
+    return ast;
+}
+
+// Evaluate filter against a task
+static boolean tatr_filter_eval(Tatr_Filter_Ast_Node *ast, const Task *task) {
+    return tatr_filter_eval_node(ast, task);
+}
+
 static int main_ls(const Tatr_Context *ctx) {
     int result = 0;
     Argparse_Parser parser = {0};
     Sort_By sort_by = Sort_By_CREATED;
     boolean recursive = false;
+    Tatr_Filter_Ast_Node *filter_ast = NULL;
 
     argparse_parser_init(&parser, "tatr ls", "List tasks", TATR_VERSION);
 
@@ -973,6 +2059,14 @@ static int main_ls(const Tatr_Context *ctx) {
         .required = 0
     });
 
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'f',
+        .long_name = "filter",
+        .description = "Filter tasks using a query expression (e.g., '(:status eq OPEN) and (:tags contains feature)')",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
     if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
@@ -989,6 +2083,19 @@ static int main_ls(const Tatr_Context *ctx) {
     Aids_Array all_projects = {0};  /* Project_Tasks */
 
     aids_array_init(&project_dirs, sizeof(Aids_String_Slice));
+    aids_array_init(&all_projects, sizeof(Project_Tasks));
+
+    // Parse and compile filter if provided
+    char *filter_str = argparse_get_value(&parser, "filter");
+    if (filter_str != NULL) {
+        char error_msg[256];
+        Aids_String_Slice filter_input = aids_string_slice_from_cstr(filter_str);
+        filter_ast = tatr_filter_compile(filter_input, error_msg, sizeof(error_msg));
+        if (!filter_ast) {
+            aids_log(AIDS_ERROR, "Filter error: %s", error_msg);
+            return_defer(1);
+        }
+    }
 
     if (recursive) {
         if (find_tasks_dirs_recursive(&ctx->cwd, &project_dirs) != AIDS_OK) {
@@ -1000,8 +2107,6 @@ static int main_ls(const Tatr_Context *ctx) {
             return_defer(1);
         }
     }
-
-    aids_array_init(&all_projects, sizeof(Project_Tasks));
 
     for (size_t i = 0; i < project_dirs.count; ++i) {
         Aids_String_Slice *project_dir = NULL;
@@ -1068,6 +2173,12 @@ static int main_ls(const Tatr_Context *ctx) {
         for (size_t j = 0; j < pt->tasks.count; ++j) {
             Task_Entry *entry = NULL;
             if (aids_array_get(&pt->tasks, j, (void **)&entry) == AIDS_OK) {
+                // Apply filter if provided
+                if (filter_ast != NULL) {
+                    if (!tatr_filter_eval(filter_ast, &entry->task)) {
+                        continue; // Task doesn't match filter, skip it
+                    }
+                }
                 task_print(full_tasks_dir, entry->huid, entry->task);
             }
         }
@@ -1076,9 +2187,13 @@ static int main_ls(const Tatr_Context *ctx) {
     }
 
 defer:
+    if (filter_ast != NULL) {
+        tatr_filter_ast_free(filter_ast);
+    }
+    
     for (size_t i = 0; i < all_projects.count; ++i) {
         Project_Tasks *pt = NULL;
-        if (aids_array_get(&all_projects, i, (void **)&pt) == AIDS_OK) {
+        if (aids_array_get(&all_projects, i, (void **)&pt) == AIDS_OK && pt != NULL) {
             project_tasks_cleanup(pt);
         }
     }
@@ -1097,10 +2212,10 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  -r, --root     Change working directory before running command\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Subcommands:\n");
-    fprintf(stderr, "  help       Show this help message\n");
-    fprintf(stderr, "  version    Show version information\n");
-    fprintf(stderr, "  new        Create a new task\n");
-    fprintf(stderr, "  ls         List tasks\n");
+    fprintf(stderr, "  help         Show this help message\n");
+    fprintf(stderr, "  version      Show version information\n");
+    fprintf(stderr, "  new          Create a new task\n");
+    fprintf(stderr, "  ls           List tasks\n");
     fprintf(stderr, "\n");
 }
 
