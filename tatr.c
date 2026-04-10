@@ -984,58 +984,6 @@ typedef struct {
     Tatr_Token_Info info;
 } Tatr_Filter_Token;
 
-static void tatr_filter_token_print(Tatr_Filter_Token token) {
-    switch (token.kind) {
-        case TATR_FILTER_TOKEN_KIND_EOF:
-            printf("EOF");
-            break;
-        case TATR_FILTER_TOKEN_KIND_EQ:
-            printf("EQ");
-            break;
-        case TATR_FILTER_TOKEN_KIND_IN:
-            printf("IN");
-            break;
-        case TATR_FILTER_TOKEN_KIND_CONTAINS:
-            printf("CONTAINS");
-            break;
-        case TATR_FILTER_TOKEN_KIND_AND:
-            printf("AND");
-            break;
-        case TATR_FILTER_TOKEN_KIND_OR:
-            printf("OR");
-            break;
-        case TATR_FILTER_TOKEN_KIND_NOT:
-            printf("NOT");
-            break;
-        case TATR_FILTER_TOKEN_KIND_LPAREN:
-            printf("LPAREN");
-            break;
-        case TATR_FILTER_TOKEN_KIND_RPAREN:
-            printf("RPAREN");
-            break;
-        case TATR_FILTER_TOKEN_KIND_LBRACKET:
-            printf("LBRACKET");
-            break;
-        case TATR_FILTER_TOKEN_KIND_RBRACKET:
-            printf("RBRACKET");
-            break;
-        case TATR_FILTER_TOKEN_KIND_COMMA:
-            printf("COMMA");
-            break;
-        case TATR_FILTER_TOKEN_KIND_FIELD:
-            printf("FIELD(" SS_Fmt ")", SS_Arg(token.text));
-            break;
-        case TATR_FILTER_TOKEN_KIND_IDENTIFIER:
-            printf("IDENTIFIER(" SS_Fmt ")", SS_Arg(token.text));
-            break;
-        case TATR_FILTER_TOKEN_KIND_INVALID:
-            printf("INVALID(" SS_Fmt ")", SS_Arg(token.text));
-            break;
-        default:
-            printf("UNKNOWN");
-    }
-}
-
 typedef struct {
     Aids_String_Slice input;
     unsigned long pos;
@@ -1974,22 +1922,22 @@ static boolean tatr_filter_eval_node(Tatr_Filter_Ast_Node *node, const Task *tas
 // Free AST nodes recursively
 static void tatr_filter_ast_free(Tatr_Filter_Ast_Node *node) {
     if (!node) return;
-    
+
     switch (node->kind) {
         case TATR_FILTER_AST_NODE_KIND_BINARY_OP:
             tatr_filter_ast_free(node->data.binary_op.left);
             tatr_filter_ast_free(node->data.binary_op.right);
             break;
-            
+
         case TATR_FILTER_AST_NODE_KIND_UNARY_OP:
             tatr_filter_ast_free(node->data.unary_op.operand);
             break;
-            
+
         case TATR_FILTER_AST_NODE_KIND_COMPARISON:
             tatr_filter_ast_free(node->data.comparison.left);
             tatr_filter_ast_free(node->data.comparison.right);
             break;
-            
+
         case TATR_FILTER_AST_NODE_KIND_LIST:
             // Free all list items
             for (unsigned long i = 0; i < node->data.list.items.count; i++) {
@@ -2000,13 +1948,13 @@ static void tatr_filter_ast_free(Tatr_Filter_Ast_Node *node) {
             }
             aids_array_free(&node->data.list.items);
             break;
-            
+
         case TATR_FILTER_AST_NODE_KIND_FIELD:
         case TATR_FILTER_AST_NODE_KIND_IDENTIFIER:
             // No child nodes to free
             break;
     }
-    
+
     free(node);
 }
 
@@ -2190,7 +2138,7 @@ defer:
     if (filter_ast != NULL) {
         tatr_filter_ast_free(filter_ast);
     }
-    
+
     for (size_t i = 0; i < all_projects.count; ++i) {
         Project_Tasks *pt = NULL;
         if (aids_array_get(&all_projects, i, (void **)&pt) == AIDS_OK && pt != NULL) {

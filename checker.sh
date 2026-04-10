@@ -430,6 +430,406 @@ test_task_format() {
     fi
 }
 
+# Test 16: Filter by status (eq)
+test_filter_status_eq() {
+    log_test "filter (status eq)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Open task" -s OPEN > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Closed task" -s CLOSED > /dev/null 2>&1
+    sleep 1
+    run_tatr new "In progress task" -s IN_PROGRESS > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f ':status eq OPEN' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "Open task" && \
+       ! echo "$output" | grep -q "Closed task" && \
+       ! echo "$output" | grep -q "In progress task"; then
+        pass_test
+    else
+        fail_test "Status eq filter not working correctly"
+    fi
+}
+
+# Test 17: Filter by status (in)
+test_filter_status_in() {
+    log_test "filter (status in)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Open task" -s OPEN > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Closed task" -s CLOSED > /dev/null 2>&1
+    sleep 1
+    run_tatr new "In progress task" -s IN_PROGRESS > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f ':status in [OPEN, CLOSED]' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "Open task" && \
+       echo "$output" | grep -q "Closed task" && \
+       ! echo "$output" | grep -q "In progress task"; then
+        pass_test
+    else
+        fail_test "Status in filter not working correctly"
+    fi
+}
+
+# Test 18: Filter by tags (contains)
+test_filter_tags_contains() {
+    log_test "filter (tags contains)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Feature task" -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Bug task" -t bug > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Mixed task" -t feature -t bug > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f ':tags contains feature' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "Feature task" && \
+       echo "$output" | grep -q "Mixed task" && \
+       ! echo "$output" | grep -q "Bug task"; then
+        pass_test
+    else
+        fail_test "Tags contains filter not working correctly"
+    fi
+}
+
+# Test 19: Filter by priority
+test_filter_priority() {
+    log_test "filter (priority eq)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "High priority" -p 100 > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Medium priority" -p 50 > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Low priority" -p 10 > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f ':priority eq 100' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "High priority" && \
+       ! echo "$output" | grep -q "Medium priority" && \
+       ! echo "$output" | grep -q "Low priority"; then
+        pass_test
+    else
+        fail_test "Priority filter not working correctly"
+    fi
+}
+
+# Test 20: Filter with AND operator
+test_filter_and() {
+    log_test "filter (AND operator)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "High priority feature" -p 100 -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Low priority feature" -p 10 -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "High priority bug" -p 100 -t bug > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f '(:priority eq 100) and (:tags contains feature)' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "High priority feature" && \
+       ! echo "$output" | grep -q "Low priority feature" && \
+       ! echo "$output" | grep -q "High priority bug"; then
+        pass_test
+    else
+        fail_test "AND operator not working correctly"
+    fi
+}
+
+# Test 21: Filter with OR operator
+test_filter_or() {
+    log_test "filter (OR operator)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "High priority" -p 100 > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Medium priority" -p 50 > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Low priority" -p 10 > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f '(:priority eq 100) or (:priority eq 10)' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "High priority" && \
+       echo "$output" | grep -q "Low priority" && \
+       ! echo "$output" | grep -q "Medium priority"; then
+        pass_test
+    else
+        fail_test "OR operator not working correctly"
+    fi
+}
+
+# Test 22: Filter with NOT operator
+test_filter_not() {
+    log_test "filter (NOT operator)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Feature task" -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Bug task" -t bug > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Other task" -t other > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f 'not (:tags contains bug)' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "Feature task" && \
+       echo "$output" | grep -q "Other task" && \
+       ! echo "$output" | grep -q "Bug task"; then
+        pass_test
+    else
+        fail_test "NOT operator not working correctly"
+    fi
+}
+
+# Test 23: Filter with parentheses for precedence
+test_filter_precedence() {
+    log_test "filter (precedence with parens)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Task 1" -p 100 -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Task 2" -p 50 -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Task 3" -p 100 -t bug > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Task 4" -p 50 -t bug > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f '((:priority eq 100) or (:priority eq 50)) and (:tags contains feature)' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "Task 1" && \
+       echo "$output" | grep -q "Task 2" && \
+       ! echo "$output" | grep -q "Task 3" && \
+       ! echo "$output" | grep -q "Task 4"; then
+        pass_test
+    else
+        fail_test "Filter precedence not working correctly"
+    fi
+}
+
+# Test 24: Filter error - invalid field
+test_filter_error_invalid_field() {
+    log_test "filter error (invalid field)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Test task" > /dev/null 2>&1
+
+    set +e
+    local output
+    output=$(run_tatr ls -f ':invalid_field eq 100' 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] && echo "$output" | grep -q "unknown field"; then
+        pass_test
+    else
+        fail_test "Should fail with invalid field"
+    fi
+}
+
+# Test 25: Filter error - invalid status value
+test_filter_error_invalid_status() {
+    log_test "filter error (invalid status)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Test task" > /dev/null 2>&1
+
+    set +e
+    local output
+    output=$(run_tatr ls -f ':status eq INVALID_STATUS' 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] && echo "$output" | grep -q "invalid status value"; then
+        pass_test
+    else
+        fail_test "Should fail with invalid status value"
+    fi
+}
+
+# Test 26: Filter error - empty expression
+test_filter_error_empty() {
+    log_test "filter error (empty expression)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Test task" > /dev/null 2>&1
+
+    set +e
+    local output
+    output=$(run_tatr ls -f '' 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] && echo "$output" | grep -q "empty filter"; then
+        pass_test
+    else
+        fail_test "Should fail with empty filter expression"
+    fi
+}
+
+# Test 27: Filter error - syntax error
+test_filter_error_syntax() {
+    log_test "filter error (syntax error)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Test task" > /dev/null 2>&1
+
+    set +e
+    local output
+    output=$(run_tatr ls -f ':status eq' 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ]; then
+        pass_test
+    else
+        fail_test "Should fail with syntax error"
+    fi
+}
+
+# Test 28: Filter combined with sorting
+test_filter_with_sort() {
+    log_test "filter with sorting"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Low priority feature" -p 10 -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "High priority feature" -p 100 -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Medium priority bug" -p 50 -t bug > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f ':tags contains feature' -s priority 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        # High priority should appear before low priority
+        local high_line=$(echo "$output" | grep -n "High priority feature" | cut -d: -f1)
+        local low_line=$(echo "$output" | grep -n "Low priority feature" | cut -d: -f1)
+
+        if [ -n "$high_line" ] && [ -n "$low_line" ] && \
+           [ "$high_line" -lt "$low_line" ] && \
+           ! echo "$output" | grep -q "Medium priority bug"; then
+            pass_test
+        else
+            fail_test "Filter with sort not working correctly"
+        fi
+    else
+        fail_test "Exit code: $exit_code"
+    fi
+}
+
+# Test 29: Filter with recursive listing
+test_filter_with_recursive() {
+    log_test "filter with recursive"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p project1/tasks
+    mkdir -p project2/tasks
+
+    cd project1
+    run_tatr new "Project 1 feature" -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Project 1 bug" -t bug > /dev/null 2>&1
+
+    cd ../project2
+    sleep 1
+    run_tatr new "Project 2 feature" -t feature > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Project 2 bug" -t bug > /dev/null 2>&1
+
+    cd ..
+    local output=$(run_tatr -r . ls -R -f ':tags contains feature' 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "Project 1 feature" && \
+       echo "$output" | grep -q "Project 2 feature" && \
+       ! echo "$output" | grep -q "bug"; then
+        pass_test
+    else
+        fail_test "Filter with recursive not working correctly"
+    fi
+}
+
+# Test 30: Filter returns no results
+test_filter_no_results() {
+    log_test "filter (no matching results)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Bug task" -t bug > /dev/null 2>&1
+
+    local output=$(run_tatr ls -f ':tags contains feature' 2>&1)
+    local exit_code=$?
+
+    # Should succeed but return no tasks
+    if [ $exit_code -eq 0 ] && ! echo "$output" | grep -q "Bug task"; then
+        pass_test
+    else
+        fail_test "Filter should return no results but succeed"
+    fi
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -490,6 +890,21 @@ test_ls_recursive
 test_root_flag
 test_error_no_tasks_dir
 test_task_format
+test_filter_status_eq
+test_filter_status_in
+test_filter_tags_contains
+test_filter_priority
+test_filter_and
+test_filter_or
+test_filter_not
+test_filter_precedence
+test_filter_error_invalid_field
+test_filter_error_invalid_status
+test_filter_error_empty
+test_filter_error_syntax
+test_filter_with_sort
+test_filter_with_recursive
+test_filter_no_results
 
 echo
 echo "Passed $PASSED_TESTS/$TOTAL_TESTS tests"
