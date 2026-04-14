@@ -2103,10 +2103,6 @@ static int main_ls(const Tatr_Context *ctx) {
             continue;
         }
 
-        if (recursive) {
-            printf(SS_Fmt "\n", SS_Arg(pt->project_dir));
-        }
-
         Aids_String_Slice full_tasks_dir = {0};
         Aids_String_Builder path_sb = {0};
         aids_string_builder_init(&path_sb);
@@ -2117,6 +2113,28 @@ static int main_ls(const Tatr_Context *ctx) {
             continue;
         }
         aids_string_builder_to_slice(&path_sb, &full_tasks_dir);
+
+        // In recursive mode with a filter, check if any tasks match before printing header
+        boolean has_matching_tasks = false;
+        if (recursive && filter_ast != NULL) {
+            for (size_t j = 0; j < pt->tasks.count; ++j) {
+                Task_Entry *entry = NULL;
+                if (aids_array_get(&pt->tasks, j, (void **)&entry) == AIDS_OK) {
+                    if (tatr_filter_eval(filter_ast, &entry->task)) {
+                        has_matching_tasks = true;
+                        break;
+                    }
+                }
+            }
+        } else if (recursive) {
+            // No filter, so all tasks match
+            has_matching_tasks = true;
+        }
+
+        // Print section header only if we have matching tasks (in recursive mode)
+        if (recursive && has_matching_tasks) {
+            printf(SS_Fmt "\n", SS_Arg(pt->project_dir));
+        }
 
         for (size_t j = 0; j < pt->tasks.count; ++j) {
             Task_Entry *entry = NULL;
