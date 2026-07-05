@@ -1,6 +1,6 @@
 # Add show command to display a single task by ID
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
 

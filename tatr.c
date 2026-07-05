@@ -608,6 +608,59 @@ defer:
     return result;
 }
 
+// Resolves a task HUID argument to the located tasks directory and the task's
+// file path, verifying the HUID is well-formed and that the task exists. On
+// success the caller owns both *tasks_dir and *task_file_path and must free
+// them. Shared by the show, edit and rm subcommands.
+static Aids_Result task_resolve(const Aids_String_Slice *cwd,
+                                const Aids_String_Slice *huid,
+                                Aids_String_Slice *tasks_dir,
+                                Aids_String_Slice *task_file_path) {
+    Aids_Result result = AIDS_OK;
+    Aids_String_Slice td = {0};
+    Aids_String_Slice task_dir = {0};
+    Aids_String_Slice tfp = {0};
+
+    if (!ishuid(huid)) {
+        aids_log(AIDS_ERROR, "Invalid task ID '" SS_Fmt "': expected format YYYYMMDD-HHMMSS", SS_Arg(*huid));
+        return_defer(AIDS_ERR);
+    }
+
+    if (tasks_dir_path_build(cwd, &td) != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
+    if (task_dir_path_build(&td, huid, &task_dir) != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
+    if (!aids_io_isdir(&task_dir)) {
+        aids_log(AIDS_ERROR, "Task '" SS_Fmt "' not found", SS_Arg(*huid));
+        return_defer(AIDS_ERR);
+    }
+
+    if (task_file_path_build(&td, huid, &tfp) != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
+    *tasks_dir = td;
+    td = (Aids_String_Slice){0}; // Ownership transferred to caller
+    *task_file_path = tfp;
+    tfp = (Aids_String_Slice){0}; // Ownership transferred to caller
+
+defer:
+    if (td.str != NULL) {
+        AIDS_FREE(td.str);
+    }
+    if (task_dir.str != NULL) {
+        AIDS_FREE(task_dir.str);
+    }
+    if (tfp.str != NULL) {
+        AIDS_FREE(tfp.str);
+    }
+    return result;
+}
+
 static void print_file_path(const char *path) {
     if (isatty(STDOUT_FILENO)) {
         printf(AIDS_TERMINAL_BLUE "\033]8;;editor://%s\033\\%s\033]8;;\033\\" AIDS_TERMINAL_RESET, path, path);
@@ -636,6 +689,94 @@ static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task
         }
     }
     printf("] " SS_Fmt "\n", SS_Arg(task.title));
+}
+
+// Prints the full task: a clickable path header followed by the task fields and
+// description body, mirroring the on-disk TASK.md layout.
+static void task_print_full(Aids_String_Slice task_file_path, Task task) {
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt, SS_Arg(task_file_path)) < 0) {
+        aids_log(AIDS_ERROR, "Failed to build task file path for printing: %s", strerror(errno));
+        return;
+    }
+
+    print_file_path(path_buffer);
+    printf("\n\n");
+
+    printf("# " SS_Fmt "\n\n", SS_Arg(task.title));
+    printf(SS_Fmt SS_Fmt "\n", SS_Arg(STATUS_FORMAT), SS_Arg(Task_Status_Strings[task.meta.status]));
+    printf(SS_Fmt "%u\n", SS_Arg(PRIORITY_FORMAT), task.meta.priority);
+    printf(SS_Fmt, SS_Arg(TAGS_FORMAT));
+    for (size_t i = 0; i < task.meta.tags.count; ++i) {
+        Aids_String_Slice *tag = NULL;
+        AIDS_ASSERT(aids_array_get(&task.meta.tags, i, (void **)&tag) == AIDS_OK,
+                   "Failed to get tag at index %zu: %s", i, aids_failure_reason());
+        printf(SS_Fmt, SS_Arg(*tag));
+        if (i < task.meta.tags.count - 1) {
+            printf(", ");
+        }
+    }
+    printf("\n");
+
+    if (task.description.len > 0) {
+        printf("\n" SS_Fmt "\n", SS_Arg(task.description));
+    }
+}
+
+static int main_show(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+
+    argparse_parser_init(&parser, "tatr show", "Show a single task by ID", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+
+    if (task_load(&task_file_path, &task) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_print_full(task_file_path, task);
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
 }
 
 static void cleanup_string_slice_array(Aids_Array *array) {
@@ -2182,6 +2323,7 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  version      Show version information\n");
     fprintf(stderr, "  new          Create a new task\n");
     fprintf(stderr, "  ls           List tasks\n");
+    fprintf(stderr, "  show         Show a single task by ID\n");
     fprintf(stderr, "\n");
 }
 
@@ -2255,6 +2397,9 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "ls") == 0) {
         result = main_ls(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "show") == 0) {
+        result = main_show(&ctx);
         return_defer(result);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);

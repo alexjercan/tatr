@@ -430,6 +430,74 @@ test_task_format() {
     fi
 }
 
+# Helper: create a task and echo its generated ID
+new_task_id() {
+    run_tatr new "$@" 2>&1 | grep -o '[0-9]\{8\}-[0-9]\{6\}' | head -1
+}
+
+test_show_existing() {
+    log_test "show existing task"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Show me" -p 55 -t alpha -t beta -s IN_PROGRESS)
+    local output=$(run_tatr show "$id" 2>&1)
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && \
+       echo "$output" | grep -q "# Show me" && \
+       echo "$output" | grep -q "STATUS: IN_PROGRESS" && \
+       echo "$output" | grep -q "PRIORITY: 55" && \
+       echo "$output" | grep -q "TAGS: alpha, beta" && \
+       echo "$output" | grep -q "$id/TASK.md"; then
+        pass_test
+    else
+        fail_test "Exit code: $exit_code, Output: $output"
+    fi
+}
+
+test_show_invalid_id() {
+    log_test "show with invalid id"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    set +e
+    local output
+    output=$(run_tatr show "not-a-huid" 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ]; then
+        pass_test
+    else
+        fail_test "Expected non-zero exit for invalid id"
+    fi
+}
+
+test_show_missing_id() {
+    log_test "show non-existent task"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    set +e
+    local output
+    output=$(run_tatr show "20991231-235959" 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ]; then
+        pass_test
+    else
+        fail_test "Expected non-zero exit for missing task"
+    fi
+}
+
 # Test 16: Filter by status (eq)
 test_filter_status_eq() {
     log_test "filter (status eq)"
@@ -890,6 +958,9 @@ test_ls_recursive
 test_root_flag
 test_error_no_tasks_dir
 test_task_format
+test_show_existing
+test_show_invalid_id
+test_show_missing_id
 test_filter_status_eq
 test_filter_status_in
 test_filter_tags_contains
