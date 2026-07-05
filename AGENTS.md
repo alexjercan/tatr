@@ -1,0 +1,124 @@
+# AGENTS.md
+
+Guidance for AI agents (and humans) working in the `tatr` repository.
+
+## What tatr is
+
+tatr (Task Tracker) is a small command-line tool, written in C, that stores
+tasks as Markdown files under a `tasks/` directory so they version-control
+alongside the code. Each task is a directory named with a timestamp HUID
+(`YYYYMMDD-HHMMSS`) containing a `TASK.md`. It is a deliberately minimal,
+offline, zero-config alternative to an issue tracker.
+
+## Layout
+
+```
+tatr.c        # the entire program (single translation unit)
+aids.h        # vendored header-only utility library (strings, arrays, IO, logging)
+argparse.h    # vendored header-only CLI argument parser
+Makefile      # build + install
+checker.sh    # the test suite (integration tests that drive the built binary)
+flake.nix     # nix dev shell (provides clang, valgrind, etc.)
+README.md     # user-facing documentation
+docs/         # design notes, retros, and other project documentation
+tasks/        # tatr's own task backlog (tatr dogfoods itself)
+```
+
+There is no separate build system beyond the Makefile; `tatr.c` includes the two
+vendored headers and defines their implementations at the bottom of the file
+(`ARGPARSE_IMPLEMENTATION` / `AIDS_IMPLEMENTATION`).
+
+## Building
+
+The Makefile defaults to `clang`:
+
+```bash
+make            # builds ./tatr with clang -Wall -Wextra -O2 -g
+make clean
+make install PREFIX=$HOME/.local
+```
+
+The canonical toolchain (clang, valgrind) is provided by the nix dev shell:
+
+```bash
+nix develop -c make
+```
+
+If only `gcc` is available, build with `make CC=gcc`; the code is portable
+POSIX C and compiles cleanly under both. Keep it warning-clean under
+`-Wall -Wextra`.
+
+## Testing
+
+`checker.sh` is the test suite. It rebuilds the binary and runs integration
+tests that invoke `./tatr` against throwaway `tasks/` directories. Always run it
+after a change:
+
+```bash
+nix develop -c ./checker.sh            # build + run all tests
+nix develop -c ./checker.sh -v         # verbose (shows failure details)
+nix develop -c ./checker.sh --memcheck  # run every test under valgrind (no leaks allowed)
+```
+
+Prefer integration tests here over unit tests: add a `test_*` function next to
+the related ones and register it in the run list near the bottom of the file.
+
+### checker.sh gotcha
+
+The script runs under `set -e`. A bare command that exits non-zero aborts the
+whole run, and `local out=$(cmd)` swallows the command's exit code (you get
+`local`'s status, which is always 0). To assert that a command fails, use:
+
+```sh
+set +e
+local output
+output=$(run_tatr <args> 2>&1)
+local exit_code=$?
+set -e
+```
+
+To capture a generated task ID in a test, use the `new_task_id` helper.
+
+## Code conventions
+
+- Keep it a single file. New commands go in `tatr.c`; do not split into multiple
+  translation units or add build complexity.
+- Follow the existing command shape: each subcommand is a `static int main_<cmd>`
+  that builds its own `Argparse_Parser`, parses `ctx->argc/argv`, does its work,
+  and cleans up under a `defer:` label. Wire it into the dispatch chain and the
+  `tatr_print_help` list in `main`.
+- Reuse the shared spine rather than reimplementing it:
+  - `task_resolve(cwd, huid, &tasks_dir, &task_file_path)` validates a HUID,
+    locates the `tasks/` dir (upward search, honoring `-r ROOT`), checks the
+    task exists, and hands back owned paths. `show`, `edit` and `rm` all use it.
+  - `task_load` / `task_save` and `task_serialize` / `task_deserialize` are the
+    only path to and from `TASK.md`. Editing a task means load, mutate fields,
+    save; this preserves the description body automatically.
+- Memory: match the ownership discipline in the existing code and free
+  everything in `defer:`. Every change must pass `--memcheck` with zero leaks.
+- Anything that deletes on disk must be gated behind a validated HUID and only
+  ever touch `tasks/<id>/`. Never build a destructive path from raw user input.
+- Error out non-zero with a clear `aids_log(AIDS_ERROR, ...)` message; do not
+  half-apply a change (validate before writing).
+
+## Working with the backlog
+
+tatr tracks its own work in `tasks/`. Use the tool itself:
+
+```bash
+tatr ls -s priority          # see the backlog
+tatr show <ID>               # read a task's full description and steps
+tatr edit <ID> -s IN_PROGRESS  # claim a task
+tatr edit <ID> -s CLOSED     # finish it
+tatr new "..." -p 80 -t feature  # add newly discovered work
+```
+
+Design notes and per-task retrospectives live in `docs/` (see `docs/retros/`);
+add to them after a meaningful change so future sessions inherit the context.
+
+## Commits
+
+- Plain commit messages, no AI attribution or co-author trailers.
+- Use plain ASCII punctuation only: `-`, `--`, `...`, `->`, straight quotes. No
+  em dashes, smart quotes, ellipsis characters, or arrows, in code, comments,
+  docs, or commit messages.

@@ -19,7 +19,9 @@ primarily a toy project inspired by Tsoding's streams.
 - **Filesystem-based storage**: Tasks stored as Markdown files in a `tasks/` directory
 - **Human-readable IDs**: Each task gets a timestamp-based HUID (format: `YYYYMMDD-HHMMSS`)
 - **Metadata support**: Track status, priority, and tags for each task
-- **Flexible listing**: Sort tasks by creation date, priority, or title
+- **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
+- **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
+- **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
 - **Terminal integration**: Clickable file paths in OSC 8-compliant terminals
 - **Zero configuration**: Works out of the box with no setup required
 
@@ -93,6 +95,28 @@ tatr ls -R
 **Options:**
 - `-s, --sort <value>`: Sort by (created, priority, title; default: created)
 - `-R, --recursive`: Recursively search for tasks directories in all subdirectories
+- `-f, --filter <value>`: Filter tasks with a query expression
+
+**Filtering:**
+
+The `-f` flag takes a small query language over task fields. Fields are written
+with a leading colon (`:status`, `:priority`, `:tags`), combined with operators
+and grouped with parentheses:
+
+```bash
+# Only open tasks
+tatr ls -f '(:status eq OPEN)'
+
+# Tasks tagged feature
+tatr ls -f ':tags contains feature'
+
+# Open feature tasks, combining conditions
+tatr ls -f '(:status eq OPEN) and (:tags contains feature)'
+```
+
+Supported operators include `eq`, `contains`, `in` (with `[...]` lists), and the
+boolean connectives `and`, `or`, `not`. Filtering composes with sorting and
+recursive mode, and applies per section in recursive mode.
 
 **Output format:**
 ```
@@ -100,6 +124,55 @@ tasks/20260331-144635/TASK.md: [PRIORITY: 100, TAGS: feature] Implement filter s
 tasks/20260330-202358/TASK.md: [PRIORITY: 80, TAGS: testing,bug] Add unit tests
 tasks/20260329-123700/TASK.md: [PRIORITY: 0, TAGS: ] Fix memory leak in parser
 ```
+
+### Showing a Task
+
+Print the full details of a single task by its ID, including the description
+body and a clickable file path:
+
+```bash
+tatr show 20260331-144635
+```
+
+The argument is the task's HUID (the `tasks/<ID>/` directory name). `show` exits
+non-zero if the ID is malformed or the task does not exist.
+
+### Editing a Task
+
+Update the metadata or title of an existing task without opening an editor. Only
+the fields you pass are changed; everything else, including the description body,
+is left untouched. This is the command automation and agents use to move a task
+through its lifecycle (for example OPEN -> IN_PROGRESS -> CLOSED):
+
+```bash
+# Move a task to IN_PROGRESS
+tatr edit 20260331-144635 -s IN_PROGRESS
+
+# Bump priority and retitle
+tatr edit 20260331-144635 -p 90 -T "Implement query filter language"
+
+# Replace the tag set (edit replaces tags, it does not merge them)
+tatr edit 20260331-144635 -t feature -t parser
+```
+
+**Options:**
+- `-T, --title <value>`: New task title
+- `-p, --priority <value>`: New priority (non-negative integer)
+- `-t, --tags <value>...`: New tags, replacing the existing set
+- `-s, --status <value>`: New status (OPEN, IN_PROGRESS, CLOSED)
+
+An invalid status value is rejected and the task file is left unchanged.
+
+### Removing a Task
+
+Delete a task's directory (its `TASK.md` and anything else inside it) by ID:
+
+```bash
+tatr rm 20260331-144635
+```
+
+`rm` only ever touches the validated `tasks/<ID>/` directory and exits non-zero
+if the ID is malformed or the task does not exist.
 
 ### Global Options
 
@@ -145,7 +218,7 @@ The tool searches for a `tasks/` directory starting from your current directory 
 
 tatr is built with simplicity in mind:
 
-- **Single-file implementation**: ~930 lines of C code
+- **Single-file implementation**: all logic lives in `tatr.c`
 - **Header-only dependencies**: aids.h for utilities, argparse.h for CLI parsing
 - **POSIX-compliant**: Uses standard filesystem and time APIs
 - **No database**: All data stored as plain Markdown files
@@ -222,11 +295,13 @@ grep -r "TODO" tasks/
 
 ## Limitations
 
-- No built-in task editing command (use your text editor)
-- No filtering by status or tags yet (use grep or ls filters)
 - No task dependencies or relationships
 - No remote synchronization
 - Maximum 256 arguments for CLI parsing
+
+`tatr edit` covers non-interactive metadata and title changes; open the `TASK.md`
+file directly to edit the free-form description body. Filtering by status and
+tags is available through `tatr ls -f` (see Filtering under Listing Tasks).
 
 ## License
 

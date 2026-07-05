@@ -1,6 +1,6 @@
 # Add AGENTS.md and document new agent commands
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: docs
 
