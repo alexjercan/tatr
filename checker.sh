@@ -636,6 +636,101 @@ test_edit_missing_id() {
     fi
 }
 
+test_rm_existing() {
+    log_test "rm existing task"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Remove me")
+    run_tatr rm "$id" > /dev/null 2>&1
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ] && [ ! -d "tasks/$id" ]; then
+        pass_test
+    else
+        fail_test "Task directory still present after rm"
+    fi
+}
+
+test_rm_nonempty_dir() {
+    log_test "rm task dir with extra files"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Remove me")
+    echo "review notes" > "tasks/$id/REVIEW.md"
+    run_tatr rm "$id" > /dev/null 2>&1
+
+    if [ ! -d "tasks/$id" ]; then
+        pass_test
+    else
+        fail_test "Task directory with extra files not removed"
+    fi
+}
+
+test_rm_preserves_siblings() {
+    log_test "rm leaves other tasks untouched"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id1=$(new_task_id "First")
+    sleep 1
+    local id2=$(new_task_id "Second")
+    run_tatr rm "$id1" > /dev/null 2>&1
+
+    if [ ! -d "tasks/$id1" ] && [ -d "tasks/$id2" ]; then
+        pass_test
+    else
+        fail_test "Sibling task affected by rm"
+    fi
+}
+
+test_rm_invalid_id() {
+    log_test "rm with invalid id"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    set +e
+    local output
+    output=$(run_tatr rm "not-a-huid" 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ]; then
+        pass_test
+    else
+        fail_test "Expected non-zero exit for invalid id"
+    fi
+}
+
+test_rm_missing_id() {
+    log_test "rm non-existent task"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    set +e
+    local output
+    output=$(run_tatr rm "20991231-235959" 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ]; then
+        pass_test
+    else
+        fail_test "Expected non-zero exit for missing task"
+    fi
+}
+
 # Test 16: Filter by status (eq)
 test_filter_status_eq() {
     log_test "filter (status eq)"
@@ -1106,6 +1201,11 @@ test_edit_title
 test_edit_partial_preserves_fields
 test_edit_invalid_status
 test_edit_missing_id
+test_rm_existing
+test_rm_nonempty_dir
+test_rm_preserves_siblings
+test_rm_invalid_id
+test_rm_missing_id
 test_filter_status_eq
 test_filter_status_in
 test_filter_tags_contains

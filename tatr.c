@@ -943,6 +943,108 @@ static void cleanup_string_slice_array(Aids_Array *array) {
     aids_array_free(array);
 }
 
+static int main_rm(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_String_Slice task_dir = {0};
+    Aids_Array entries = {0};
+    boolean entries_initialized = false;
+
+    argparse_parser_init(&parser, "tatr rm", "Remove a task by ID", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    if (task_dir_path_build(&tasks_dir, &id, &task_dir) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    // Remove every regular entry inside the (validated) task directory, then the
+    // directory itself. task_resolve has already confirmed the HUID is
+    // well-formed and the directory exists, so we only ever touch tasks/<id>/.
+    aids_array_init(&entries, sizeof(Aids_String_Slice));
+    entries_initialized = true;
+    if (aids_io_listdir(&task_dir, &entries) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list task directory: %s", aids_failure_reason());
+        return_defer(1);
+    }
+
+    for (size_t i = 0; i < entries.count; ++i) {
+        Aids_String_Slice *name = NULL;
+        if (aids_array_get(&entries, i, (void **)&name) != AIDS_OK) {
+            continue;
+        }
+
+        // Skip the "." and ".." directory entries.
+        if ((name->len == 1 && name->str[0] == '.') ||
+            (name->len == 2 && name->str[0] == '.' && name->str[1] == '.')) {
+            continue;
+        }
+
+        char entry_path[PATH_MAX];
+        if (snprintf(entry_path, sizeof(entry_path), SS_Fmt "/" SS_Fmt, SS_Arg(task_dir), SS_Arg(*name)) < 0) {
+            aids_log(AIDS_ERROR, "Failed to build entry path: %s", strerror(errno));
+            return_defer(1);
+        }
+
+        if (unlink(entry_path) != 0) {
+            aids_log(AIDS_ERROR, "Failed to remove '%s': %s", entry_path, strerror(errno));
+            return_defer(1);
+        }
+    }
+
+    char dir_path[PATH_MAX];
+    if (snprintf(dir_path, sizeof(dir_path), SS_Fmt, SS_Arg(task_dir)) < 0) {
+        aids_log(AIDS_ERROR, "Failed to build directory path: %s", strerror(errno));
+        return_defer(1);
+    }
+
+    if (rmdir(dir_path) != 0) {
+        aids_log(AIDS_ERROR, "Failed to remove task directory '%s': %s", dir_path, strerror(errno));
+        return_defer(1);
+    }
+
+    printf("Task removed successfully: " SS_Fmt "\n", SS_Arg(id));
+
+defer:
+    if (entries_initialized) {
+        cleanup_string_slice_array(&entries);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    if (task_dir.str != NULL) {
+        AIDS_FREE(task_dir.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
 typedef struct {
     Aids_String_Slice huid;
     Task task;
@@ -2475,6 +2577,7 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  ls           List tasks\n");
     fprintf(stderr, "  show         Show a single task by ID\n");
     fprintf(stderr, "  edit         Update fields of an existing task\n");
+    fprintf(stderr, "  rm           Remove a task by ID\n");
     fprintf(stderr, "\n");
 }
 
@@ -2554,6 +2657,9 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "edit") == 0) {
         result = main_edit(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "rm") == 0) {
+        result = main_rm(&ctx);
         return_defer(result);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);

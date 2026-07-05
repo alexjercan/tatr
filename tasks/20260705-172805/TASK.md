@@ -1,6 +1,6 @@
 # Add rm command to remove a task
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 80
 - TAGS: feature
 
