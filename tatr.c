@@ -46,6 +46,16 @@ static Task_Status task_status_from_string(const Aids_String_Slice *slice) {
     return Task_Status_OPEN; // Default to OPEN if not found
 }
 
+static boolean task_status_is_valid(const Aids_String_Slice *slice) {
+    for (size_t i = 0; i < sizeof(Task_Status_Strings) / sizeof(Task_Status_Strings[0]); ++i) {
+        if (aids_string_slice_compare(slice, &Task_Status_Strings[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 typedef struct {
     Task_Status status;
     unsigned int priority;
@@ -764,6 +774,146 @@ static int main_show(const Tatr_Context *ctx) {
     }
 
     task_print_full(task_file_path, task);
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+static int main_edit(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+
+    argparse_parser_init(&parser, "tatr edit", "Update fields of an existing task", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'T',
+        .long_name = "title",
+        .description = "New task title",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'p',
+        .long_name = "priority",
+        .description = "New task priority",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 't',
+        .long_name = "tags",
+        .description = "New task tags (replaces existing, comma-separated)",
+        .type = ARGUMENT_TYPE_VALUE_ARRAY,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 's',
+        .long_name = "status",
+        .description = "New task status (OPEN, IN_PROGRESS, CLOSED)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+
+    if (task_load(&task_file_path, &task) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    // Apply only the fields that were provided; leave everything else, including
+    // the description body, untouched.
+    char *title = argparse_get_value(&parser, "title");
+    if (title != NULL) {
+        task.title = aids_string_slice_from_cstr(title);
+    }
+
+    char *priority_str = argparse_get_value(&parser, "priority");
+    if (priority_str != NULL) {
+        long priority;
+        Aids_String_Slice priority_slice = aids_string_slice_from_cstr(priority_str);
+        if (aids_string_slice_atol(&priority_slice, &priority, 10)) {
+            if (priority >= 0) {
+                task.meta.priority = (unsigned int)priority;
+            } else {
+                aids_log(AIDS_ERROR, "Priority must be a non-negative number");
+                return_defer(1);
+            }
+        } else {
+            aids_log(AIDS_ERROR, "Invalid priority value: %s", priority_str);
+            return_defer(1);
+        }
+    }
+
+    char *status_str = argparse_get_value(&parser, "status");
+    if (status_str != NULL) {
+        Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
+        if (!task_status_is_valid(&status_slice)) {
+            aids_log(AIDS_ERROR, "Invalid status '%s': expected OPEN, IN_PROGRESS or CLOSED", status_str);
+            return_defer(1);
+        }
+        task.meta.status = task_status_from_string(&status_slice);
+    }
+
+    char *tags[ARGPARSE_CAPACITY];
+    unsigned long tag_count = argparse_get_values(&parser, "tags", tags);
+    if (tag_count > 0) {
+        task.meta.tags.count = 0; // Replace existing tags
+        for (unsigned long i = 0; i < tag_count; ++i) {
+            Aids_String_Slice tag = aids_string_slice_from_cstr(tags[i]);
+            if (aids_array_append(&task.meta.tags, &tag) != AIDS_OK) {
+                aids_log(AIDS_ERROR, "Failed to append tag: %s", aids_failure_reason());
+                return_defer(1);
+            }
+        }
+    }
+
+    if (task_save(&task_file_path, &task) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to save task: %s", aids_failure_reason());
+        return_defer(1);
+    }
+
+    printf("Task updated successfully: " SS_Fmt "\n", SS_Arg(id));
 
 defer:
     if (task_initialized) {
@@ -2324,6 +2474,7 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  new          Create a new task\n");
     fprintf(stderr, "  ls           List tasks\n");
     fprintf(stderr, "  show         Show a single task by ID\n");
+    fprintf(stderr, "  edit         Update fields of an existing task\n");
     fprintf(stderr, "\n");
 }
 
@@ -2400,6 +2551,9 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "show") == 0) {
         result = main_show(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "edit") == 0) {
+        result = main_edit(&ctx);
         return_defer(result);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);

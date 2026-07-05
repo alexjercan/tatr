@@ -1,6 +1,6 @@
 # Add edit command to update task metadata and title
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature
 

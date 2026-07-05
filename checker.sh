@@ -498,6 +498,144 @@ test_show_missing_id() {
     fi
 }
 
+test_edit_status() {
+    log_test "edit status"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Edit me" -s OPEN)
+    run_tatr edit "$id" -s CLOSED > /dev/null 2>&1
+    local task_file="tasks/$id/TASK.md"
+
+    if grep -q "^- STATUS: CLOSED$" "$task_file"; then
+        pass_test
+    else
+        fail_test "Status not updated"
+    fi
+}
+
+test_edit_priority() {
+    log_test "edit priority"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Edit me" -p 10)
+    run_tatr edit "$id" -p 77 > /dev/null 2>&1
+    local task_file="tasks/$id/TASK.md"
+
+    if grep -q "^- PRIORITY: 77$" "$task_file"; then
+        pass_test
+    else
+        fail_test "Priority not updated"
+    fi
+}
+
+test_edit_tags() {
+    log_test "edit tags (replaces existing)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Edit me" -t old1 -t old2)
+    run_tatr edit "$id" -t new1 -t new2 > /dev/null 2>&1
+    local task_file="tasks/$id/TASK.md"
+
+    if grep -q "^- TAGS: new1, new2$" "$task_file" && ! grep -q "old1" "$task_file"; then
+        pass_test
+    else
+        fail_test "Tags not replaced"
+    fi
+}
+
+test_edit_title() {
+    log_test "edit title"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Old title")
+    run_tatr edit "$id" -T "Brand new title" > /dev/null 2>&1
+    local task_file="tasks/$id/TASK.md"
+
+    if grep -q "^# Brand new title$" "$task_file" && ! grep -q "Old title" "$task_file"; then
+        pass_test
+    else
+        fail_test "Title not updated"
+    fi
+}
+
+test_edit_partial_preserves_fields() {
+    log_test "edit partial keeps other fields and body"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Keep me" -p 42 -t keep -s OPEN)
+    local task_file="tasks/$id/TASK.md"
+    printf '\nImportant body text.\n' >> "$task_file"
+
+    run_tatr edit "$id" -s IN_PROGRESS > /dev/null 2>&1
+
+    if grep -q "^- STATUS: IN_PROGRESS$" "$task_file" && \
+       grep -q "^- PRIORITY: 42$" "$task_file" && \
+       grep -q "^- TAGS: keep$" "$task_file" && \
+       grep -q "^# Keep me$" "$task_file" && \
+       grep -q "Important body text." "$task_file"; then
+        pass_test
+    else
+        fail_test "Partial edit clobbered other fields or body"
+    fi
+}
+
+test_edit_invalid_status() {
+    log_test "edit rejects invalid status"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Edit me" -s OPEN)
+
+    set +e
+    local output
+    output=$(run_tatr edit "$id" -s BOGUS 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] && grep -q "^- STATUS: OPEN$" "tasks/$id/TASK.md"; then
+        pass_test
+    else
+        fail_test "Invalid status not rejected or file was modified"
+    fi
+}
+
+test_edit_missing_id() {
+    log_test "edit non-existent task"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    set +e
+    local output
+    output=$(run_tatr edit "20991231-235959" -p 5 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ]; then
+        pass_test
+    else
+        fail_test "Expected non-zero exit for missing task"
+    fi
+}
+
 # Test 16: Filter by status (eq)
 test_filter_status_eq() {
     log_test "filter (status eq)"
@@ -961,6 +1099,13 @@ test_task_format
 test_show_existing
 test_show_invalid_id
 test_show_missing_id
+test_edit_status
+test_edit_priority
+test_edit_tags
+test_edit_title
+test_edit_partial_preserves_fields
+test_edit_invalid_status
+test_edit_missing_id
 test_filter_status_eq
 test_filter_status_in
 test_filter_tags_contains
