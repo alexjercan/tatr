@@ -1,6 +1,6 @@
 # Allow dots and dashes in filter literals so version tags like v0.1.0 parse
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: bug
 
@@ -46,15 +46,15 @@ be filtered on.
 
 ## Steps
 
-- [ ] Add a `tatr_filter_is_literal_char` helper (alnum, `_`, `.`, `-`) and use
+- [x] Add a `tatr_filter_is_literal_char` helper (alnum, `_`, `.`, `-`) and use
       it for the continuation loop of the bare-literal branch in
       `tatr_filter_lexer_next`; leave the start check and `:field` lexer alone.
-- [ ] Manually verify `tatr ls -f ':tags contains v0.1.0'` works against a task
+- [x] Manually verify `tatr ls -f ':tags contains v0.1.0'` works against a task
       tagged `v0.1.0`, and that a keyword-prefixed literal (e.g. `and-x`) is
       still treated as a literal.
-- [ ] Add tests in `checker.sh`: filter a dotted version tag (`v0.1.0`), filter
+- [x] Add tests in `checker.sh`: filter a dotted version tag (`v0.1.0`), filter
       a dashed tag (`release-candidate`), and confirm an unrelated task is
       excluded. Follow the existing `test_filter_tags_contains` pattern.
-- [ ] Update the README filtering section if it implies literals are word-only,
+- [x] Update the README filtering section if it implies literals are word-only,
       noting that version-style tags (dots/dashes) are supported.
-- [ ] Run `make` and `./checker.sh`; all green.
+- [x] Run `make` and `./checker.sh`; all green.

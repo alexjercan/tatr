@@ -812,6 +812,40 @@ test_filter_tags_contains() {
     fi
 }
 
+# Test 18b: Filter by version-style tags (dots and dashes in literals)
+test_filter_tags_version() {
+    log_test "filter (version tag with dots/dashes)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    run_tatr new "Release task" -t v0.1.0 > /dev/null 2>&1
+    sleep 1
+    run_tatr new "RC task" -t release-candidate > /dev/null 2>&1
+    sleep 1
+    run_tatr new "Plain task" -t feature > /dev/null 2>&1
+
+    local output
+    output=$(run_tatr ls -f ':tags contains v0.1.0' 2>&1)
+    local exit_code=$?
+
+    local dash_output
+    dash_output=$(run_tatr ls -f ':tags contains release-candidate' 2>&1)
+    local dash_exit=$?
+
+    if [ $exit_code -eq 0 ] && [ $dash_exit -eq 0 ] && \
+       echo "$output" | grep -q "Release task" && \
+       ! echo "$output" | grep -q "RC task" && \
+       ! echo "$output" | grep -q "Plain task" && \
+       echo "$dash_output" | grep -q "RC task" && \
+       ! echo "$dash_output" | grep -q "Release task"; then
+        pass_test
+    else
+        fail_test "Version-style tag filter (dots/dashes) not working correctly"
+    fi
+}
+
 # Test 19: Filter by priority
 test_filter_priority() {
     log_test "filter (priority eq)"
@@ -1209,6 +1243,7 @@ test_rm_missing_id
 test_filter_status_eq
 test_filter_status_in
 test_filter_tags_contains
+test_filter_tags_version
 test_filter_priority
 test_filter_and
 test_filter_or

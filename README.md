@@ -115,7 +115,9 @@ tatr ls -f '(:status eq OPEN) and (:tags contains feature)'
 ```
 
 Supported operators include `eq`, `contains`, `in` (with `[...]` lists), and the
-boolean connectives `and`, `or`, `not`. Filtering composes with sorting and
+boolean connectives `and`, `or`, `not`. Literal values may contain `.` and `-`
+(after an initial letter, digit or `_`), so version-style tags such as `v0.1.0`
+or `release-candidate` can be filtered on. Filtering composes with sorting and
 recursive mode, and applies per section in recursive mode.
 
 **Output format:**
