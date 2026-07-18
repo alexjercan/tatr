@@ -67,6 +67,9 @@ tatr new "Fix memory leak in parser"
 # Create a task with metadata
 tatr new "Add unit tests" -p 80 -t testing,bug -s IN_PROGRESS
 
+# Create a task with the description body from a file (or '-' for stdin)
+tatr new "Refactor the loader" -p 60 -t refactor -b body.md
+
 # Create task from a different directory
 tatr -r /path/to/project new "Task title"
 ```
@@ -75,6 +78,11 @@ tatr -r /path/to/project new "Task title"
 - `-p, --priority <value>`: Set task priority (default: 0, higher values = higher priority)
 - `-t, --tags <value>...`: Comma-separated tags
 - `-s, --status <value>`: Set status (OPEN, IN_PROGRESS, CLOSED)
+- `-b, --body-file <path>`: Read the description body from a file; `-` reads stdin
+
+Task IDs have second resolution (`YYYYMMDD-HHMMSS`). If a task with the
+generated ID already exists (two `new` calls in the same second), `tatr new`
+fails instead of overwriting it; retry to get a fresh ID.
 
 ### Listing Tasks
 
@@ -302,8 +310,9 @@ grep -r "TODO" tasks/
 - Maximum 256 arguments for CLI parsing
 
 `tatr edit` covers non-interactive metadata and title changes; open the `TASK.md`
-file directly to edit the free-form description body. Filtering by status and
-tags is available through `tatr ls -f` (see Filtering under Listing Tasks).
+file directly to edit the free-form description body (`tatr new -b` seeds it at
+creation time). Filtering by status and tags is available through `tatr ls -f`
+(see Filtering under Listing Tasks).
 
 ## License
 

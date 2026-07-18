@@ -236,6 +236,102 @@ test_new_full() {
     fi
 }
 
+# Create task with the description body read from a file
+test_new_body_file() {
+    log_test "new task (--body-file)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    printf '## Story\n\nBody from a file.\n\n## Steps\n\n- [ ] step one\n' > body.md
+
+    local id=$(new_task_id "Body task" -b body.md)
+    local task_file="tasks/$id/TASK.md"
+
+    # A missing body file must fail without creating a task
+    set +e
+    run_tatr new "Missing body" -b does-not-exist.md > /dev/null 2>&1
+    local missing_code=$?
+    set -e
+    local task_count=$(find tasks -name "TASK.md" | wc -l)
+
+    if [ -n "$id" ] && [ -f "$task_file" ] && \
+       grep -q "^# Body task" "$task_file" && \
+       grep -q "## Story" "$task_file" && \
+       grep -q "step one" "$task_file" && \
+       [ $missing_code -ne 0 ] && [ "$task_count" -eq 1 ]; then
+        pass_test
+    else
+        fail_test "id=$id missing_code=$missing_code count=$task_count"
+    fi
+}
+
+# Create task with the description body read from stdin
+test_new_body_stdin() {
+    log_test "new task (--body-file -)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local output=$(printf 'Body from stdin.\n' | run_tatr new "Stdin task" -b - 2>&1)
+    local id=$(echo "$output" | grep -o '[0-9]\{8\}-[0-9]\{6\}' | head -1)
+    local task_file="tasks/$id/TASK.md"
+
+    if [ -n "$id" ] && [ -f "$task_file" ] && grep -q "Body from stdin." "$task_file"; then
+        pass_test
+    else
+        fail_test "Output: $output"
+    fi
+}
+
+# Two `new` calls in the same second must not silently share an ID: the second
+# call fails instead of overwriting the first task's TASK.md.
+test_new_collision_fails() {
+    log_test "new task (same-second ID collision fails)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+
+    # Two back-to-back invocations normally land in the same second; retry a
+    # few times in case an attempt straddles a second boundary.
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        rm -rf tasks
+        mkdir -p tasks
+
+        local first_id=$(new_task_id "First task")
+        set +e
+        local output
+        output=$(run_tatr new "Second task" 2>&1)
+        local exit_code=$?
+        set -e
+        local second_id=$(echo "$output" | grep -o '[0-9]\{8\}-[0-9]\{6\}' | head -1)
+
+        if [ $exit_code -ne 0 ]; then
+            # The collision was refused; the first task must survive intact.
+            if grep -q "First task" "tasks/$first_id/TASK.md" && \
+               echo "$output" | grep -q "already exists"; then
+                pass_test
+            else
+                fail_test "Refused but wrong message or clobbered file: $output"
+            fi
+            return
+        fi
+
+        if [ "$second_id" == "$first_id" ]; then
+            fail_test "Second task silently reused ID $first_id"
+            return
+        fi
+        # The two calls straddled a second boundary; try again.
+    done
+
+    # Never hit the same second in five attempts (very slow host). The
+    # overwrite bug would have been caught above, so treat this as a pass.
+    pass_test
+}
+
 # Test 8: List tasks (empty)
 test_ls_empty() {
     log_test "ls (empty tasks dir)"
@@ -1217,6 +1313,9 @@ test_new_priority
 test_new_tags
 test_new_status
 test_new_full
+test_new_body_file
+test_new_body_stdin
+test_new_collision_fails
 test_ls_empty
 test_ls_with_tasks
 test_ls_sort_priority

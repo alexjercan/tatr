@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <limits.h>
 
-#define TATR_VERSION "0.1.0"
+#define TATR_VERSION "0.2.0"
 
 #define HUID_FORMAT_CSTR "%Y%m%d-%H%M%S"
 #define HUID_LENGTH 16 // "20240630-235959" + null terminator
@@ -462,6 +462,13 @@ static Aids_Result task_create(const Aids_String_Slice *cwd, Aids_String_Slice h
         return_defer(AIDS_ERR);
     }
 
+    // IDs have second resolution, so a second `new` call in the same second
+    // would silently overwrite the first task's TASK.md. Refuse instead.
+    if (aids_io_isdir(&task_dir)) {
+        aids_log(AIDS_ERROR, "Task '" SS_Fmt "' already exists (same-second ID collision); retry to get a fresh ID", SS_Arg(huid));
+        return_defer(AIDS_ERR);
+    }
+
     if (aids_io_mkdir(&task_dir, true) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to create task directory: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -488,11 +495,41 @@ defer:
     return result;
 }
 
+// Reads the whole of stdin into an owned slice. Used by `new --body-file -`.
+static Aids_Result read_stdin_all(Aids_String_Slice *out) {
+    Aids_Result result = AIDS_OK;
+    Aids_String_Builder sb = {0};
+    unsigned char chunk[4096];
+    size_t n;
+
+    aids_string_builder_init(&sb);
+    while ((n = fread(chunk, 1, sizeof(chunk), stdin)) > 0) {
+        Aids_String_Slice part = { .str = chunk, .len = n };
+        if (aids_string_builder_append_slice(&sb, part) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "read_stdin_all: Failed to append stdin chunk: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+    }
+    if (ferror(stdin)) {
+        aids_log(AIDS_ERROR, "read_stdin_all: Failed to read stdin: %s", strerror(errno));
+        return_defer(AIDS_ERR);
+    }
+
+    aids_string_builder_to_slice(&sb, out);
+
+defer:
+    if (result != AIDS_OK) {
+        aids_string_builder_free(&sb);
+    }
+    return result;
+}
+
 static int main_new(const Tatr_Context *ctx) {
     int result = 0;
     Argparse_Parser parser = {0};
     Task task = {0};
     boolean task_initialized = false;
+    Aids_String_Slice body = {0};
 
     argparse_parser_init(&parser, "tatr new", "Create a new task", TATR_VERSION);
 
@@ -524,6 +561,14 @@ static int main_new(const Tatr_Context *ctx) {
         .short_name = 's',
         .long_name = "status",
         .description = "Task status (OPEN, IN_PROGRESS, CLOSED)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'b',
+        .long_name = "body-file",
+        .description = "Read the description body from a file ('-' reads stdin)",
         .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
@@ -573,6 +618,24 @@ static int main_new(const Tatr_Context *ctx) {
         task.meta.status = task_status_from_string(&status_slice);
     }
 
+    // Read the body before generating the ID so a bad path fails without
+    // creating anything on disk.
+    char *body_file = argparse_get_value(&parser, "body-file");
+    if (body_file != NULL) {
+        if (strcmp(body_file, "-") == 0) {
+            if (read_stdin_all(&body) != AIDS_OK) {
+                return_defer(1);
+            }
+        } else {
+            Aids_String_Slice body_path = aids_string_slice_from_cstr(body_file);
+            if (aids_io_read(&body_path, &body, "r") != AIDS_OK) {
+                aids_log(AIDS_ERROR, "Failed to read body file '%s': %s", body_file, aids_failure_reason());
+                return_defer(1);
+            }
+        }
+        task.description = body;
+    }
+
     char huid_str[HUID_LENGTH] = {0};
     if (huid(huid_str) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to generate huid");
@@ -590,6 +653,9 @@ static int main_new(const Tatr_Context *ctx) {
 defer:
     if (task_initialized) {
         task_cleanup(&task);
+    }
+    if (body.str != NULL) {
+        AIDS_FREE(body.str);
     }
     argparse_parser_free(&parser);
     return result;
