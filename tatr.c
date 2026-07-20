@@ -2701,6 +2701,28 @@ static boolean check_severity_is_known(Aids_String_Slice severity) {
     return false;
 }
 
+// A CLOSED task tagged `historical` (pre-flow work whose review/retro context
+// is gone) or `goal` (a /flow umbrella, whose durable record is its GOAL.md) is
+// exempt from the strict closed-missing-review / closed-missing-retro rules -
+// neither file is expected for it by design, so demanding one would force a
+// fabricated record. Reuses the parsed task's tag set (the shared load spine).
+static boolean check_task_is_history_exempt(Task *task) {
+    static const char *exempt[] = {"historical", "goal"};
+    for (size_t i = 0; i < task->meta.tags.count; ++i) {
+        Aids_String_Slice *tag = NULL;
+        if (aids_array_get(&task->meta.tags, i, (void **)&tag) != AIDS_OK) {
+            continue;
+        }
+        for (size_t j = 0; j < sizeof(exempt) / sizeof(exempt[0]); ++j) {
+            Aids_String_Slice e = aids_string_slice_from_cstr((char *)exempt[j]);
+            if (aids_string_slice_compare(tag, &e) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Lints one task directory. Returns the number of findings printed.
 static size_t check_task(const Aids_String_Slice *tasks_dir,
                          const Aids_String_Slice *huid,
@@ -2862,7 +2884,8 @@ review_checks:
         }
     }
 
-    if (strict && task_loaded && task.meta.status == Task_Status_CLOSED) {
+    if (strict && task_loaded && task.meta.status == Task_Status_CLOSED &&
+        !check_task_is_history_exempt(&task)) {
         if (!has_review) {
             printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md (--strict)\n", SS_Arg(*huid));
             findings++;

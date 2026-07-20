@@ -1484,6 +1484,49 @@ BODY
     fi
 }
 
+test_check_strict_history_exempt() {
+    log_test "check (--strict exempts historical/goal-tagged CLOSED tasks)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+
+    # Three CLOSED tasks with no REVIEW.md/RETRO.md. Two are exempt by tag
+    # (historical, goal); the plain feature one must still flag under --strict.
+    write_history_task() {
+        local id=$1 tags=$2
+        mkdir -p "$test_dir/tasks/$id"
+        {
+            echo "# Task $id"
+            echo
+            echo "- STATUS: CLOSED"
+            echo "- PRIORITY: 10"
+            echo "- TAGS: $tags"
+            echo
+            echo "## Steps"
+            echo
+            echo "- [x] done"
+        } > "$test_dir/tasks/$id/TASK.md"
+    }
+    write_history_task "20260101-150100" "historical"
+    write_history_task "20260101-150200" "goal"
+    write_history_task "20260101-150300" "feature"
+
+    set +e
+    local out
+    out=$(run_tatr -r "$test_dir" check --strict 2>&1)
+    local code=$?
+    set -e
+
+    if [ $code -eq 1 ] \
+        && ! echo "$out" | grep -q "20260101-150100" \
+        && ! echo "$out" | grep -q "20260101-150200" \
+        && echo "$out" | grep -q "20260101-150300: closed-missing-review" \
+        && echo "$out" | grep -q "20260101-150300: closed-missing-retro"; then
+        pass_test
+    else
+        fail_test "exit: $code, output: $out"
+    fi
+}
+
 test_check_ledger() {
     log_test "check (--ledger promotion-stalled at x3 outside Pending)"
     local test_dir=$(create_test_dir)
@@ -1725,6 +1768,7 @@ test_check_closed_not_approved
 test_check_bad_severity
 test_check_malformed_header
 test_check_strict
+test_check_strict_history_exempt
 test_check_ledger
 test_check_per_id
 test_check_exit_codes

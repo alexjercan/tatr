@@ -120,6 +120,13 @@ next to its `TASK.md`, per the flow skills. The pre-flow `docs/retros/` were
 distilled into the ledger and removed (git history keeps them). Durable
 lessons go to `LESSONS.md` at the root; there is no scratch drawer.
 
+Strict `tatr check --strict` requires a `REVIEW.md` and `RETRO.md` on every
+CLOSED task, EXCEPT tasks tagged `historical` or `goal`: a `historical` task is
+pre-flow work whose review/retro context is gone (mark old tasks so they stop
+flagging instead of fabricating records), and a `goal` task is a /flow umbrella
+whose durable record is its `GOAL.md`, not a per-task retro. Both are exempt
+from `closed-missing-review`/`closed-missing-retro`.
+
 ## Development flow
 
 /flow drives development here: work is planned into tatr tasks, implemented in
