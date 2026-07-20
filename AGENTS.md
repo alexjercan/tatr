@@ -30,23 +30,25 @@ vendored headers and defines their implementations at the bottom of the file
 
 ## Building
 
-The Makefile defaults to `clang`:
+The canonical toolchain (clang, valgrind) comes from the nix dev shell, so all
+builds run through it:
 
 ```bash
-make            # builds ./tatr with clang -Wall -Wextra -O2 -g
-make clean
-make install PREFIX=$HOME/.local
+nix develop -c make            # builds ./tatr with clang -Wall -Wextra -O2 -g
+nix develop -c make clean
+nix develop -c make install PREFIX=$HOME/.local
 ```
 
-The canonical toolchain (clang, valgrind) is provided by the nix dev shell:
+A Makefile build guard enforces this: a bare `make` (outside `nix develop`,
+outside a nix build sandbox) fails with a pointer to `nix develop -c make`
+rather than silently building against whatever gcc the login shell happens to
+have. The guard passes automatically inside `nix develop` (`IN_NIX_SHELL`) and
+inside a nix build sandbox such as `nix flake check` (`NIX_BUILD_TOP`).
 
-```bash
-nix develop -c make
-```
-
-If only `gcc` is available, build with `make CC=gcc`; the code is portable
-POSIX C and compiles cleanly under both. Keep it warning-clean under
-`-Wall -Wextra`.
+If you must build outside nix because the toolchain is provisioned another way
+(CI installs clang/gcc + valgrind via apt), set `TATR_ALLOW_BARE_BUILD=1` to opt
+out of the guard. The code is portable POSIX C and compiles cleanly under both
+clang and gcc (`make CC=gcc`); keep it warning-clean under `-Wall -Wextra`.
 
 ## Testing
 

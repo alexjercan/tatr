@@ -47,7 +47,9 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 ## Pending promotions (3+ occurrences, user decides)
 
-- `build-through-nix-dev-shell` (x3) -> AGENTS.md Building/Testing already
-  states it, yet sessions re-learned it twice after; user decides whether the
-  prose suffices or a guard belongs in the Makefile: the bare shell has only
-  gcc, so every build and test runs via nix develop -c (clang + valgrind). 20260705-172803, 20260709-193044, 20260718-235158
+- `build-through-nix-dev-shell` (x3, absorbed by Makefile build guard, 2026-07-20):
+  prose in AGENTS.md was re-learned twice, so a Makefile guard now fails a bare
+  `make` (no IN_NIX_SHELL/NIX_BUILD_TOP) with a `nix develop -c make` pointer;
+  TATR_ALLOW_BARE_BUILD=1 opts out (CI provisions its own toolchain). The bare
+  shell has only gcc, so every build and test runs via nix develop -c (clang +
+  valgrind). 20260705-172803, 20260709-193044, 20260718-235158, 20260720-220059

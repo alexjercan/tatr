@@ -1,6 +1,6 @@
 # build guard: fail bare-shell build, require nix develop
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 60
 - TAGS: feature
 
@@ -14,10 +14,10 @@ docs already documented it.
 
 ## Steps
 
-- [ ] Add a guard (Makefile target check or env sentinel) that detects a bare shell (outside the nix dev shell) and fails with a pointer to `nix develop`.
-- [ ] Ensure it does not false-trigger inside the nix dev shell or in `nix flake check`.
-- [ ] Verify: bare `make` outside the shell fails clearly; inside the shell it builds.
-- [ ] Update AGENTS.md ledger entry / mark the lesson resolved once landed.
+- [x] Add a guard (Makefile target check or env sentinel) that detects a bare shell (outside the nix dev shell) and fails with a pointer to `nix develop`.
+- [x] Ensure it does not false-trigger inside the nix dev shell or in `nix flake check`.
+- [x] Verify: bare `make` outside the shell fails clearly; inside the shell it builds.
+- [x] Update AGENTS.md ledger entry / mark the lesson resolved once landed.
 
 ## Definition of Done
 

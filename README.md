@@ -29,15 +29,26 @@ primarily a toy project inspired by Tsoding's streams.
 
 ### Using Make
 
+The Makefile builds through the nix dev shell, whose canonical toolchain
+(clang, valgrind) is the supported one. A bare `make` outside nix fails with a
+build guard pointing you here:
+
 ```bash
 # Build the binary
-make
+nix develop -c make
 
 # Install to /usr/local/bin (may require sudo)
-make install
+nix develop -c make install
 
 # Install to a custom location
-make install PREFIX=$HOME/.local
+nix develop -c make install PREFIX=$HOME/.local
+```
+
+If you build without nix because you provisioned a C toolchain yourself, set
+`TATR_ALLOW_BARE_BUILD=1` to opt out of the guard:
+
+```bash
+TATR_ALLOW_BARE_BUILD=1 make        # or: TATR_ALLOW_BARE_BUILD=1 make CC=gcc
 ```
 
 ### Using Nix Flakes
@@ -51,6 +62,9 @@ nix develop
 ```
 
 ### Manual Build
+
+Compiling `tatr.c` directly bypasses the Makefile (and its guard) entirely, so
+it works in any environment with a C compiler:
 
 ```bash
 clang -Wall -Wextra -O2 -g -o tatr tatr.c
@@ -287,27 +301,31 @@ All dependencies are vendored as header-only libraries:
 
 ### Build Configuration
 
-The Makefile provides several targets:
+The Makefile provides several targets (run through the nix dev shell; see
+[Using Make](#using-make) for the build guard and the `TATR_ALLOW_BARE_BUILD`
+opt-out):
 
 ```bash
-make          # Build the binary
-make install  # Install to PREFIX (default: /usr/local)
-make clean    # Remove build artifacts
+nix develop -c make          # Build the binary
+nix develop -c make install  # Install to PREFIX (default: /usr/local)
+nix develop -c make clean    # Remove build artifacts
 ```
 
 ## Testing
 
-tatr includes a comprehensive test suite to ensure functionality and prevent regressions:
+tatr includes a comprehensive test suite to ensure functionality and prevent
+regressions. `checker.sh` rebuilds the binary with `make`, so run it through
+the nix dev shell (or set `TATR_ALLOW_BARE_BUILD=1`):
 
 ```bash
 # Run all tests
-./checker.sh
+nix develop -c ./checker.sh
 
 # Run with verbose output
-./checker.sh -v
+nix develop -c ./checker.sh -v
 
 # Run with memory leak checking (requires valgrind)
-./checker.sh --memcheck
+nix develop -c ./checker.sh --memcheck
 ```
 
 The test suite covers:

@@ -1698,6 +1698,62 @@ BODY
     fi
 }
 
+# --- Makefile build-guard tests ---
+# The guard target runs the env check without compiling, so these are cheap and
+# do not touch the built binary. They clear the nix markers to simulate a bare
+# shell (checker.sh itself runs inside `nix develop`, where IN_NIX_SHELL is set).
+
+test_build_guard_bare_shell_fails() {
+    log_test "build guard (bare shell fails with nix develop pointer)"
+
+    set +e
+    local output
+    output=$(env -u IN_NIX_SHELL -u NIX_BUILD_TOP -u TATR_ALLOW_BARE_BUILD \
+        make -C "$PROJECT_DIR" guard 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] && echo "$output" | grep -q "nix develop -c make"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_build_guard_nix_shell_passes() {
+    log_test "build guard (IN_NIX_SHELL passes)"
+
+    set +e
+    local output
+    output=$(env -u NIX_BUILD_TOP -u TATR_ALLOW_BARE_BUILD IN_NIX_SHELL=impure \
+        make -C "$PROJECT_DIR" guard 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_build_guard_override_passes() {
+    log_test "build guard (TATR_ALLOW_BARE_BUILD overrides)"
+
+    set +e
+    local output
+    output=$(env -u IN_NIX_SHELL -u NIX_BUILD_TOP TATR_ALLOW_BARE_BUILD=1 \
+        make -C "$PROJECT_DIR" guard 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
 
 if [ "$MEMCHECK" -eq 1 ]; then
     if ! command -v $MEMCHECKER &> /dev/null; then
@@ -1774,6 +1830,9 @@ test_check_per_id
 test_check_exit_codes
 test_check_scanner_edges
 test_check_missing_artifacts
+test_build_guard_bare_shell_fails
+test_build_guard_nix_shell_passes
+test_build_guard_override_passes
 
 echo
 echo "Passed $PASSED_TESTS/$TOTAL_TESTS tests"

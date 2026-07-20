@@ -7,6 +7,12 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# CI provisions the toolchain itself (clang/gcc + valgrind via apt) and builds
+# outside the nix dev shell on purpose, so it opts out of the Makefile build
+# guard for every job and step.
+env:
+  TATR_ALLOW_BARE_BUILD: "1"
+
 jobs:
   test:
     name: Build and Test
