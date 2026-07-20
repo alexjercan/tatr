@@ -1,6 +1,6 @@
 # tatr check: historical tag also exempts closed-unchecked
 
-- STATUS: IN_PROGRESS
+- STATUS: CLOSED
 - PRIORITY: 55
 - TAGS: feature
 
