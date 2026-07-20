@@ -1,6 +1,6 @@
 # tatr check: recognize historical/no-retro tasks so pre-flow tasks stop flagging
 
-- STATUS: IN_PROGRESS
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: feature
 
