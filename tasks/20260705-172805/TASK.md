@@ -23,11 +23,11 @@ tatr rm <ID>
 
 ## Steps
 
-- [ ] Reuse the HUID-resolution helper to validate the ID and confirm the task
+- [x] Reuse the HUID-resolution helper to validate the ID and confirm the task
       exists before deleting.
-- [ ] Implement `command_rm`: remove `TASK.md` then the task directory (use the
+- [x] Implement `command_rm`: remove `TASK.md` then the task directory (use the
       available POSIX/aids.h calls; keep it to the single task dir).
-- [ ] Wire `rm` into dispatch and help.
-- [ ] Add tests in `checker.sh`: rm an existing task (gone afterwards), rm a
+- [x] Wire `rm` into dispatch and help.
+- [x] Add tests in `checker.sh`: rm an existing task (gone afterwards), rm a
       bad/missing ID errors, and confirm sibling tasks are untouched.
-- [ ] Run `make` and `./checker.sh`; all green.
+- [x] Run `make` and `./checker.sh`; all green.

@@ -1,6 +1,6 @@
 # Review: Add edit command
 
-Verdict: APPROVE
+- VERDICT: APPROVE
 
 ## Scope reviewed
 - `task_status_is_valid` helper.

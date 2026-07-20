@@ -1,6 +1,6 @@
 # Review: Add rm command
 
-Verdict: APPROVE
+- VERDICT: APPROVE
 
 ## Scope reviewed
 - `main_rm` (reuses `task_resolve`, `task_dir_path_build`, `aids_io_listdir`,

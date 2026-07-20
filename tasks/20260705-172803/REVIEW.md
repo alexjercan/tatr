@@ -1,6 +1,6 @@
 # Review: Add show command
 
-Verdict: APPROVE
+- VERDICT: APPROVE
 
 ## Scope reviewed
 

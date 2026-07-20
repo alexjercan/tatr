@@ -25,13 +25,13 @@ tatr show <ID>
 
 ## Steps
 
-- [ ] Add a helper that resolves a HUID argument to a task file path within the
+- [x] Add a helper that resolves a HUID argument to a task file path within the
       located `tasks/` dir and loads the `Task` (reuse `task_file_path_build`,
       `ishuid`, `task_load`). This helper will be shared by `edit` and `rm`.
-- [ ] Implement `command_show` following the argparse.h subcommand pattern used
+- [x] Implement `command_show` following the argparse.h subcommand pattern used
       by `command_new`/`command_ls`.
-- [ ] Wire `show` into the subcommand dispatch and the top-level usage/help.
-- [ ] Add tests in `checker.sh`: show an existing task, show with a bad ID,
+- [x] Wire `show` into the subcommand dispatch and the top-level usage/help.
+- [x] Add tests in `checker.sh`: show an existing task, show with a bad ID,
       show a non-existent ID.
-- [ ] Run `make` and `./checker.sh` (and `--memcheck` if valgrind is present);
+- [x] Run `make` and `./checker.sh` (and `--memcheck` if valgrind is present);
       all green.

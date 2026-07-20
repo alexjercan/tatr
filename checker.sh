@@ -1292,6 +1292,370 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# --- check subcommand tests ---
+
+# Writes a TASK.md for check tests: dir, id, status; body from stdin.
+write_check_task() {
+    local dir=$1 id=$2 status=$3
+    mkdir -p "$dir/tasks/$id"
+    {
+        echo "# Task $id"
+        echo
+        echo "- STATUS: $status"
+        echo "- PRIORITY: 10"
+        echo "- TAGS: feature"
+        echo
+        cat
+    } > "$dir/tasks/$id/TASK.md"
+}
+
+test_check_clean() {
+    log_test "check (clean tasks: exit 0, no output)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-100000" "OPEN" <<'BODY'
+## Steps
+
+- [ ] open tasks may have unchecked steps
+BODY
+    write_check_task "$test_dir" "20260101-100001" "CLOSED" <<'BODY'
+## Steps
+
+- [x] all ticked
+
+## Action items
+
+- [ ] unchecked outside Steps must not fire
+BODY
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n\n- [x] R1.1 (MINOR) f:1 - fine\n' > "$test_dir/tasks/20260101-100001/REVIEW.md"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ] && [ -z "$output" ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_closed_unchecked() {
+    log_test "check (closed-unchecked fires on CLOSED Steps boxes)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-110000" "CLOSED" <<'BODY'
+## Steps
+
+- [x] done
+- [ ] not done
+- [ ] also not done
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] && echo "$output" | grep -q "20260101-110000: closed-unchecked: 2 unchecked"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_closed_not_approved() {
+    log_test "check (closed-not-approved; later APPROVE round clears it)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-120000" "CLOSED" <<'BODY'
+## Steps
+
+- [x] done
+BODY
+    printf '# R\n\n## Round 1\n\n- VERDICT: REQUEST_CHANGES\n' > "$test_dir/tasks/20260101-120000/REVIEW.md"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    local first_ok=0
+    if [ $exit_code -eq 1 ] && echo "$output" | grep -q "closed-not-approved: latest REVIEW.md verdict is 'REQUEST_CHANGES'"; then
+        first_ok=1
+    fi
+
+    printf '\n## Round 2\n\n- VERDICT: APPROVE\n' >> "$test_dir/tasks/20260101-120000/REVIEW.md"
+
+    set +e
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    exit_code=$?
+    set -e
+
+    if [ $first_ok -eq 1 ] && [ $exit_code -eq 0 ] && [ -z "$output" ]; then
+        pass_test
+    else
+        fail_test "Exit after APPROVE: $exit_code, output: $output"
+    fi
+}
+
+test_check_bad_severity() {
+    log_test "check (bad-severity on unknown vocabulary)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-130000" "OPEN" <<'BODY'
+## Steps
+
+- [ ] pending
+BODY
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n\n- [ ] R1.1 (LOW) f:1 - invented severity\n- [x] R1.2 (BLOCKER) f:2 - known severity\n' > "$test_dir/tasks/20260101-130000/REVIEW.md"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] && echo "$output" | grep -q "bad-severity: unknown severity 'LOW'" && ! echo "$output" | grep -q "BLOCKER'"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_malformed_header() {
+    log_test "check (malformed-header: unparseable and invalid STATUS)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks/20260101-140000"
+    printf '# No priority line\n\n- STATUS: OPEN\n- TAGS: x\n' > "$test_dir/tasks/20260101-140000/TASK.md"
+    write_check_task "$test_dir" "20260101-140001" "DONE" <<'BODY'
+Body text.
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-140000: malformed-header: TASK.md failed to parse" \
+        && echo "$output" | grep -q "20260101-140001: malformed-header: invalid STATUS 'DONE'"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_strict() {
+    log_test "check (--strict requires REVIEW/RETRO on CLOSED)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-150000" "CLOSED" <<'BODY'
+## Steps
+
+- [x] done
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local default_code=$?
+    local strict_output
+    strict_output=$(run_tatr -r "$test_dir" check --strict 2>&1)
+    local strict_code=$?
+    set -e
+
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-150000/REVIEW.md"
+    printf '# Retro\n\nfine.\n' > "$test_dir/tasks/20260101-150000/RETRO.md"
+
+    set +e
+    local quiet_output
+    quiet_output=$(run_tatr -r "$test_dir" check --strict 2>&1)
+    local quiet_code=$?
+    set -e
+
+    if [ $default_code -eq 0 ] && [ $strict_code -eq 1 ] \
+        && echo "$strict_output" | grep -q "closed-missing-review" \
+        && echo "$strict_output" | grep -q "closed-missing-retro" \
+        && [ $quiet_code -eq 0 ] && [ -z "$quiet_output" ]; then
+        pass_test
+    else
+        fail_test "default: $default_code, strict: $strict_code, quiet: $quiet_code"
+    fi
+}
+
+test_check_ledger() {
+    log_test "check (--ledger promotion-stalled at x3 outside Pending)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    cat > "$test_dir/LESSONS.md" <<'LEDGER'
+# Lessons ledger
+
+## Process lessons
+
+- `hot-lesson` (x3): recurs a lot. 20260101-100000
+- `warm-lesson` (x2): fine where it is. 20260101-100000
+- `noisy-lesson` (x2, enforced) but really at (x4): counter after noise. id
+
+## Pending promotions (3+ occurrences, user decides)
+
+- `promoted-lesson` (x5): already parked here.
+LEDGER
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local exit_code=$?
+    set -e
+
+    set +e
+    local abs_output
+    abs_output=$(run_tatr -r "$test_dir" check --ledger "$test_dir/LESSONS.md" 2>&1)
+    local abs_code=$?
+    local missing_output
+    missing_output=$(run_tatr -r "$test_dir" check --ledger nope.md 2>&1)
+    local missing_code=$?
+    local dir_output
+    dir_output=$(run_tatr -r "$test_dir" check --ledger tasks 2>&1)
+    local dir_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "ledger: promotion-stalled: hot-lesson (x3)" \
+        && echo "$output" | grep -q "ledger: promotion-stalled: noisy-lesson (x4)" \
+        && ! echo "$output" | grep -q "warm-lesson" \
+        && ! echo "$output" | grep -q "promoted-lesson" \
+        && [ $abs_code -eq 1 ] && echo "$abs_output" | grep -q "hot-lesson" \
+        && [ $missing_code -eq 1 ] && echo "$missing_output" | grep -q "ledger: unreadable" \
+        && [ $dir_code -eq 1 ] && echo "$dir_output" | grep -q "ledger: unreadable"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code/$abs_code/$missing_code/$dir_code"
+    fi
+}
+
+test_check_per_id() {
+    log_test "check (per-ID scopes to one task)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-160000" "CLOSED" <<'BODY'
+## Steps
+
+- [ ] dirty
+BODY
+    write_check_task "$test_dir" "20260101-160001" "CLOSED" <<'BODY'
+## Steps
+
+- [x] clean
+BODY
+
+    set +e
+    local dirty_output
+    dirty_output=$(run_tatr -r "$test_dir" check 20260101-160000 2>&1)
+    local dirty_code=$?
+    local clean_output
+    clean_output=$(run_tatr -r "$test_dir" check 20260101-160001 2>&1)
+    local clean_code=$?
+    set -e
+
+    if [ $dirty_code -eq 1 ] && [ $clean_code -eq 0 ] && [ -z "$clean_output" ] \
+        && echo "$dirty_output" | grep -q "closed-unchecked" \
+        && ! echo "$dirty_output" | grep -q "160001"; then
+        pass_test
+    else
+        fail_test "dirty: $dirty_code, clean: $clean_code"
+    fi
+}
+
+test_check_exit_codes() {
+    log_test "check (exit 1 on findings, 0 clean)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-170000" "OPEN" <<'BODY'
+Plain body, nothing wrong.
+BODY
+
+    set +e
+    run_tatr -r "$test_dir" check > /dev/null 2>&1
+    local clean_code=$?
+    set -e
+
+    write_check_task "$test_dir" "20260101-170001" "CLOSED" <<'BODY'
+## Steps
+
+- [ ] left open
+BODY
+
+    set +e
+    run_tatr -r "$test_dir" check > /dev/null 2>&1
+    local dirty_code=$?
+    set -e
+
+    if [ $clean_code -eq 0 ] && [ $dirty_code -eq 1 ]; then
+        pass_test
+    else
+        fail_test "clean: $clean_code, dirty: $dirty_code"
+    fi
+}
+
+
+test_check_scanner_edges() {
+    log_test "check (scanner edges: status whitespace, R-prose, verdict tail)"
+    local test_dir=$(create_test_dir)
+    # Trailing space after CLOSED: deserializes to silent OPEN, must be a finding.
+    mkdir -p "$test_dir/tasks/20260101-180000"
+    printf '# Trailing space\n\n- STATUS: CLOSED \n- PRIORITY: 1\n- TAGS: x\n\n## Steps\n\n- [ ] never done\n' > "$test_dir/tasks/20260101-180000/TASK.md"
+    # Prose checkbox starting with R must not be a severity finding; verdict
+    # with a tail must still read APPROVE.
+    write_check_task "$test_dir" "20260101-180001" "CLOSED" <<'BODY'
+## Steps
+
+- [x] done
+BODY
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE (1 round)\n\n- [ ] Rebase onto master (before merging)\n' > "$test_dir/tasks/20260101-180001/REVIEW.md"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-180000: malformed-header: invalid STATUS 'CLOSED '" \
+        && ! echo "$output" | grep -q "bad-severity" \
+        && ! echo "$output" | grep -q "180001"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_missing_artifacts() {
+    log_test "check (missing TASK.md and verdict-less REVIEW.md)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks/20260101-190000"
+    printf '# R\n\nno verdict here\n' > "$test_dir/tasks/20260101-190000/REVIEW.md"
+    write_check_task "$test_dir" "20260101-190001" "CLOSED" <<'BODY'
+## Steps
+
+- [x] done
+BODY
+    printf '# R\n\nround text but no verdict line\n' > "$test_dir/tasks/20260101-190001/REVIEW.md"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-190000: malformed-header: TASK.md missing or unreadable" \
+        && echo "$output" | grep -q "20260101-190001: closed-not-approved: REVIEW.md has no VERDICT line"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+
 if [ "$MEMCHECK" -eq 1 ]; then
     if ! command -v $MEMCHECKER &> /dev/null; then
         echo -e "${YELLOW}Warning: $MEMCHECKER not found, running without memory checking${RESET}"
@@ -1355,6 +1719,17 @@ test_filter_error_syntax
 test_filter_with_sort
 test_filter_with_recursive
 test_filter_no_results
+test_check_clean
+test_check_closed_unchecked
+test_check_closed_not_approved
+test_check_bad_severity
+test_check_malformed_header
+test_check_strict
+test_check_ledger
+test_check_per_id
+test_check_exit_codes
+test_check_scanner_edges
+test_check_missing_artifacts
 
 echo
 echo "Passed $PASSED_TESTS/$TOTAL_TESTS tests"

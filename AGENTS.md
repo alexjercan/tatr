@@ -112,6 +112,7 @@ tatr edit <ID> -s IN_PROGRESS  # claim a task
 tatr edit <ID> -s CLOSED     # finish it
 tatr new "..." -p 80 -t feature  # add newly discovered work
 tatr new "..." -b body.md    # seed the description body from a file ('-' = stdin)
+tatr check                   # lint the backlog for process drift (exit 1 on findings)
 ```
 
 Design notes and per-task retrospectives live in `docs/` (see `docs/retros/`);

@@ -1,6 +1,6 @@
 # Review: allow dots and dashes in filter literals (task 20260709-193044)
 
-Verdict: **APPROVE**
+- VERDICT: APPROVE
 
 ## Scope reviewed
 - `tatr.c`: new `tatr_filter_is_literal_char` helper and its use in the

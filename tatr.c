@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <limits.h>
 
-#define TATR_VERSION "0.2.0"
+#define TATR_VERSION "0.3.0"
 
 #define HUID_FORMAT_CSTR "%Y%m%d-%H%M%S"
 #define HUID_LENGTH 16 // "20240630-235959" + null terminator
@@ -2638,6 +2638,449 @@ defer:
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// check: lint task artifacts for process drift. Reports findings one per
+// line as "<id>: <rule>: <detail>" on stdout; exits 1 if anything was found,
+// 0 when clean. Unlike ls, a malformed task is a FINDING here, not an abort:
+// the whole point is to surface broken artifacts.
+// ---------------------------------------------------------------------------
+
+static int string_slice_compare_fn(const void *a, const void *b) {
+    return aids_string_slice_compare((const Aids_String_Slice *)a,
+                                     (const Aids_String_Slice *)b);
+}
+
+static boolean slice_contains_cstr(Aids_String_Slice haystack, const char *needle) {
+    unsigned long needle_len = strlen(needle);
+    if (needle_len == 0 || haystack.len < needle_len) {
+        return false;
+    }
+    for (unsigned long i = 0; i + needle_len <= haystack.len; ++i) {
+        if (memcmp(haystack.str + i, needle, needle_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Reads "<tasks_dir>/<huid>/<name>" if it exists. Returns true and the
+// content (caller frees content->str) when the file was read; false when it
+// does not exist. A file that exists but cannot be read is logged and
+// treated as absent.
+static boolean task_sibling_read(const Aids_String_Slice *tasks_dir,
+                                 const Aids_String_Slice *huid,
+                                 const char *name,
+                                 Aids_String_Slice *content) {
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
+                 SS_Arg(*tasks_dir), SS_Arg(*huid), name) < 0) {
+        return false;
+    }
+    if (access(path_buffer, F_OK) != 0) {
+        return false;
+    }
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    if (aids_io_read(&path, content, "r") != AIDS_OK) {
+        aids_log(AIDS_WARNING, "check: '%s' exists but could not be read: %s",
+                 path_buffer, aids_failure_reason());
+        return false;
+    }
+    return true;
+}
+
+// The known review severities, as written inside the parens of a finding
+// line: "- [ ] R1.2 (MAJOR) file:line - ...".
+static boolean check_severity_is_known(Aids_String_Slice severity) {
+    static const char *known[] = {"BLOCKER", "MAJOR", "MINOR", "NIT"};
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
+        Aids_String_Slice k = aids_string_slice_from_cstr((char *)known[i]);
+        if (aids_string_slice_compare(&severity, &k) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Lints one task directory. Returns the number of findings printed.
+static size_t check_task(const Aids_String_Slice *tasks_dir,
+                         const Aids_String_Slice *huid,
+                         boolean strict) {
+    size_t findings = 0;
+    Aids_String_Slice raw = {0};
+    Aids_String_Slice review = {0};
+    boolean has_review = false;
+    Task task = {0};
+    boolean task_loaded = false;
+
+    if (!task_sibling_read(tasks_dir, huid, TASK_FILE_NAME_CSTR, &raw)) {
+        printf(SS_Fmt ": malformed-header: TASK.md missing or unreadable\n", SS_Arg(*huid));
+        findings++;
+        goto review_checks;
+    }
+
+    task_init_empty(&task);
+    if (task_deserialize(raw, &task) != AIDS_OK) {
+        printf(SS_Fmt ": malformed-header: TASK.md failed to parse (title/STATUS/PRIORITY/TAGS header)\n", SS_Arg(*huid));
+        findings++;
+        AIDS_FREE(raw.str);
+        raw = (Aids_String_Slice){0};
+        goto review_checks;
+    }
+    task._buffer = raw.str; // task now owns the buffer
+    task_loaded = true;
+
+    // task_status_from_string silently maps an unknown status to OPEN, so
+    // re-validate the raw STATUS token - EXACTLY as the parser sees it (no
+    // trim): "- STATUS: DONE", "- STATUS: CLOSED " (trailing space) and a
+    // CRLF "CLOSED\r" all deserialize to a silent OPEN and must be findings.
+    {
+        Aids_String_Slice scan = raw;
+        Aids_String_Slice line = {0};
+        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+            if (!aids_string_slice_starts_with(&line, STATUS_FORMAT)) {
+                continue;
+            }
+            aids_string_slice_skip(&line, STATUS_FORMAT.len);
+            if (!task_status_is_valid(&line)) {
+                printf(SS_Fmt ": malformed-header: invalid STATUS '" SS_Fmt "' (whitespace and line endings count)\n",
+                       SS_Arg(*huid), SS_Arg(line));
+                findings++;
+            }
+            break;
+        }
+    }
+
+    // closed-unchecked: a CLOSED task may not leave unchecked boxes in its
+    // Steps section (other sections - DoD, Action items - are allowed to).
+    if (task.meta.status == Task_Status_CLOSED) {
+        Aids_String_Slice scan = raw;
+        Aids_String_Slice line = {0};
+        boolean in_steps = false;
+        size_t unchecked = 0;
+        Aids_String_Slice steps_heading = aids_string_slice_from_cstr("## Steps");
+        Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+        Aids_String_Slice unchecked_box = aids_string_slice_from_cstr("- [ ]");
+        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+            Aids_String_Slice trimmed = line;
+            aids_string_slice_trim_right(&trimmed);
+            if (aids_string_slice_starts_with(&trimmed, any_heading)) {
+                // Exact heading match: "## Steps taken later" is NOT the
+                // Steps section.
+                in_steps = aids_string_slice_compare(&trimmed, &steps_heading) == 0;
+                continue;
+            }
+            if (in_steps && aids_string_slice_starts_with(&trimmed, unchecked_box)) {
+                unchecked++;
+            }
+        }
+        if (unchecked > 0) {
+            printf(SS_Fmt ": closed-unchecked: %zu unchecked Steps item(s) on a CLOSED task\n",
+                   SS_Arg(*huid), unchecked);
+            findings++;
+        }
+    }
+
+review_checks:
+    has_review = task_sibling_read(tasks_dir, huid, "REVIEW.md", &review);
+
+    if (has_review) {
+        // Last "- VERDICT: " line wins (rounds are appended, never rewritten).
+        Aids_String_Slice scan = review;
+        Aids_String_Slice line = {0};
+        Aids_String_Slice verdict_format = aids_string_slice_from_cstr("- VERDICT: ");
+        Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
+        Aids_String_Slice last_verdict = {0};
+        boolean has_verdict = false;
+        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+            Aids_String_Slice l = line;
+            if (aids_string_slice_starts_with(&l, verdict_format)) {
+                aids_string_slice_skip(&l, verdict_format.len);
+                aids_string_slice_trim_left(&l);
+                // Tolerant value match: the verdict is the first
+                // whitespace-delimited token, so "APPROVE (1 round)" and a
+                // CRLF "APPROVE\r" both read as APPROVE.
+                unsigned long tok = 0;
+                while (tok < l.len && !isspace(l.str[tok])) {
+                    tok++;
+                }
+                l.len = tok;
+                last_verdict = l;
+                has_verdict = true;
+            }
+        }
+        if (task_loaded && task.meta.status == Task_Status_CLOSED) {
+            if (!has_verdict) {
+                printf(SS_Fmt ": closed-not-approved: REVIEW.md has no VERDICT line\n", SS_Arg(*huid));
+                findings++;
+            } else if (aids_string_slice_compare(&last_verdict, &approve) != 0) {
+                printf(SS_Fmt ": closed-not-approved: latest REVIEW.md verdict is '" SS_Fmt "'\n",
+                       SS_Arg(*huid), SS_Arg(last_verdict));
+                findings++;
+            }
+        }
+
+        // bad-severity: "- [ ] R1.2 (LOW) ..." with a severity outside the
+        // vocabulary. Tolerant line scan: a finding line starts with a
+        // checkbox followed by an R-id, severity in the first parens.
+        scan = review;
+        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+            Aids_String_Slice l = line;
+            aids_string_slice_trim(&l);
+            Aids_String_Slice box_open = aids_string_slice_from_cstr("- [ ] R");
+            Aids_String_Slice box_done = aids_string_slice_from_cstr("- [x] R");
+            if (!aids_string_slice_starts_with(&l, box_open) &&
+                !aids_string_slice_starts_with(&l, box_done)) {
+                continue;
+            }
+            // A finding line has an R-ID: the R must be followed by a digit
+            // ("- [ ] Rebase onto master" is prose, not a finding).
+            if (l.len <= box_open.len || !isdigit(l.str[box_open.len])) {
+                continue;
+            }
+            // Find "(...)" and take its content as the severity token.
+            unsigned long open = 0;
+            while (open < l.len && l.str[open] != '(') {
+                open++;
+            }
+            if (open == l.len) {
+                continue;
+            }
+            unsigned long close = open + 1;
+            while (close < l.len && l.str[close] != ')') {
+                close++;
+            }
+            if (close == l.len) {
+                continue;
+            }
+            Aids_String_Slice severity =
+                aids_string_slice_from_parts(l.str + open + 1, close - open - 1);
+            if (!check_severity_is_known(severity)) {
+                printf(SS_Fmt ": bad-severity: unknown severity '" SS_Fmt "' in REVIEW.md (use BLOCKER|MAJOR|MINOR|NIT)\n",
+                       SS_Arg(*huid), SS_Arg(severity));
+                findings++;
+            }
+        }
+    }
+
+    if (strict && task_loaded && task.meta.status == Task_Status_CLOSED) {
+        if (!has_review) {
+            printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md (--strict)\n", SS_Arg(*huid));
+            findings++;
+        }
+        char retro_buffer[PATH_MAX];
+        if (snprintf(retro_buffer, sizeof(retro_buffer), SS_Fmt "/" SS_Fmt "/RETRO.md",
+                     SS_Arg(*tasks_dir), SS_Arg(*huid)) >= 0 &&
+            access(retro_buffer, F_OK) != 0) {
+            printf(SS_Fmt ": closed-missing-retro: CLOSED task has no RETRO.md (--strict)\n", SS_Arg(*huid));
+            findings++;
+        }
+    }
+
+    if (task_loaded) {
+        task_cleanup(&task); // frees raw via task->_buffer
+    } else if (raw.str != NULL) {
+        AIDS_FREE(raw.str);
+    }
+    if (has_review && review.str != NULL) {
+        AIDS_FREE(review.str);
+    }
+    return findings;
+}
+
+// Lints the lessons ledger: a lesson at three or more occurrences must sit
+// in the "## Pending promotions" section. Returns findings printed.
+static size_t check_ledger(const Aids_String_Slice *cwd, const char *ledger_arg) {
+    size_t findings = 0;
+    Aids_String_Slice content = {0};
+    char path_buffer[PATH_MAX];
+
+    if (ledger_arg[0] == '/') {
+        if (snprintf(path_buffer, sizeof(path_buffer), "%s", ledger_arg) < 0) {
+            return 0;
+        }
+    } else if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/%s",
+                        SS_Arg(*cwd), ledger_arg) < 0) {
+        return 0;
+    }
+
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    // fopen on a directory succeeds on Linux and reads as empty; a
+    // directory must be a finding, not a silently clean ledger.
+    if (aids_io_isdir(&path) || aids_io_read(&path, &content, "r") != AIDS_OK) {
+        printf("ledger: unreadable: '%s'\n", ledger_arg);
+        return 1;
+    }
+
+    Aids_String_Slice scan = content;
+    Aids_String_Slice line = {0};
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    boolean in_pending = false;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        aids_string_slice_trim(&l);
+        if (aids_string_slice_starts_with(&l, any_heading)) {
+            in_pending = slice_contains_cstr(l, "Pending promotions");
+            continue;
+        }
+        if (in_pending) {
+            continue;
+        }
+        // Find "(xN)" with N >= 3.
+        for (unsigned long i = 0; i + 3 < l.len; ++i) {
+            if (l.str[i] != '(' || l.str[i + 1] != 'x') {
+                continue;
+            }
+            unsigned long j = i + 2;
+            unsigned long count = 0;
+            while (j < l.len && l.str[j] >= '0' && l.str[j] <= '9') {
+                count = count * 10 + (unsigned long)(l.str[j] - '0');
+                j++;
+            }
+            if (j >= l.len || l.str[j] != ')' || j <= i + 2) {
+                // "(x-axis)", "(x2, enforced)": not a counter here - keep
+                // scanning; a real one may follow later on the line.
+                continue;
+            }
+            if (count >= 3) {
+                // Slug is the first `backticked` token on the line, if any.
+                Aids_String_Slice slug = aids_string_slice_from_cstr("(unnamed)");
+                for (unsigned long a = 0; a < l.len; ++a) {
+                    if (l.str[a] != '`') {
+                        continue;
+                    }
+                    unsigned long b = a + 1;
+                    while (b < l.len && l.str[b] != '`') {
+                        b++;
+                    }
+                    if (b < l.len) {
+                        slug = aids_string_slice_from_parts(l.str + a + 1, b - a - 1);
+                    }
+                    break;
+                }
+                printf("ledger: promotion-stalled: " SS_Fmt " (x%lu) is outside Pending promotions\n",
+                       SS_Arg(slug), count);
+                findings++;
+            }
+            break; // one count per line
+        }
+    }
+
+    AIDS_FREE(content.str);
+    return findings;
+}
+
+static int main_check(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_Array project_dirs = {0}; /* Aids_String_Slice */
+    boolean project_dirs_initialized = false;
+    size_t findings = 0;
+
+    argparse_parser_init(&parser, "tatr check", "Lint task artifacts for process drift", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID to check (default: every task)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'S',
+        .long_name = "strict",
+        .description = "Also require REVIEW.md and RETRO.md on CLOSED tasks",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'L',
+        .long_name = "ledger",
+        .description = "Also lint a lessons ledger file (path relative to the root)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    boolean strict = argparse_get_flag(&parser, "strict");
+    char *ledger_arg = argparse_get_value(&parser, "ledger");
+    char *id_str = argparse_get_value(&parser, "id");
+
+    if (id_str != NULL) {
+        Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+        if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+            return_defer(1);
+        }
+        findings += check_task(&tasks_dir, &id, strict);
+    } else {
+        aids_array_init(&project_dirs, sizeof(Aids_String_Slice));
+        project_dirs_initialized = true;
+        if (find_current_tasks_dir(&ctx->cwd, &project_dirs) != AIDS_OK) {
+            return_defer(1);
+        }
+        for (size_t i = 0; i < project_dirs.count; ++i) {
+            Aids_String_Slice *dir = NULL;
+            if (aids_array_get(&project_dirs, i, (void **)&dir) != AIDS_OK) {
+                continue;
+            }
+            // find_current_tasks_dir returns PROJECT dirs (the "/tasks"
+            // suffix stripped); re-append it for listing and path building.
+            char tasks_path_buffer[PATH_MAX];
+            if (snprintf(tasks_path_buffer, sizeof(tasks_path_buffer),
+                         SS_Fmt "/%s", SS_Arg(*dir), TASKS_PATH_CSTR) < 0) {
+                continue;
+            }
+            Aids_String_Slice tasks_path = aids_string_slice_from_cstr(tasks_path_buffer);
+            Aids_Array entries = {0};
+            aids_array_init(&entries, sizeof(Aids_String_Slice));
+            if (aids_io_listdir(&tasks_path, &entries) != AIDS_OK) {
+                aids_log(AIDS_ERROR, "Failed to list tasks directory: %s", aids_failure_reason());
+                cleanup_string_slice_array(&entries);
+                return_defer(1);
+            }
+            aids_array_sort(&entries, string_slice_compare_fn);
+            for (size_t j = 0; j < entries.count; ++j) {
+                Aids_String_Slice *huid_entry = NULL;
+                if (aids_array_get(&entries, j, (void **)&huid_entry) != AIDS_OK) {
+                    continue;
+                }
+                if (!ishuid(huid_entry)) {
+                    continue;
+                }
+                findings += check_task(&tasks_path, huid_entry, strict);
+            }
+            cleanup_string_slice_array(&entries);
+        }
+    }
+
+    if (ledger_arg != NULL) {
+        findings += check_ledger(&ctx->cwd, ledger_arg);
+    }
+
+    if (findings > 0) {
+        result = 1;
+    }
+
+defer:
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    if (project_dirs_initialized) {
+        cleanup_string_slice_array(&project_dirs);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
 static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "Usage: %s [-r ROOT] <subcommand> [options]\n", parser->name);
     fprintf(stderr, "\n");
@@ -2652,6 +3095,7 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  show         Show a single task by ID\n");
     fprintf(stderr, "  edit         Update fields of an existing task\n");
     fprintf(stderr, "  rm           Remove a task by ID\n");
+    fprintf(stderr, "  check        Lint task artifacts for process drift\n");
     fprintf(stderr, "\n");
 }
 
@@ -2734,6 +3178,9 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "rm") == 0) {
         result = main_rm(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "check") == 0) {
+        result = main_check(&ctx);
         return_defer(result);
     } else {
         fprintf(stderr, "Unknown subcommand: %s\n", subcommand);

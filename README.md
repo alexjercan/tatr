@@ -184,6 +184,36 @@ tatr rm 20260331-144635
 `rm` only ever touches the validated `tasks/<ID>/` directory and exits non-zero
 if the ID is malformed or the task does not exist.
 
+### Checking Task Artifacts
+
+Lint the backlog for process drift. `check` walks every task (or one, by ID)
+and prints findings one per line as `<id>: <rule>: <detail>`, exiting 1 if
+anything was found and 0 (silently) when clean:
+
+```bash
+tatr check                    # lint every task
+tatr check 20260331-144635    # lint one task
+tatr check --strict           # also require REVIEW.md/RETRO.md on CLOSED tasks
+tatr check --ledger docs/LESSONS.md   # also lint a lessons ledger
+```
+
+**Default rules:**
+- `closed-unchecked`: a CLOSED task still has unchecked `- [ ]` items under
+  its `## Steps` section (other sections may keep open boxes).
+- `closed-not-approved`: a CLOSED task's REVIEW.md exists but its latest
+  `- VERDICT:` line is not APPROVE (or there is no verdict at all).
+- `bad-severity`: a REVIEW.md finding uses a severity outside
+  BLOCKER|MAJOR|MINOR|NIT.
+- `malformed-header`: TASK.md is missing/unreadable, its header does not
+  parse, or its STATUS value is not OPEN/IN_PROGRESS/CLOSED.
+
+**Options:**
+- `-S, --strict`: add `closed-missing-review` and `closed-missing-retro` for
+  CLOSED tasks lacking those files
+- `-L, --ledger <FILE>`: add `promotion-stalled` for a ledger lesson at three
+  or more occurrences (`(x3)` and up) outside the `## Pending promotions`
+  section (path relative to the root)
+
 ### Global Options
 
 - `-r, --root <DIR>`: Change working directory before running commands

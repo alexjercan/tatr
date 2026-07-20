@@ -26,14 +26,14 @@ tatr edit <ID> [-s STATUS] [-p PRIORITY] [-t TAGS...] [-T TITLE]
 
 ## Steps
 
-- [ ] Reuse the HUID-resolution helper added by the `show` task to locate and
+- [x] Reuse the HUID-resolution helper added by the `show` task to locate and
       load the task.
-- [ ] Add optional-with-default detection so unspecified flags do not clobber
+- [x] Add optional-with-default detection so unspecified flags do not clobber
       existing values (argparse.h: check whether each option was actually set).
-- [ ] Implement `command_edit`; validate the status string before applying.
-- [ ] Save via `task_save`; confirm the description body round-trips unchanged.
-- [ ] Wire `edit` into dispatch and help.
-- [ ] Add tests in `checker.sh`: change status, change priority, change tags,
+- [x] Implement `command_edit`; validate the status string before applying.
+- [x] Save via `task_save`; confirm the description body round-trips unchanged.
+- [x] Wire `edit` into dispatch and help.
+- [x] Add tests in `checker.sh`: change status, change priority, change tags,
       change title, partial update leaves other fields intact, bad status
       rejected, bad/missing ID errors.
-- [ ] Run `make` and `./checker.sh`; all green.
+- [x] Run `make` and `./checker.sh`; all green.

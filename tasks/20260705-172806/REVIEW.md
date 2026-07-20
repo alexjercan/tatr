@@ -1,6 +1,6 @@
 # Review: AGENTS.md and documentation
 
-Verdict: APPROVE
+- VERDICT: APPROVE
 
 ## Scope reviewed
 - New `AGENTS.md` at the repo root.
