@@ -14,9 +14,9 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 - `reproduce-before-fixing` (x1): create the failing case and run it before
   touching code, so the fix is aimed, not guessed. 20260709-193044
-- `docs-sweep-stale-claims` (x1): a docs pass re-reads aging claims (the
-  Limitations list was doubly stale) and makes every referenced target exist
-  in the same pass. 20260705-172806
+- `docs-sweep-stale-claims` (x2): a docs pass re-reads aging claims and sweeps
+  EVERY doc surface (README, AGENTS.md, docs/, skills) for the old
+  invocation/target, not just the one the task names. 20260705-172806, 20260720-220059
 - `fix-the-tool-not-the-prompt` (x1): a lesson recurring despite prompt-level
   mitigations (x7 in a downstream ledger) means the tool should make the
   mistake impossible - tatr new now fails on ID collision. 20260718-235158

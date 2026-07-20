@@ -30,7 +30,10 @@ Overall: `nix develop -c ./checker.sh` green and `./tatr check` / `./tatr check 
 
 ## Tasks
 
-- [ ] 20260720-220059 (p60, tatr) build guard: fail bare-shell build, require nix develop
+- [x] 20260720-220059 (p60, tatr) build guard: fail bare-shell build, require nix develop
+      landed 7221078; 2 review rounds (1 out-of-context REQUEST_CHANGES on stale
+      README docs, 1 in-session APPROVE); guard passes in nix dev shell + build
+      sandbox, TATR_ALLOW_BARE_BUILD=1 opt-out for CI; ledger lesson absorbed.
 - [ ] 20260720-220114 (p30, tatr) retro-completeness: mark pre-flow tasks historical, reconcile stray retros
 
 ## Manual acceptance (batched for the user at Finish)
