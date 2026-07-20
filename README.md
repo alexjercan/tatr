@@ -194,7 +194,7 @@ anything was found and 0 (silently) when clean:
 tatr check                    # lint every task
 tatr check 20260331-144635    # lint one task
 tatr check --strict           # also require REVIEW.md/RETRO.md on CLOSED tasks
-tatr check --ledger docs/LESSONS.md   # also lint a lessons ledger
+tatr check --ledger LESSONS.md   # also lint a lessons ledger
 ```
 
 **Default rules:**
@@ -301,13 +301,13 @@ tatr includes a comprehensive test suite to ensure functionality and prevent reg
 
 ```bash
 # Run all tests
-./tests/checker.sh
+./checker.sh
 
 # Run with verbose output
-./tests/checker.sh -v
+./checker.sh -v
 
 # Run with memory leak checking (requires valgrind)
-./tests/checker.sh --memcheck
+./checker.sh --memcheck
 ```
 
 The test suite covers:

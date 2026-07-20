@@ -20,7 +20,7 @@ Makefile      # build + install
 checker.sh    # the test suite (integration tests that drive the built binary)
 flake.nix     # nix dev shell (provides clang, valgrind, etc.)
 README.md     # user-facing documentation
-docs/         # design notes, retros, and other project documentation
+LESSONS.md    # lessons ledger (read before starting any task)
 tasks/        # tatr's own task backlog (tatr dogfoods itself)
 ```
 
@@ -115,8 +115,18 @@ tatr new "..." -b body.md    # seed the description body from a file ('-' = stdi
 tatr check                   # lint the backlog for process drift (exit 1 on findings)
 ```
 
-Design notes and per-task retrospectives live in `docs/` (see `docs/retros/`);
-add to them after a meaningful change so future sessions inherit the context.
+Per-task records live in the task's own folder: `RETRO.md` (and `REVIEW.md`)
+next to its `TASK.md`, per the flow skills. The pre-flow `docs/retros/` were
+distilled into the ledger and removed (git history keeps them). Durable
+lessons go to `LESSONS.md` at the root; there is no scratch drawer.
+
+## Development flow
+
+/flow drives development here: work is planned into tatr tasks, implemented in
+sprout worktrees, reviewed out-of-context in round 1, and closed with DoD
+proofs in test:/cmd:/manual: notation. `LESSONS.md` at the repo root is the
+lessons ledger - read it before starting any task. `tatr check` (plus
+`tatr check --ledger LESSONS.md`) is the conformance gate; keep both clean.
 
 ## Commits
 
