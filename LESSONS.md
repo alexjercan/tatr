@@ -27,6 +27,9 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `validate-the-exact-parsed-token` (x1): a trimmed re-validation of an
   untrimmed parse is a hole; check the exact bytes the parser consumes
   (task_status_from_string silently defaults to OPEN). 20260720-152503
+- `re-enumerate-snapshot-counts` (x1): a task quoting "the N items to fix" is a
+  snapshot of a moving backlog; re-derive the live set (git log, tatr check -S)
+  before acting rather than trusting the number. 20260720-220114
 
 ## Domain lessons (project-specific)
 

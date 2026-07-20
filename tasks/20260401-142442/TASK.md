@@ -2,7 +2,7 @@
 
 - STATUS: CLOSED
 - PRIORITY: 80
-- TAGS: feature
+- TAGS: feature,historical
 
 Add `-d, --directory <DIR>` that sets the root path of the `tatr` command.
 

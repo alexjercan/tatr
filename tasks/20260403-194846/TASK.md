@@ -2,7 +2,7 @@
 
 - STATUS: CLOSED
 - PRIORITY: 100
-- TAGS: bug
+- TAGS: bug,historical
 
 When I try to add `-` in the title it bugs out. Might be an issue with
 `argparse.h` will have to investigate.

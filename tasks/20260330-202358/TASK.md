@@ -2,7 +2,7 @@
 
 - STATUS: CLOSED
 - PRIORITY: 100
-- TAGS: feature
+- TAGS: feature,historical
 
 The `ls` subcommand should list all the tasks. We should be able to see the
 titles, status, priority and tags of the tasks. We should also be able to see

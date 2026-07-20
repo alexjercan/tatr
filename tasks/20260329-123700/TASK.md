@@ -2,7 +2,7 @@
 
 - STATUS: CLOSED
 - PRIORITY: 100
-- TAGS: feature
+- TAGS: feature,historical
 
 Task Tracker is a `TODO` management tool. This is insipired from
 <https://github.com/tsoding>'s streams where he uses it for some projects.

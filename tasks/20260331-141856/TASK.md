@@ -2,7 +2,7 @@
 
 - STATUS: CLOSED
 - PRIORITY: 80
-- TAGS: feature
+- TAGS: feature,historical
 
 When we are in a project folder and we run `tatr` we want to find the first
 `tasks` folder in the hierarchy and use that as the root for the tasks.
