@@ -47,12 +47,12 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `named-literal-char-predicate` (x1): extend the filter lexer via the named
   is_literal_char predicate, not inline ctype checks - one documented edit
   point for why `.` and `-` lex but `/` does not. 20260709-193044
+- `build-through-nix-dev-shell` (x3, absorbed by Makefile build guard, 2026-07-20):
+  a bare `make` outside nix (no IN_NIX_SHELL/NIX_BUILD_TOP) now fails with a
+  `nix develop -c make` pointer; TATR_ALLOW_BARE_BUILD=1 opts out (CI provisions
+  its own toolchain). 20260705-172803, 20260709-193044, 20260718-235158, 20260720-220059
 
 ## Pending promotions (3+ occurrences, user decides)
 
-- `build-through-nix-dev-shell` (x3, absorbed by Makefile build guard, 2026-07-20):
-  prose in AGENTS.md was re-learned twice, so a Makefile guard now fails a bare
-  `make` (no IN_NIX_SHELL/NIX_BUILD_TOP) with a `nix develop -c make` pointer;
-  TATR_ALLOW_BARE_BUILD=1 opts out (CI provisions its own toolchain). The bare
-  shell has only gcc, so every build and test runs via nix develop -c (clang +
-  valgrind). 20260705-172803, 20260709-193044, 20260718-235158, 20260720-220059
+(none - build-through-nix-dev-shell was absorbed by the Makefile build guard on
+2026-07-20 and moved to Domain lessons.)

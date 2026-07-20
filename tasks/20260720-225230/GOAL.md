@@ -34,8 +34,16 @@ Overall: `nix develop -c ./checker.sh` green and `./tatr check` / `./tatr check 
       landed 7221078; 2 review rounds (1 out-of-context REQUEST_CHANGES on stale
       README docs, 1 in-session APPROVE); guard passes in nix dev shell + build
       sandbox, TATR_ALLOW_BARE_BUILD=1 opt-out for CI; ledger lesson absorbed.
-- [ ] 20260720-220114 (p30, tatr) retro-completeness: mark pre-flow tasks historical, reconcile stray retros
+- [x] 20260720-220114 (p30, tatr) retro-completeness: mark pre-flow tasks historical, reconcile stray retros
+      landed 053ef14; 1 review round (out-of-context APPROVE, no findings);
+      8 pre-flow + 235158 tagged historical, 7 retros restored verbatim from
+      git history, tatr check -S clean across all CLOSED tasks.
 
 ## Manual acceptance (batched for the user at Finish)
 
 Accumulates `manual:` DoD items as tasks land; presented at Finish.
+
+- (verified in-cycle) 20260720-220059: running a bare `make` outside the nix
+  dev shell fails with the `nix develop -c make` pointer. Proven during the
+  task (`env -u IN_NIX_SHELL -u NIX_BUILD_TOP -u TATR_ALLOW_BARE_BUILD make`
+  exited non-zero with the pointer message); left here for your confirmation.
