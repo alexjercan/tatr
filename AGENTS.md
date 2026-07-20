@@ -127,7 +127,10 @@ CLOSED task, EXCEPT tasks tagged `historical` or `goal`: a `historical` task is
 pre-flow work whose review/retro context is gone (mark old tasks so they stop
 flagging instead of fabricating records), and a `goal` task is a /flow umbrella
 whose durable record is its `GOAL.md`, not a per-task retro. Both are exempt
-from `closed-missing-review`/`closed-missing-retro`.
+from `closed-missing-review`/`closed-missing-retro`, and also from the default
+`closed-unchecked` rule - a frozen task's step boxes stay verbatim (superseded /
+dropped / premise-falsified steps are honest history) rather than being ticked
+to silence the lint.
 
 ## Development flow
 

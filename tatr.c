@@ -2703,9 +2703,11 @@ static boolean check_severity_is_known(Aids_String_Slice severity) {
 
 // A CLOSED task tagged `historical` (pre-flow work whose review/retro context
 // is gone) or `goal` (a /flow umbrella, whose durable record is its GOAL.md) is
-// exempt from the strict closed-missing-review / closed-missing-retro rules -
-// neither file is expected for it by design, so demanding one would force a
-// fabricated record. Reuses the parsed task's tag set (the shared load spine).
+// exempt from the record-completeness rules: the strict closed-missing-review /
+// closed-missing-retro rules (neither file is expected for it by design, so
+// demanding one would force a fabricated record) and the default closed-unchecked
+// rule (a frozen task's step boxes stay verbatim rather than being ticked to
+// silence the lint). Reuses the parsed task's tag set (the shared load spine).
 static boolean check_task_is_history_exempt(Task *task) {
     static const char *exempt[] = {"historical", "goal"};
     for (size_t i = 0; i < task->meta.tags.count; ++i) {
@@ -2774,7 +2776,11 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
 
     // closed-unchecked: a CLOSED task may not leave unchecked boxes in its
     // Steps section (other sections - DoD, Action items - are allowed to).
-    if (task.meta.status == Task_Status_CLOSED) {
+    // A `historical` or `goal` task is exempt: frozen pre-flow work (and flow
+    // umbrellas) are not held to current step-completion discipline, and their
+    // step boxes stay verbatim rather than being ticked to silence the lint.
+    if (task.meta.status == Task_Status_CLOSED &&
+        !check_task_is_history_exempt(&task)) {
         Aids_String_Slice scan = raw;
         Aids_String_Slice line = {0};
         boolean in_steps = false;

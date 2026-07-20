@@ -1365,6 +1365,48 @@ BODY
     fi
 }
 
+test_check_closed_unchecked_history_exempt() {
+    log_test "check (closed-unchecked exempts historical/goal tasks)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+
+    # A historical and a goal task, both CLOSED with unchecked Steps, must NOT
+    # flag; a plain feature task with the same unchecked Steps still flags.
+    write_unchecked_task() {
+        local id=$1 tags=$2
+        mkdir -p "$test_dir/tasks/$id"
+        {
+            echo "# Task $id"
+            echo
+            echo "- STATUS: CLOSED"
+            echo "- PRIORITY: 10"
+            echo "- TAGS: $tags"
+            echo
+            echo "## Steps"
+            echo
+            echo "- [ ] dropped, premise falsified"
+        } > "$test_dir/tasks/$id/TASK.md"
+    }
+    write_unchecked_task "20260101-120100" "feature,historical"
+    write_unchecked_task "20260101-120200" "goal"
+    write_unchecked_task "20260101-120300" "feature"
+
+    set +e
+    local out
+    out=$(run_tatr -r "$test_dir" check 2>&1)
+    local code=$?
+    set -e
+
+    if [ $code -eq 1 ] \
+        && ! echo "$out" | grep -q "20260101-120100" \
+        && ! echo "$out" | grep -q "20260101-120200" \
+        && echo "$out" | grep -q "20260101-120300: closed-unchecked"; then
+        pass_test
+    else
+        fail_test "exit: $code, output: $out"
+    fi
+}
+
 test_check_closed_not_approved() {
     log_test "check (closed-not-approved; later APPROVE round clears it)"
     local test_dir=$(create_test_dir)
@@ -1820,6 +1862,7 @@ test_filter_with_recursive
 test_filter_no_results
 test_check_clean
 test_check_closed_unchecked
+test_check_closed_unchecked_history_exempt
 test_check_closed_not_approved
 test_check_bad_severity
 test_check_malformed_header

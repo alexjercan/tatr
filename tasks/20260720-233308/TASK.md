@@ -1,6 +1,6 @@
 # tatr check: historical tag also exempts closed-unchecked
 
-- STATUS: OPEN
+- STATUS: IN_PROGRESS
 - PRIORITY: 55
 - TAGS: feature
 
@@ -14,10 +14,10 @@ violate the task-history immutability policy.
 
 ## Steps
 
-- [ ] Extend the check logic: when a CLOSED task is `historical`-tagged, skip the `closed-unchecked` finding (reuse `check_task_is_history_exempt`, or a historical-only variant).
-- [ ] Decide whether `goal` umbrellas also skip closed-unchecked (they usually have no Steps; keep or scope to historical-only).
-- [ ] checker.sh: a historical task with unchecked Steps is clean; a plain CLOSED task with unchecked Steps still flags.
-- [ ] Update AGENTS.md note on the historical marker to say it also covers closed-unchecked.
+- [x] Extend the check logic: when a CLOSED task is `historical`-tagged, skip the `closed-unchecked` finding (reuse `check_task_is_history_exempt`, or a historical-only variant).
+- [x] Decided: reuse the combined helper - `goal` umbrellas also skip closed-unchecked (they usually have no Steps; keep or scope to historical-only).
+- [x] checker.sh: a historical task with unchecked Steps is clean; a plain CLOSED task with unchecked Steps still flags.
+- [x] Update AGENTS.md note on the historical marker to say it also covers closed-unchecked.
 
 ## Definition of Done
 
