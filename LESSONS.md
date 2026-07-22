@@ -30,6 +30,12 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `re-enumerate-snapshot-counts` (x1): a task quoting "the N items to fix" is a
   snapshot of a moving backlog; re-derive the live set (git log, tatr check -S)
   before acting rather than trusting the number. 20260720-220114
+- `test-first-for-check-messages` (x1): for a check rule, write the test with
+  its exact expected message before the emitting code, so the format is designed
+  from the assertion not reverse-engineered into it. 20260722-152010
+- `check-the-helper-signature` (x1): glance at one existing call site for a
+  by-value-vs-by-pointer aids helper convention before writing a fresh call
+  (aids_string_slice_starts_with takes the prefix by value). 20260722-152010
 
 ## Domain lessons (project-specific)
 
