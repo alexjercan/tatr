@@ -51,7 +51,7 @@ Overall: `nix develop -c ./checker.sh` passes (including `--memcheck` clean) and
 
 Updated as tasks land (one line per land, like a spike's Fix record).
 
-- [ ] <task-id> (p100, tatr) Implement bad-decision-status + dangling-supersede rules, tests, tatr-repo docs
+- [ ] 20260722-152010 (p100, tatr) Implement bad-decision-status + dangling-supersede rules, tests, tatr-repo docs
 
 ## Decisions (load-bearing, architectural)
 
