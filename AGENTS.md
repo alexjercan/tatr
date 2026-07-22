@@ -132,6 +132,10 @@ from `closed-missing-review`/`closed-missing-retro`, and also from the default
 dropped / premise-falsified steps are honest history) rather than being ticked
 to silence the lint.
 
+The default `DECISION.md` rules (`bad-decision-status`, `dangling-supersede`)
+need no such exemption: they are presence-gated, firing only when a task carries
+a `DECISION.md`, so no historical task is retroactively flagged.
+
 ## Development flow
 
 /flow drives development here: work is planned into tatr tasks, implemented in

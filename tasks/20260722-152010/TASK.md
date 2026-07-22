@@ -1,6 +1,6 @@
 # Add bad-decision-status and dangling-supersede checks to tatr check
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
 
@@ -18,29 +18,25 @@ past tasks (which have no DECISION.md) need zero migration.
 
 ## Steps
 
-- [ ] Add a `check_decision_status_is_valid` helper (mirrors
-  `check_severity_is_known`): a STATUS value is valid iff it equals `ACCEPTED`
-  or starts with `SUPERSEDED by ` followed by a non-empty ref.
-- [ ] Add a supersede-ref resolver: extract the `YYYYMMDD-HHMMSS` HUID from a
-  ref string (canonical form `tasks/<id>/DECISION.md`, tolerant of a bare
-  `<id>`), then confirm `<tasks_dir>/<huid>/DECISION.md` exists via `access`.
-  Reuse the existing HUID-validation helper if there is one; a ref with no
-  parseable/existing HUID does not resolve.
-- [ ] In `check_task`, after the review-checks block, read `DECISION.md` via
-  `task_sibling_read`; when present, scan its first `- STATUS:` line and emit
-  `bad-decision-status` on an invalid/absent STATUS value.
-- [ ] When STATUS is `SUPERSEDED by <ref>`, and for any `- Supersedes: <ref>`
-  header line, emit `dangling-supersede` when `<ref>` does not resolve. Free the
-  DECISION.md buffer (match the review-buffer cleanup discipline).
-- [ ] Add checker.sh tests, registered in the run list:
-  `test_check_bad_decision_status`, `test_check_good_decision_status`,
-  `test_check_dangling_supersede`, `test_check_resolving_supersede`, and one
-  asserting a task with no DECISION.md is unaffected. Should-fail assertions use
-  the `set +e`/split-declaration pattern (checker.sh gotcha).
-- [ ] Update tatr `README.md` Default-rules list with both rules.
-- [ ] Update tatr `AGENTS.md` only if the check discussion there needs it
-  (it currently covers strict rules + exemptions; keep the edit minimal or skip
-  if nothing is stale).
+- [x] STATUS validity is checked inline in `check_decision` (equals `ACCEPTED`
+  or starts with `SUPERSEDED by ` + non-empty ref) rather than a separate
+  predicate - the ref is needed for the dangling check in the same branch, so
+  splitting it out would have re-parsed the value twice.
+- [x] Added `check_supersede_ref_resolves`: tokenizes the ref on `/`, takes the
+  first segment that passes the existing `ishuid` helper (so `tasks/<id>/DECISION.md`
+  and a bare `<id>` both work), then `access`-checks
+  `<tasks_dir>/<huid>/DECISION.md`. A ref with no HUID segment does not resolve.
+- [x] `check_task` reads `DECISION.md` via `task_sibling_read` after the strict
+  block (presence-gated, independent of TASK.md validity) and emits
+  `bad-decision-status` on an invalid/absent STATUS.
+- [x] STATUS `SUPERSEDED by <ref>` and every `- Supersedes: <ref>` header emit
+  `dangling-supersede` when unresolved; the DECISION.md buffer is freed inline.
+- [x] Added the five checker.sh tests and registered them. Added a
+  `check_strip_inline_comment` helper so an inline `# ...` enum-hint comment on a
+  STATUS/Supersedes line (the spike/decision template style) is tolerated.
+- [x] Updated tatr `README.md` Default-rules list with both rules.
+- [x] Updated tatr `AGENTS.md`: a one-line note that the DECISION.md rules are
+  presence-gated and so need no historical/goal exemption.
 
 ## Definition of Done
 
@@ -74,3 +70,28 @@ past tasks (which have no DECISION.md) need zero migration.
 - Keep it single-file, warning-clean under -Wall -Wextra, zero leaks. Build via
   `nix develop -c make`; test via `nix develop -c ./checker.sh`.
 - Depends on: nothing (umbrella 20260722-151939).
+
+## Close-out
+
+- What changed: added three static helpers to `tatr.c`
+  (`check_strip_inline_comment`, `check_supersede_ref_resolves`,
+  `check_decision`) and a presence-gated block in `check_task` that lints a
+  task's `DECISION.md` when it exists. Two new default findings:
+  `bad-decision-status` and `dangling-supersede`. README + AGENTS.md documented.
+  Five checker.sh tests added (70/70 green, memcheck clean).
+- Alternatives considered: (1) a presence rule (`closed-missing-decision`) -
+  rejected, since whether a task needed a decision record is a judgment tatr
+  can't make and it would flag the majority of tasks and every past task. (2) a
+  separate STATUS-validity predicate mirroring `check_severity_is_known` -
+  folded inline because the SUPERSEDED-by branch needs the parsed ref anyway.
+- Difficulty: first build failed - `aids_string_slice_starts_with` takes the
+  prefix by value, not pointer (I passed `&superseded_by`). One-line fix. And
+  the initial `dangling-supersede` test asserted the HUID in the message, but
+  the finding prints the full ref (`tasks/<id>/DECISION.md`, more useful for
+  locating the line); fixed the test's grep, not the message.
+- Self-reflection: I wrote the implementation before the tests this round; the
+  firing tests (`bad-decision-status`, `dangling-supersede`) do pin the code
+  (they assert exit 1 + specific strings, impossible without it), but a
+  stricter test-first pass would have surfaced the message-format mismatch
+  before the code was written rather than after. The clean-case tests guard
+  against false positives.

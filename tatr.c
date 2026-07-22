@@ -2725,6 +2725,130 @@ static boolean check_task_is_history_exempt(Task *task) {
     return false;
 }
 
+// Returns the slice up to (not including) an inline " #" comment, so a
+// DECISION.md line like "- STATUS: ACCEPTED   # ACCEPTED | SUPERSEDED by ..."
+// (the enum-hint comment style the spike/decision templates use) validates on
+// its value alone. Leaves the slice untouched when there is no inline comment.
+static Aids_String_Slice check_strip_inline_comment(Aids_String_Slice s) {
+    for (size_t i = 0; i + 1 < s.len; ++i) {
+        if (s.str[i] == ' ' && s.str[i + 1] == '#') {
+            s.len = i;
+            break;
+        }
+    }
+    return s;
+}
+
+// Resolves a DECISION.md supersede reference to an existing DECISION.md. The
+// canonical ref is "tasks/<id>/DECISION.md", but a bare "<id>" works too: every
+// task is flat under one tasks dir, so we pull the first path segment that is a
+// well-formed HUID and check "<tasks_dir>/<huid>/DECISION.md" on disk. A ref
+// with no HUID segment (e.g. the literal "tasks/<id>/DECISION.md" placeholder)
+// does not resolve.
+static boolean check_supersede_ref_resolves(const Aids_String_Slice *tasks_dir,
+                                            Aids_String_Slice ref) {
+    Aids_String_Slice scan = ref;
+    Aids_String_Slice segment = {0};
+    Aids_String_Slice huid = {0};
+    boolean found = false;
+    while (aids_string_slice_tokenize(&scan, '/', &segment)) {
+        Aids_String_Slice s = segment;
+        aids_string_slice_trim(&s);
+        if (ishuid(&s)) {
+            huid = s;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/DECISION.md",
+                 SS_Arg(*tasks_dir), SS_Arg(huid)) < 0) {
+        return false;
+    }
+    return access(path_buffer, F_OK) == 0;
+}
+
+// Lints a task's DECISION.md (only called when the file exists): the STATUS
+// value must be exactly ACCEPTED or "SUPERSEDED by <ref>" (bad-decision-status),
+// and every supersede reference - the one in a SUPERSEDED-by STATUS and any
+// "- Supersedes: <ref>" header line - must resolve to an existing DECISION.md
+// (dangling-supersede). Fires by presence only, so tasks without a DECISION.md
+// are never touched. Returns findings printed.
+static size_t check_decision(const Aids_String_Slice *tasks_dir,
+                             const Aids_String_Slice *huid,
+                             const Aids_String_Slice *decision) {
+    size_t findings = 0;
+    Aids_String_Slice accepted = aids_string_slice_from_cstr("ACCEPTED");
+    Aids_String_Slice superseded_by = aids_string_slice_from_cstr("SUPERSEDED by ");
+    Aids_String_Slice supersedes_format = aids_string_slice_from_cstr("- Supersedes: ");
+
+    // bad-decision-status: validate the first "- STATUS: " value. A missing
+    // STATUS line is itself a finding (a decision record needs a lifecycle).
+    boolean has_status = false;
+    Aids_String_Slice scan = *decision;
+    Aids_String_Slice line = {0};
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, STATUS_FORMAT)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, STATUS_FORMAT.len);
+        Aids_String_Slice value = check_strip_inline_comment(l);
+        aids_string_slice_trim(&value);
+        has_status = true;
+        boolean valid = false;
+        if (aids_string_slice_compare(&value, &accepted) == 0) {
+            valid = true;
+        } else if (aids_string_slice_starts_with(&value, superseded_by)) {
+            Aids_String_Slice ref = value;
+            aids_string_slice_skip(&ref, superseded_by.len);
+            aids_string_slice_trim(&ref);
+            if (ref.len > 0) {
+                valid = true;
+                if (!check_supersede_ref_resolves(tasks_dir, ref)) {
+                    printf(SS_Fmt ": dangling-supersede: STATUS supersedes '" SS_Fmt "' which has no DECISION.md\n",
+                           SS_Arg(*huid), SS_Arg(ref));
+                    findings++;
+                }
+            }
+        }
+        if (!valid) {
+            printf(SS_Fmt ": bad-decision-status: invalid STATUS '" SS_Fmt "' in DECISION.md (use ACCEPTED or 'SUPERSEDED by <ref>')\n",
+                   SS_Arg(*huid), SS_Arg(value));
+            findings++;
+        }
+        break; // first STATUS wins
+    }
+    if (!has_status) {
+        printf(SS_Fmt ": bad-decision-status: DECISION.md has no STATUS line\n", SS_Arg(*huid));
+        findings++;
+    }
+
+    // dangling-supersede: every "- Supersedes: <ref>" header must resolve.
+    scan = *decision;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, supersedes_format)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, supersedes_format.len);
+        Aids_String_Slice ref = check_strip_inline_comment(l);
+        aids_string_slice_trim(&ref);
+        if (ref.len == 0) {
+            continue; // an empty header is treated as absent, not dangling
+        }
+        if (!check_supersede_ref_resolves(tasks_dir, ref)) {
+            printf(SS_Fmt ": dangling-supersede: Supersedes '" SS_Fmt "' which has no DECISION.md\n",
+                   SS_Arg(*huid), SS_Arg(ref));
+            findings++;
+        }
+    }
+    return findings;
+}
+
 // Lints one task directory. Returns the number of findings printed.
 static size_t check_task(const Aids_String_Slice *tasks_dir,
                          const Aids_String_Slice *huid,
@@ -2902,6 +3026,17 @@ review_checks:
             access(retro_buffer, F_OK) != 0) {
             printf(SS_Fmt ": closed-missing-retro: CLOSED task has no RETRO.md (--strict)\n", SS_Arg(*huid));
             findings++;
+        }
+    }
+
+    // DECISION.md checks (bad-decision-status / dangling-supersede) are
+    // presence-gated and independent of TASK.md validity: they only fire when
+    // the sibling exists, so a task without one is never touched.
+    {
+        Aids_String_Slice decision = {0};
+        if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
+            findings += check_decision(tasks_dir, huid, &decision);
+            AIDS_FREE(decision.str);
         }
     }
 

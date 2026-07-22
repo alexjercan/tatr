@@ -1740,6 +1740,171 @@ BODY
     fi
 }
 
+# --- DECISION.md checks (bad-decision-status / dangling-supersede) ---
+# All presence-gated: they fire only when a task folder has a DECISION.md.
+# OPEN tasks are used so the only possible findings are the decision ones.
+
+write_decision() {
+    local dir=$1 id=$2
+    write_check_task "$dir" "$id" "OPEN" <<'BODY'
+## Notes
+
+- decision-bearing task
+BODY
+    cat > "$dir/tasks/$id/DECISION.md"
+}
+
+test_check_bad_decision_status() {
+    log_test "check (bad-decision-status fires on an invalid STATUS token)"
+    local test_dir=$(create_test_dir)
+    write_decision "$test_dir" "20260101-200000" <<'BODY'
+# Decision: something
+
+- STATUS: DRAFT
+- TASK: 20260101-200000
+
+## Decision
+
+do the thing
+BODY
+    # A DECISION.md with no STATUS line at all is also a finding.
+    write_decision "$test_dir" "20260101-200001" <<'BODY'
+# Decision: no status
+
+## Decision
+
+do the other thing
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-200000: bad-decision-status: invalid STATUS 'DRAFT'" \
+        && echo "$output" | grep -q "20260101-200001: bad-decision-status: DECISION.md has no STATUS line"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_good_decision_status() {
+    log_test "check (ACCEPTED status, with an inline comment, stays clean)"
+    local test_dir=$(create_test_dir)
+    write_decision "$test_dir" "20260101-200100" <<'BODY'
+# Decision: accepted with an enum-hint comment
+
+- STATUS: ACCEPTED   # ACCEPTED | SUPERSEDED by tasks/<id>/DECISION.md
+- TASK: 20260101-200100
+
+## Decision
+
+the chosen thing
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ] && [ -z "$output" ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_dangling_supersede() {
+    log_test "check (dangling-supersede fires on refs with no DECISION.md)"
+    local test_dir=$(create_test_dir)
+    # STATUS references a task that does not exist.
+    write_decision "$test_dir" "20260101-200200" <<'BODY'
+# Decision: superseded, target missing
+
+- STATUS: SUPERSEDED by tasks/20991231-235959/DECISION.md
+- TASK: 20260101-200200
+BODY
+    # A Supersedes header references a task with no DECISION.md.
+    write_decision "$test_dir" "20260101-200201" <<'BODY'
+# Decision: supersedes a phantom
+
+- STATUS: ACCEPTED
+- Supersedes: tasks/20991231-235959/DECISION.md
+- TASK: 20260101-200201
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-200200: dangling-supersede: STATUS supersedes 'tasks/20991231-235959/DECISION.md'" \
+        && echo "$output" | grep -q "20260101-200201: dangling-supersede: Supersedes 'tasks/20991231-235959/DECISION.md'"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_resolving_supersede() {
+    log_test "check (a resolving supersede chain stays clean)"
+    local test_dir=$(create_test_dir)
+    # OLD points forward to NEW; NEW points back to OLD; both DECISION.md exist.
+    write_decision "$test_dir" "20260101-210000" <<'BODY'
+# Decision: the old one
+
+- STATUS: SUPERSEDED by tasks/20260101-210001/DECISION.md
+- TASK: 20260101-210000
+BODY
+    write_decision "$test_dir" "20260101-210001" <<'BODY'
+# Decision: the new one
+
+- STATUS: ACCEPTED
+- Supersedes: tasks/20260101-210000/DECISION.md
+- TASK: 20260101-210001
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ] && [ -z "$output" ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_decision_absent_unaffected() {
+    log_test "check (a task with no DECISION.md is never flagged)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-220000" "OPEN" <<'BODY'
+## Steps
+
+- [ ] no decision record here
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ] && [ -z "$output" ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
 # --- Makefile build-guard tests ---
 # The guard target runs the env check without compiling, so these are cheap and
 # do not touch the built binary. They clear the nix markers to simulate a bare
@@ -1873,6 +2038,11 @@ test_check_per_id
 test_check_exit_codes
 test_check_scanner_edges
 test_check_missing_artifacts
+test_check_bad_decision_status
+test_check_good_decision_status
+test_check_dangling_supersede
+test_check_resolving_supersede
+test_check_decision_absent_unaffected
 test_build_guard_bare_shell_fails
 test_build_guard_nix_shell_passes
 test_build_guard_override_passes
