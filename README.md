@@ -22,6 +22,7 @@ primarily a toy project inspired by Tsoding's streams.
 - **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
 - **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
 - **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
+- **AI-agent skill**: Includes a `tatr` skill for AI-capable tools that work with task records
 - **Terminal integration**: Clickable file paths in OSC 8-compliant terminals
 - **Zero configuration**: Works out of the box with no setup required
 
@@ -63,6 +64,16 @@ nix develop
 # The agent skill is exported for downstream flakes
 nix eval .#skills.tatr
 ```
+
+## AI Agent Skill
+
+This repository ships a `tatr` skill for AI-capable tools that understand
+skill folders. The skill lives at `skills/tatr/` and teaches agents how to use
+the CLI, task file format, `tatr check`, and the project workflow around
+TASK.md, REVIEW.md, RETRO.md, and lessons ledgers.
+
+Downstream flakes can consume the skill through the exported `skills.tatr`
+flake output and install it into their agent skills directory.
 
 ### Manual Build
 
