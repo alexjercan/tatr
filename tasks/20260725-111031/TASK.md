@@ -50,5 +50,6 @@ agent cannot treat unchecked Steps as proof that planning happened.
   catches a resumed `IN_PROGRESS` task whose task text never proved it was
   planned.
 - The marker contract planned for the skills is:
-  `## Flow State`, `- FLOW STEP: UNDERSTANDING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`,
+  `## Flow State`,
+  `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`,
   and `- PLAN STATUS: APPROVED` once the user has accepted the plan.
