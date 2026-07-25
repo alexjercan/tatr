@@ -223,24 +223,33 @@ tatr check --ledger LESSONS.md   # also lint a lessons ledger
 - `bad-flow-state`: a `## Flow State` marker has an invalid exact value. Valid
   markers are `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
   and `- PLAN STATUS: APPROVED`.
-- `unplanned-in-progress`: a non-historical, non-goal IN_PROGRESS task lacks
-  `PLAN STATUS: APPROVED` under `## Flow State`.
+- `unplanned-in-progress`: an ordinary IN_PROGRESS task lacks
+  `PLAN STATUS: APPROVED` under `## Flow State`. Tasks tagged `historical` and
+  explicit containers tagged `goal` are exempt.
 - `bad-decision-status`: a task's `DECISION.md` (when present) has a `- STATUS:`
   value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference - in a
   `SUPERSEDED by <ref>` status or a `- Supersedes: <ref>` line - does not
   resolve to an existing `tasks/<id>/DECISION.md`.
 
-The required flow marker applies only when a task is moved to IN_PROGRESS, so
-old CLOSED tasks and ordinary OPEN backlog items need no migration. Historical
-and goal tasks are exempt from `unplanned-in-progress`.
+The required flow marker applies only when an ordinary task is moved to
+IN_PROGRESS, so old CLOSED tasks and ordinary OPEN backlog items need no
+migration. A `goal` tag is reserved for an explicit /flow epic, sprint,
+version, release, or multi-feature container. The container's broader record
+lives in that task's own `TASK.md` sections, such as `## Epic`,
+`## Done Means`, `## Child Tasks`, `## Decisions`, and
+`## Manual Acceptance`; child tasks carry the per-task review and retro records.
+Do not create a container task for one requested thing.
 
 The two `DECISION.md` rules are presence-gated: a task without a `DECISION.md`
 is never flagged, so they need no migration of existing tasks.
 
 **Options:**
 - `-S, --strict`: add `closed-missing-review` and `closed-missing-retro` for
-  CLOSED tasks lacking those files
+  CLOSED tasks lacking those files. Tasks tagged `historical` and explicit
+  containers tagged `goal` are exempt from these strict record-completeness
+  rules, and from `closed-unchecked`, because their task files are frozen
+  historical records or aggregate container records.
 - `-L, --ledger <FILE>`: add `promotion-stalled` for a ledger lesson at three
   or more occurrences (`(x3)` and up) outside the `## Pending promotions`
   section (path relative to the root)

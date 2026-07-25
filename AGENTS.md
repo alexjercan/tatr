@@ -125,19 +125,22 @@ lessons go to `LESSONS.md` at the root; there is no scratch drawer.
 Strict `tatr check --strict` requires a `REVIEW.md` and `RETRO.md` on every
 CLOSED task, EXCEPT tasks tagged `historical` or `goal`: a `historical` task is
 pre-flow work whose review/retro context is gone (mark old tasks so they stop
-flagging instead of fabricating records), and a `goal` task is a /flow umbrella
-whose durable record is its `GOAL.md`, not a per-task retro. Both are exempt
-from `closed-missing-review`/`closed-missing-retro`, and also from the default
-`closed-unchecked` rule - a frozen task's step boxes stay verbatim (superseded /
-dropped / premise-falsified steps are honest history) rather than being ticked
-to silence the lint.
+flagging instead of fabricating records), and a `goal` task is an explicit
+/flow epic, sprint, version, release, or multi-feature container. The
+container's broader done definition, child-task list, decisions index, and
+manual acceptance live in the container's own `TASK.md`; child tasks carry the
+per-task review and retro records. Both exempt kinds are also exempt from the
+default `closed-unchecked` rule - a frozen task's step boxes stay verbatim
+(superseded / dropped / premise-falsified steps are honest history) rather than
+being ticked to silence the lint.
 
 Default flow-state rules protect planned work from checklist-shaped drift.
 `bad-flow-state` validates exact marker values under `## Flow State`:
 `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
-and `- PLAN STATUS: APPROVED`. `unplanned-in-progress` fires when a
-non-historical, non-goal IN_PROGRESS task lacks `PLAN STATUS: APPROVED`.
-OPEN backlog and CLOSED tasks do not need the approved-plan marker.
+and `- PLAN STATUS: APPROVED`. `unplanned-in-progress` fires when an ordinary
+IN_PROGRESS task lacks `PLAN STATUS: APPROVED`. Historical tasks and explicit
+containers tagged `goal` are exempt; OPEN backlog and CLOSED tasks do not need
+the approved-plan marker.
 
 The default `DECISION.md` rules (`bad-decision-status`, `dangling-supersede`)
 need no such exemption: they are presence-gated, firing only when a task carries
