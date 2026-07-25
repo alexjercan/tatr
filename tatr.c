@@ -2701,32 +2701,6 @@ static boolean check_severity_is_known(Aids_String_Slice severity) {
     return false;
 }
 
-// A CLOSED task tagged `historical` (pre-flow work whose review/retro context
-// is gone) or `goal` (an explicit /flow container whose aggregate record lives
-// in its TASK.md while child tasks carry review/retro records) is exempt from
-// the record-completeness rules: the strict closed-missing-review /
-// closed-missing-retro rules (neither file is expected for it by design, so
-// demanding one would force a fabricated record) and the default
-// closed-unchecked rule (a frozen task's step boxes stay verbatim rather than
-// being ticked to silence the lint). Reuses the parsed task's tag set (the
-// shared load spine).
-static boolean check_task_is_history_exempt(Task *task) {
-    static const char *exempt[] = {"historical", "goal"};
-    for (size_t i = 0; i < task->meta.tags.count; ++i) {
-        Aids_String_Slice *tag = NULL;
-        if (aids_array_get(&task->meta.tags, i, (void **)&tag) != AIDS_OK) {
-            continue;
-        }
-        for (size_t j = 0; j < sizeof(exempt) / sizeof(exempt[0]); ++j) {
-            Aids_String_Slice e = aids_string_slice_from_cstr((char *)exempt[j]);
-            if (aids_string_slice_compare(tag, &e) == 0) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 static boolean check_flow_step_is_known(Aids_String_Slice value) {
     static const char *known[] = {
         "UNDERSTANDING",
@@ -2926,8 +2900,7 @@ static size_t check_decision(const Aids_String_Slice *tasks_dir,
 
 // Lints one task directory. Returns the number of findings printed.
 static size_t check_task(const Aids_String_Slice *tasks_dir,
-                         const Aids_String_Slice *huid,
-                         boolean strict) {
+                         const Aids_String_Slice *huid) {
     size_t findings = 0;
     Aids_String_Slice raw = {0};
     Aids_String_Slice review = {0};
@@ -2976,21 +2949,13 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
 
     findings += check_flow_state(huid, &raw, &has_approved_plan);
     if (task.meta.status == Task_Status_IN_PROGRESS &&
-        !has_approved_plan &&
-        !check_task_is_history_exempt(&task)) {
+        !has_approved_plan) {
         printf(SS_Fmt ": unplanned-in-progress: IN_PROGRESS task lacks PLAN STATUS: APPROVED\n",
                SS_Arg(*huid));
         findings++;
     }
 
-    // closed-unchecked: a CLOSED task may not leave unchecked boxes in its
-    // Steps section (other sections - DoD, Action items - are allowed to).
-    // A `historical` or `goal` task is exempt: frozen pre-flow work and
-    // explicit flow containers are not held to current step-completion
-    // discipline, and their step boxes stay verbatim rather than being ticked
-    // to silence the lint.
-    if (task.meta.status == Task_Status_CLOSED &&
-        !check_task_is_history_exempt(&task)) {
+    if (task.meta.status == Task_Status_CLOSED) {
         Aids_String_Slice scan = raw;
         Aids_String_Slice line = {0};
         boolean in_steps = false;
@@ -3100,17 +3065,16 @@ review_checks:
         }
     }
 
-    if (strict && task_loaded && task.meta.status == Task_Status_CLOSED &&
-        !check_task_is_history_exempt(&task)) {
+    if (task_loaded && task.meta.status == Task_Status_CLOSED) {
         if (!has_review) {
-            printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md (--strict)\n", SS_Arg(*huid));
+            printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md\n", SS_Arg(*huid));
             findings++;
         }
         char retro_buffer[PATH_MAX];
         if (snprintf(retro_buffer, sizeof(retro_buffer), SS_Fmt "/" SS_Fmt "/RETRO.md",
                      SS_Arg(*tasks_dir), SS_Arg(*huid)) >= 0 &&
             access(retro_buffer, F_OK) != 0) {
-            printf(SS_Fmt ": closed-missing-retro: CLOSED task has no RETRO.md (--strict)\n", SS_Arg(*huid));
+            printf(SS_Fmt ": closed-missing-retro: CLOSED task has no RETRO.md\n", SS_Arg(*huid));
             findings++;
         }
     }
@@ -3239,14 +3203,6 @@ static int main_check(const Tatr_Context *ctx) {
     });
 
     argparse_add_argument(&parser, (Argparse_Options){
-        .short_name = 'S',
-        .long_name = "strict",
-        .description = "Also require REVIEW.md and RETRO.md on CLOSED tasks",
-        .type = ARGUMENT_TYPE_FLAG,
-        .required = 0
-    });
-
-    argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'L',
         .long_name = "ledger",
         .description = "Also lint a lessons ledger file (path relative to the root)",
@@ -3258,7 +3214,6 @@ static int main_check(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
-    boolean strict = argparse_get_flag(&parser, "strict");
     char *ledger_arg = argparse_get_value(&parser, "ledger");
     char *id_str = argparse_get_value(&parser, "id");
 
@@ -3267,7 +3222,7 @@ static int main_check(const Tatr_Context *ctx) {
         if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
             return_defer(1);
         }
-        findings += check_task(&tasks_dir, &id, strict);
+        findings += check_task(&tasks_dir, &id);
     } else {
         aids_array_init(&project_dirs, sizeof(Aids_String_Slice));
         project_dirs_initialized = true;
@@ -3303,7 +3258,7 @@ static int main_check(const Tatr_Context *ctx) {
                 if (!ishuid(huid_entry)) {
                     continue;
                 }
-                findings += check_task(&tasks_path, huid_entry, strict);
+                findings += check_task(&tasks_path, huid_entry);
             }
             cleanup_string_slice_array(&entries);
         }

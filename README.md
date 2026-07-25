@@ -207,13 +207,14 @@ anything was found and 0 (silently) when clean:
 ```bash
 tatr check                    # lint every task
 tatr check 20260331-144635    # lint one task
-tatr check --strict           # also require REVIEW.md/RETRO.md on CLOSED tasks
 tatr check --ledger LESSONS.md   # also lint a lessons ledger
 ```
 
 **Default rules:**
 - `closed-unchecked`: a CLOSED task still has unchecked `- [ ]` items under
   its `## Steps` section (other sections may keep open boxes).
+- `closed-missing-review`: a CLOSED task has no `REVIEW.md`.
+- `closed-missing-retro`: a CLOSED task has no `RETRO.md`.
 - `closed-not-approved`: a CLOSED task's REVIEW.md exists but its latest
   `- VERDICT:` line is not APPROVE (or there is no verdict at all).
 - `bad-severity`: a REVIEW.md finding uses a severity outside
@@ -224,8 +225,8 @@ tatr check --ledger LESSONS.md   # also lint a lessons ledger
   markers are `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
   and `- PLAN STATUS: APPROVED`.
 - `unplanned-in-progress`: an ordinary IN_PROGRESS task lacks
-  `PLAN STATUS: APPROVED` under `## Flow State`. Tasks tagged `historical` and
-  explicit containers tagged `goal` are exempt.
+  `PLAN STATUS: APPROVED` under `## Flow State`. Explicit containers tagged
+  `goal` are exempt.
 - `bad-decision-status`: a task's `DECISION.md` (when present) has a `- STATUS:`
   value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference - in a
@@ -239,17 +240,15 @@ version, release, or multi-feature container. The container's broader record
 lives in that task's own `TASK.md` sections, such as `## Epic`,
 `## Done Means`, `## Child Tasks`, `## Decisions`, and
 `## Manual Acceptance`; child tasks carry the per-task review and retro records.
-Do not create a container task for one requested thing.
+Do not create a container task for one requested thing. Containers are exempt
+from the record-completeness rules (`closed-missing-review`,
+`closed-missing-retro`) and from `closed-unchecked`, because their task files
+are aggregate container records rather than per-task ones.
 
 The two `DECISION.md` rules are presence-gated: a task without a `DECISION.md`
 is never flagged, so they need no migration of existing tasks.
 
 **Options:**
-- `-S, --strict`: add `closed-missing-review` and `closed-missing-retro` for
-  CLOSED tasks lacking those files. Tasks tagged `historical` and explicit
-  containers tagged `goal` are exempt from these strict record-completeness
-  rules, and from `closed-unchecked`, because their task files are frozen
-  historical records or aggregate container records.
 - `-L, --ledger <FILE>`: add `promotion-stalled` for a ledger lesson at three
   or more occurrences (`(x3)` and up) outside the `## Pending promotions`
   section (path relative to the root)

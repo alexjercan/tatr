@@ -1327,6 +1327,7 @@ BODY
 - [ ] unchecked outside Steps must not fire
 BODY
     printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n\n- [x] R1.1 (MINOR) f:1 - fine\n' > "$test_dir/tasks/20260101-100001/REVIEW.md"
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-100001/RETRO.md"
 
     set +e
     local output
@@ -1365,48 +1366,6 @@ BODY
     fi
 }
 
-test_check_closed_unchecked_history_exempt() {
-    log_test "check (closed-unchecked exempts historical/goal tasks)"
-    local test_dir=$(create_test_dir)
-    mkdir -p "$test_dir/tasks"
-
-    # A historical and a goal task, both CLOSED with unchecked Steps, must NOT
-    # flag; a plain feature task with the same unchecked Steps still flags.
-    write_unchecked_task() {
-        local id=$1 tags=$2
-        mkdir -p "$test_dir/tasks/$id"
-        {
-            echo "# Task $id"
-            echo
-            echo "- STATUS: CLOSED"
-            echo "- PRIORITY: 10"
-            echo "- TAGS: $tags"
-            echo
-            echo "## Steps"
-            echo
-            echo "- [ ] dropped, premise falsified"
-        } > "$test_dir/tasks/$id/TASK.md"
-    }
-    write_unchecked_task "20260101-120100" "feature,historical"
-    write_unchecked_task "20260101-120200" "goal"
-    write_unchecked_task "20260101-120300" "feature"
-
-    set +e
-    local out
-    out=$(run_tatr -r "$test_dir" check 2>&1)
-    local code=$?
-    set -e
-
-    if [ $code -eq 1 ] \
-        && ! echo "$out" | grep -q "20260101-120100" \
-        && ! echo "$out" | grep -q "20260101-120200" \
-        && echo "$out" | grep -q "20260101-120300: closed-unchecked"; then
-        pass_test
-    else
-        fail_test "exit: $code, output: $out"
-    fi
-}
-
 test_check_closed_not_approved() {
     log_test "check (closed-not-approved; later APPROVE round clears it)"
     local test_dir=$(create_test_dir)
@@ -1429,6 +1388,7 @@ BODY
     fi
 
     printf '\n## Round 2\n\n- VERDICT: APPROVE\n' >> "$test_dir/tasks/20260101-120000/REVIEW.md"
+    printf '\n## Round 2\n\n- VERDICT: APPROVE\n' >> "$test_dir/tasks/20260101-120000/RETRO.md"
 
     set +e
     output=$(run_tatr -r "$test_dir" check 2>&1)
@@ -1486,86 +1446,6 @@ BODY
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
-    fi
-}
-
-test_check_strict() {
-    log_test "check (--strict requires REVIEW/RETRO on CLOSED)"
-    local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-150000" "CLOSED" <<'BODY'
-## Steps
-
-- [x] done
-BODY
-
-    set +e
-    local output
-    output=$(run_tatr -r "$test_dir" check 2>&1)
-    local default_code=$?
-    local strict_output
-    strict_output=$(run_tatr -r "$test_dir" check --strict 2>&1)
-    local strict_code=$?
-    set -e
-
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-150000/REVIEW.md"
-    printf '# Retro\n\nfine.\n' > "$test_dir/tasks/20260101-150000/RETRO.md"
-
-    set +e
-    local quiet_output
-    quiet_output=$(run_tatr -r "$test_dir" check --strict 2>&1)
-    local quiet_code=$?
-    set -e
-
-    if [ $default_code -eq 0 ] && [ $strict_code -eq 1 ] \
-        && echo "$strict_output" | grep -q "closed-missing-review" \
-        && echo "$strict_output" | grep -q "closed-missing-retro" \
-        && [ $quiet_code -eq 0 ] && [ -z "$quiet_output" ]; then
-        pass_test
-    else
-        fail_test "default: $default_code, strict: $strict_code, quiet: $quiet_code"
-    fi
-}
-
-test_check_strict_history_exempt() {
-    log_test "check (--strict exempts historical/goal-tagged CLOSED tasks)"
-    local test_dir=$(create_test_dir)
-    mkdir -p "$test_dir/tasks"
-
-    # Three CLOSED tasks with no REVIEW.md/RETRO.md. Two are exempt by tag
-    # (historical, goal); the plain feature one must still flag under --strict.
-    write_history_task() {
-        local id=$1 tags=$2
-        mkdir -p "$test_dir/tasks/$id"
-        {
-            echo "# Task $id"
-            echo
-            echo "- STATUS: CLOSED"
-            echo "- PRIORITY: 10"
-            echo "- TAGS: $tags"
-            echo
-            echo "## Steps"
-            echo
-            echo "- [x] done"
-        } > "$test_dir/tasks/$id/TASK.md"
-    }
-    write_history_task "20260101-150100" "historical"
-    write_history_task "20260101-150200" "goal"
-    write_history_task "20260101-150300" "feature"
-
-    set +e
-    local out
-    out=$(run_tatr -r "$test_dir" check --strict 2>&1)
-    local code=$?
-    set -e
-
-    if [ $code -eq 1 ] \
-        && ! echo "$out" | grep -q "20260101-150100" \
-        && ! echo "$out" | grep -q "20260101-150200" \
-        && echo "$out" | grep -q "20260101-150300: closed-missing-review" \
-        && echo "$out" | grep -q "20260101-150300: closed-missing-retro"; then
-        pass_test
-    else
-        fail_test "exit: $code, output: $out"
     fi
 }
 
@@ -1633,6 +1513,9 @@ BODY
 - [x] clean
 BODY
 
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-160001/REVIEW.md"
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-160001/RETRO.md"
+
     set +e
     local dirty_output
     dirty_output=$(run_tatr -r "$test_dir" check 20260101-160000 2>&1)
@@ -1696,6 +1579,7 @@ test_check_scanner_edges() {
 - [x] done
 BODY
     printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE (1 round)\n\n- [ ] Rebase onto master (before merging)\n' > "$test_dir/tasks/20260101-180001/REVIEW.md"
+    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE (1 round)\n' > "$test_dir/tasks/20260101-180001/RETRO.md"
 
     set +e
     local output
@@ -1811,46 +1695,6 @@ BODY
         && echo "$output" | grep -q "20260101-195100: bad-flow-state: invalid FLOW STEP 'READY'" \
         && echo "$output" | grep -q "20260101-195101: bad-flow-state: invalid PLAN STATUS 'YES'" \
         && echo "$output" | grep -q "20260101-195102: bad-flow-state: invalid PLAN STATUS 'APPROVED '"; then
-        pass_test
-    else
-        fail_test "Exit: $exit_code, output: $output"
-    fi
-}
-
-test_check_flow_state_history_exempt() {
-    log_test "check (unplanned-in-progress exempts historical/goal tasks)"
-    local test_dir=$(create_test_dir)
-    mkdir -p "$test_dir/tasks"
-
-    write_flow_task() {
-        local id=$1 tags=$2
-        mkdir -p "$test_dir/tasks/$id"
-        {
-            echo "# Task $id"
-            echo
-            echo "- STATUS: IN_PROGRESS"
-            echo "- PRIORITY: 10"
-            echo "- TAGS: $tags"
-            echo
-            echo "## Steps"
-            echo
-            echo "- [ ] pre-flow or goal task"
-        } > "$test_dir/tasks/$id/TASK.md"
-    }
-    write_flow_task "20260101-195200" "feature,historical"
-    write_flow_task "20260101-195201" "goal"
-    write_flow_task "20260101-195202" "feature"
-
-    set +e
-    local output
-    output=$(run_tatr -r "$test_dir" check 2>&1)
-    local exit_code=$?
-    set -e
-
-    if [ $exit_code -eq 1 ] \
-        && ! echo "$output" | grep -q "20260101-195200" \
-        && ! echo "$output" | grep -q "20260101-195201" \
-        && echo "$output" | grep -q "20260101-195202: unplanned-in-progress"; then
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
@@ -2144,12 +1988,9 @@ test_filter_with_recursive
 test_filter_no_results
 test_check_clean
 test_check_closed_unchecked
-test_check_closed_unchecked_history_exempt
 test_check_closed_not_approved
 test_check_bad_severity
 test_check_malformed_header
-test_check_strict
-test_check_strict_history_exempt
 test_check_ledger
 test_check_per_id
 test_check_exit_codes
@@ -2157,7 +1998,6 @@ test_check_scanner_edges
 test_check_missing_artifacts
 test_check_unplanned_in_progress
 test_check_bad_flow_state
-test_check_flow_state_history_exempt
 test_check_bad_decision_status
 test_check_good_decision_status
 test_check_dangling_supersede
