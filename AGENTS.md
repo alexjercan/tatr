@@ -132,6 +132,13 @@ from `closed-missing-review`/`closed-missing-retro`, and also from the default
 dropped / premise-falsified steps are honest history) rather than being ticked
 to silence the lint.
 
+Default flow-state rules protect planned work from checklist-shaped drift.
+`bad-flow-state` validates exact marker values under `## Flow State`:
+`- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
+and `- PLAN STATUS: APPROVED`. `unplanned-in-progress` fires when a
+non-historical, non-goal IN_PROGRESS task lacks `PLAN STATUS: APPROVED`.
+OPEN backlog and CLOSED tasks do not need the approved-plan marker.
+
 The default `DECISION.md` rules (`bad-decision-status`, `dangling-supersede`)
 need no such exemption: they are presence-gated, firing only when a task carries
 a `DECISION.md`, so no historical task is retroactively flagged.

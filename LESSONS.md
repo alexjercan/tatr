@@ -24,15 +24,15 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
   decided by the user before implementation; cheap to ask, expensive to redo. 20260718-235158
 - `read-the-callee-not-the-name` (x1): find_current_tasks_dir returns project
   dirs, not tasks dirs - the misleading name cost a silent no-op walk. 20260720-152503
-- `validate-the-exact-parsed-token` (x1): a trimmed re-validation of an
+- `validate-the-exact-parsed-token` (x2): a trimmed re-validation of an
   untrimmed parse is a hole; check the exact bytes the parser consumes
-  (task_status_from_string silently defaults to OPEN). 20260720-152503
+  (task_status_from_string silently defaults to OPEN). 20260720-152503, 20260725-111031
 - `re-enumerate-snapshot-counts` (x1): a task quoting "the N items to fix" is a
   snapshot of a moving backlog; re-derive the live set (git log, tatr check -S)
   before acting rather than trusting the number. 20260720-220114
-- `test-first-for-check-messages` (x1): for a check rule, write the test with
+- `test-first-for-check-messages` (x2): for a check rule, write the test with
   its exact expected message before the emitting code, so the format is designed
-  from the assertion not reverse-engineered into it. 20260722-152010
+  from the assertion not reverse-engineered into it. 20260722-152010, 20260725-111031
 - `check-the-helper-signature` (x1): glance at one existing call site for a
   by-value-vs-by-pointer aids helper convention before writing a fresh call
   (aids_string_slice_starts_with takes the prefix by value). 20260722-152010

@@ -2725,6 +2725,79 @@ static boolean check_task_is_history_exempt(Task *task) {
     return false;
 }
 
+static boolean check_flow_step_is_known(Aids_String_Slice value) {
+    static const char *known[] = {
+        "UNDERSTANDING",
+        "PLANNING",
+        "PLANNED",
+        "WORKING",
+        "REVIEWING",
+        "COMPOUNDING",
+        "DONE",
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
+        Aids_String_Slice k = aids_string_slice_from_cstr((char *)known[i]);
+        if (aids_string_slice_compare(&value, &k) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Lints the optional "## Flow State" section inside TASK.md. Marker values are
+// validated exactly as written after the prefix: trailing spaces, CRLF tails
+// and inline comments are part of the token and therefore invalid.
+static size_t check_flow_state(const Aids_String_Slice *huid,
+                               const Aids_String_Slice *raw,
+                               boolean *has_approved_plan) {
+    size_t findings = 0;
+    Aids_String_Slice scan = *raw;
+    Aids_String_Slice line = {0};
+    Aids_String_Slice flow_heading = aids_string_slice_from_cstr("## Flow State");
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    Aids_String_Slice flow_step_format = aids_string_slice_from_cstr("- FLOW STEP: ");
+    Aids_String_Slice plan_status_format = aids_string_slice_from_cstr("- PLAN STATUS: ");
+    Aids_String_Slice approved = aids_string_slice_from_cstr("APPROVED");
+    boolean in_flow_state = false;
+
+    *has_approved_plan = false;
+
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice heading = line;
+        aids_string_slice_trim_right(&heading);
+        if (aids_string_slice_starts_with(&heading, any_heading)) {
+            in_flow_state = aids_string_slice_compare(&heading, &flow_heading) == 0;
+            continue;
+        }
+        if (!in_flow_state) {
+            continue;
+        }
+
+        Aids_String_Slice l = line;
+        if (aids_string_slice_starts_with(&l, flow_step_format)) {
+            aids_string_slice_skip(&l, flow_step_format.len);
+            if (!check_flow_step_is_known(l)) {
+                printf(SS_Fmt ": bad-flow-state: invalid FLOW STEP '" SS_Fmt "' (use UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE)\n",
+                       SS_Arg(*huid), SS_Arg(l));
+                findings++;
+            }
+            continue;
+        }
+        if (aids_string_slice_starts_with(&l, plan_status_format)) {
+            aids_string_slice_skip(&l, plan_status_format.len);
+            if (aids_string_slice_compare(&l, &approved) == 0) {
+                *has_approved_plan = true;
+            } else {
+                printf(SS_Fmt ": bad-flow-state: invalid PLAN STATUS '" SS_Fmt "' (use APPROVED)\n",
+                       SS_Arg(*huid), SS_Arg(l));
+                findings++;
+            }
+        }
+    }
+
+    return findings;
+}
+
 // Returns the slice up to (not including) an inline " #" comment, so a
 // DECISION.md line like "- STATUS: ACCEPTED   # ACCEPTED | SUPERSEDED by ..."
 // (the enum-hint comment style the spike/decision templates use) validates on
@@ -2857,6 +2930,7 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
     Aids_String_Slice raw = {0};
     Aids_String_Slice review = {0};
     boolean has_review = false;
+    boolean has_approved_plan = false;
     Task task = {0};
     boolean task_loaded = false;
 
@@ -2896,6 +2970,15 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
             }
             break;
         }
+    }
+
+    findings += check_flow_state(huid, &raw, &has_approved_plan);
+    if (task.meta.status == Task_Status_IN_PROGRESS &&
+        !has_approved_plan &&
+        !check_task_is_history_exempt(&task)) {
+        printf(SS_Fmt ": unplanned-in-progress: IN_PROGRESS task lacks PLAN STATUS: APPROVED\n",
+               SS_Arg(*huid));
+        findings++;
     }
 
     // closed-unchecked: a CLOSED task may not leave unchecked boxes in its

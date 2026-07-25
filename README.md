@@ -220,11 +220,20 @@ tatr check --ledger LESSONS.md   # also lint a lessons ledger
   BLOCKER|MAJOR|MINOR|NIT.
 - `malformed-header`: TASK.md is missing/unreadable, its header does not
   parse, or its STATUS value is not OPEN/IN_PROGRESS/CLOSED.
+- `bad-flow-state`: a `## Flow State` marker has an invalid exact value. Valid
+  markers are `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
+  and `- PLAN STATUS: APPROVED`.
+- `unplanned-in-progress`: a non-historical, non-goal IN_PROGRESS task lacks
+  `PLAN STATUS: APPROVED` under `## Flow State`.
 - `bad-decision-status`: a task's `DECISION.md` (when present) has a `- STATUS:`
   value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference - in a
   `SUPERSEDED by <ref>` status or a `- Supersedes: <ref>` line - does not
   resolve to an existing `tasks/<id>/DECISION.md`.
+
+The required flow marker applies only when a task is moved to IN_PROGRESS, so
+old CLOSED tasks and ordinary OPEN backlog items need no migration. Historical
+and goal tasks are exempt from `unplanned-in-progress`.
 
 The two `DECISION.md` rules are presence-gated: a task without a `DECISION.md`
 is never flagged, so they need no migration of existing tasks.

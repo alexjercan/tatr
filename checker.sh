@@ -1740,6 +1740,123 @@ BODY
     fi
 }
 
+# --- Flow State checks (bad-flow-state / unplanned-in-progress) ---
+
+test_check_unplanned_in_progress() {
+    log_test "check (unplanned-in-progress requires approved plan marker)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-195000" "IN_PROGRESS" <<'BODY'
+## Flow State
+
+- FLOW STEP: WORKING
+- PLAN STATUS: APPROVED
+
+## Steps
+
+- [ ] planned work may be in progress
+BODY
+    write_check_task "$test_dir" "20260101-195001" "IN_PROGRESS" <<'BODY'
+## Steps
+
+- [ ] checkbox alone is not an approved plan
+BODY
+    write_check_task "$test_dir" "20260101-195002" "OPEN" <<'BODY'
+## Steps
+
+- [ ] ordinary backlog stays clean before work starts
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-195001: unplanned-in-progress: IN_PROGRESS task lacks PLAN STATUS: APPROVED" \
+        && ! echo "$output" | grep -q "20260101-195000" \
+        && ! echo "$output" | grep -q "20260101-195002"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_bad_flow_state() {
+    log_test "check (bad-flow-state validates exact marker tokens)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-195100" "OPEN" <<'BODY'
+## Flow State
+
+- FLOW STEP: READY
+BODY
+    write_check_task "$test_dir" "20260101-195101" "OPEN" <<'BODY'
+## Flow State
+
+- PLAN STATUS: YES
+BODY
+    write_check_task "$test_dir" "20260101-195102" "OPEN" <<'BODY'
+## Flow State
+
+BODY
+    printf '%s \n' "- PLAN STATUS: APPROVED" >> "$test_dir/tasks/20260101-195102/TASK.md"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-195100: bad-flow-state: invalid FLOW STEP 'READY'" \
+        && echo "$output" | grep -q "20260101-195101: bad-flow-state: invalid PLAN STATUS 'YES'" \
+        && echo "$output" | grep -q "20260101-195102: bad-flow-state: invalid PLAN STATUS 'APPROVED '"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_flow_state_history_exempt() {
+    log_test "check (unplanned-in-progress exempts historical/goal tasks)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+
+    write_flow_task() {
+        local id=$1 tags=$2
+        mkdir -p "$test_dir/tasks/$id"
+        {
+            echo "# Task $id"
+            echo
+            echo "- STATUS: IN_PROGRESS"
+            echo "- PRIORITY: 10"
+            echo "- TAGS: $tags"
+            echo
+            echo "## Steps"
+            echo
+            echo "- [ ] pre-flow or goal task"
+        } > "$test_dir/tasks/$id/TASK.md"
+    }
+    write_flow_task "20260101-195200" "feature,historical"
+    write_flow_task "20260101-195201" "goal"
+    write_flow_task "20260101-195202" "feature"
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && ! echo "$output" | grep -q "20260101-195200" \
+        && ! echo "$output" | grep -q "20260101-195201" \
+        && echo "$output" | grep -q "20260101-195202: unplanned-in-progress"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
 # --- DECISION.md checks (bad-decision-status / dangling-supersede) ---
 # All presence-gated: they fire only when a task folder has a DECISION.md.
 # OPEN tasks are used so the only possible findings are the decision ones.
@@ -2038,6 +2155,9 @@ test_check_per_id
 test_check_exit_codes
 test_check_scanner_edges
 test_check_missing_artifacts
+test_check_unplanned_in_progress
+test_check_bad_flow_state
+test_check_flow_state_history_exempt
 test_check_bad_decision_status
 test_check_good_decision_status
 test_check_dangling_supersede

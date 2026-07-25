@@ -1,8 +1,13 @@
 # Add flow-state lint for planned work
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 90
-- TAGS: feature,flow
+- TAGS: feature, flow
+
+## Flow State
+
+- FLOW STEP: DONE
+- PLAN STATUS: APPROVED
 
 ## Story
 
@@ -12,21 +17,21 @@ agent cannot treat unchecked Steps as proof that planning happened.
 
 ## Steps
 
-- [ ] Add a small flow-state parser in `tatr.c` that scans `TASK.md` for a
+- [x] Add a small flow-state parser in `tatr.c` that scans `TASK.md` for a
       `## Flow State` section and recognizes `- FLOW STEP: <value>` plus
       `- PLAN STATUS: <value>` lines without trimming away the exact token being
       validated.
-- [ ] Add default `tatr check` findings for flow-state drift:
+- [x] Add default `tatr check` findings for flow-state drift:
       `bad-flow-state` for malformed recognized markers, and
       `unplanned-in-progress` for any non-historical, non-goal `IN_PROGRESS`
       task that lacks `PLAN STATUS: APPROVED`.
-- [ ] Keep existing backlogs clean by making the new required planned marker
+- [x] Keep existing backlogs clean by making the new required planned marker
       apply only to `IN_PROGRESS` tasks, not to old CLOSED tasks or ordinary
       OPEN backlog items.
-- [ ] Add checker.sh integration tests covering a clean planned task, an
+- [x] Add checker.sh integration tests covering a clean planned task, an
       IN_PROGRESS task without `PLAN STATUS: APPROVED`, malformed marker
       values, and historical/goal exemptions where applicable.
-- [ ] Update README.md and AGENTS.md from the real checker output and command
+- [x] Update README.md and AGENTS.md from the real checker output and command
       behavior, including the new finding names and the exact marker spelling.
 
 ## Definition of Done
@@ -53,3 +58,33 @@ agent cannot treat unchecked Steps as proof that planning happened.
   `## Flow State`,
   `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`,
   and `- PLAN STATUS: APPROVED` once the user has accepted the plan.
+
+## Work Notes
+
+- Added a `## Flow State` scanner in `tatr.c` that validates marker values
+  exactly as written and records whether `PLAN STATUS: APPROVED` is present.
+- Added default findings:
+  - `bad-flow-state` for invalid `FLOW STEP` or `PLAN STATUS` values.
+  - `unplanned-in-progress` for non-historical, non-goal IN_PROGRESS tasks
+    without `PLAN STATUS: APPROVED`.
+- Kept the required approved-plan marker scoped to IN_PROGRESS tasks so old
+  CLOSED records and ordinary OPEN backlog tasks need no migration.
+- Updated README.md and AGENTS.md with the exact rule names and marker spelling.
+
+## Verification
+
+- Test-first baseline: `nix develop -c ./checker.sh` failed 70/73 before
+  implementation, only on the three new flow-state tests.
+- `nix develop -c ./checker.sh` passed 73/73.
+- `nix develop -c ./checker.sh --memcheck` passed 73/73.
+- `grep -n "unplanned-in-progress" README.md AGENTS.md` passed.
+- `./tatr check` passed silently.
+- `./tatr check --ledger LESSONS.md` passed silently.
+
+## Reflection
+
+- The exact-message tests made the checker output contract clear before the C
+  code existed.
+- The main thing to do earlier next time is make the active task carry the
+  approved flow marker before starting the worktree, so the branch begins in
+  the same state the final checker will enforce.
