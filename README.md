@@ -59,6 +59,9 @@ nix build
 
 # Enter development environment
 nix develop
+
+# The agent skill is exported for downstream flakes
+nix eval .#skills.tatr
 ```
 
 ### Manual Build

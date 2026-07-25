@@ -19,6 +19,7 @@ argparse.h    # vendored header-only CLI argument parser
 Makefile      # build + install
 checker.sh    # the test suite (integration tests that drive the built binary)
 flake.nix     # nix dev shell (provides clang, valgrind, etc.)
+skills/tatr/  # Codex/Claude skill exported as `skills.tatr` from the flake
 README.md     # user-facing documentation
 LESSONS.md    # lessons ledger (read before starting any task)
 tasks/        # tatr's own task backlog (tatr dogfoods itself)

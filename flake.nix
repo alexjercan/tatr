@@ -68,6 +68,8 @@
         # agnostic ones like nixosModule and system-enumerating ones, although
         # those are more easily expressed in perSystem.
 
+        skills.tatr = ./skills/tatr;
+
         overlays.default = final: prev: {
           tatr = self.packages.${final.stdenv.hostPlatform.system}.default;
         };
