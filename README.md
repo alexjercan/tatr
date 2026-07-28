@@ -374,6 +374,9 @@ nix develop -c ./checker.sh -v
 nix develop -c ./checker.sh --memcheck
 ```
 
+The Windows artifact test is skipped when `x86_64-w64-mingw32-gcc` is not
+available. Release builds install MinGW and always exercise `dist/tatr.exe`.
+
 The test suite covers:
 - Basic task creation and listing
 - Task metadata (priority, tags, status)

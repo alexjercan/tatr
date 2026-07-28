@@ -65,6 +65,9 @@ nix develop -c ./checker.sh -v         # verbose (shows failure details)
 nix develop -c ./checker.sh --memcheck  # run every test under valgrind (no leaks allowed)
 ```
 
+The Windows artifact test in `checker.sh` skips when `x86_64-w64-mingw32-gcc`
+is not on PATH. Release CI installs MinGW and therefore exercises that test.
+
 Prefer integration tests here over unit tests: add a `test_*` function next to
 the related ones and register it in the run list near the bottom of the file.
 

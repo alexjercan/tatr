@@ -1925,6 +1925,12 @@ test_build_guard_override_passes() {
 test_windows_build_target() {
     log_test "windows build target (produces PE tatr.exe)"
 
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+        echo -e "${YELLOW}SKIPPED${RESET} (x86_64-w64-mingw32-gcc not found)"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
+        return
+    fi
+
     set +e
     local output
     output=$(
