@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang file gcc-mingw-w64 make zip
+
+      - name: Validate tag version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" != "$GITHUB_REF_NAME"
+          grep -F "#define TATR_VERSION \"$version\"" tatr.c
+          grep -F "version = \"$version\";" flake.nix
+
+      - name: Build release artifacts
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          TATR_ALLOW_BARE_BUILD=1 make clean
+          TATR_ALLOW_BARE_BUILD=1 make
+          TATR_ALLOW_BARE_BUILD=1 make windows
+          file dist/tatr | grep -q "ELF 64-bit"
+          file dist/tatr.exe | grep -Eq "PE32|PE32\\+"
+          tar -czf "dist/tatr-${version}-linux-x86_64.tar.gz" -C dist tatr
+          zip -j "dist/tatr-${version}-windows-x86_64.zip" dist/tatr.exe
+          sha256sum \
+            "dist/tatr-${version}-linux-x86_64.tar.gz" \
+            "dist/tatr-${version}-windows-x86_64.zip" \
+            dist/tatr \
+            dist/tatr.exe > dist/SHA256SUMS
+
+      - name: Run tests
+        run: |
+          TATR_ALLOW_BARE_BUILD=1 ./checker.sh
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          body_file="$(mktemp)"
+          awk -v version="$version" '
+            /^## v/ && seen { exit }
+            /^## v/ && $2 == "v" version { seen = 1; next }
+            seen { print }
+          ' CHANGELOG.md > "$body_file"
+          test -s "$body_file"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "tatr v${version}" \
+            --notes-file "$body_file" \
+            "dist/tatr-${version}-linux-x86_64.tar.gz" \
+            "dist/tatr-${version}-windows-x86_64.zip" \
+            dist/SHA256SUMS
