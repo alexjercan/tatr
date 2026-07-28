@@ -4,7 +4,7 @@ set -e
 
 MEMCHECKER=valgrind
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TATR_BIN="$PROJECT_DIR/tatr"
+TATR_BIN="$PROJECT_DIR/dist/tatr"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 MEMCHECK=0
@@ -1922,6 +1922,28 @@ test_build_guard_override_passes() {
     fi
 }
 
+test_windows_build_target() {
+    log_test "windows build target (produces PE tatr.exe)"
+
+    set +e
+    local output
+    output=$(
+        make -C "$PROJECT_DIR" clean >/dev/null &&
+        make -C "$PROJECT_DIR" windows &&
+        file "$PROJECT_DIR/dist/tatr.exe"
+    2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ] &&
+        echo "$output" | grep -q "dist/tatr.exe" &&
+        echo "$output" | grep -Eq "PE32|PE32\\+"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
 
 if [ "$MEMCHECK" -eq 1 ]; then
     if ! command -v $MEMCHECKER &> /dev/null; then
@@ -2006,6 +2028,7 @@ test_check_decision_absent_unaffected
 test_build_guard_bare_shell_fails
 test_build_guard_nix_shell_passes
 test_build_guard_override_passes
+test_windows_build_target
 
 echo
 echo "Passed $PASSED_TESTS/$TOTAL_TESTS tests"

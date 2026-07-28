@@ -31,12 +31,15 @@ primarily a toy project inspired by Tsoding's streams.
 ### Using Make
 
 The Makefile builds through the nix dev shell, whose canonical toolchain
-(clang, valgrind) is the supported one. A bare `make` outside nix fails with a
-build guard pointing you here:
+(clang, valgrind, and the MinGW cross compiler) is the supported one. A bare
+`make` outside nix fails with a build guard pointing you here:
 
 ```bash
-# Build the binary
+# Build the Linux binary at dist/tatr
 nix develop -c make
+
+# Build a Windows executable at dist/tatr.exe
+nix develop -c make windows
 
 # Install to /usr/local/bin (may require sudo)
 nix develop -c make install
@@ -57,6 +60,9 @@ TATR_ALLOW_BARE_BUILD=1 make        # or: TATR_ALLOW_BARE_BUILD=1 make CC=gcc
 ```bash
 # Build with nix
 nix build
+
+# Build the Windows executable package
+nix build .#windows
 
 # Enter development environment
 nix develop
@@ -345,7 +351,8 @@ The Makefile provides several targets (run through the nix dev shell; see
 opt-out):
 
 ```bash
-nix develop -c make          # Build the binary
+nix develop -c make          # Build the Linux binary at dist/tatr
+nix develop -c make windows  # Build the Windows binary at dist/tatr.exe
 nix develop -c make install  # Install to PREFIX (default: /usr/local)
 nix develop -c make clean    # Remove build artifacts
 ```

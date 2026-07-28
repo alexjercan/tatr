@@ -113,6 +113,18 @@
 #include <errno.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#define AIDS_PATH_IS_SEP(ch) ((ch) == '/' || (ch) == '\\')
+static int aids__mkdir(const char *path) {
+    return mkdir(path);
+}
+#else
+#define AIDS_PATH_IS_SEP(ch) ((ch) == '/')
+static int aids__mkdir(const char *path) {
+    return mkdir(path, 0755);
+}
+#endif
+
 #ifndef NULL
 #define NULL ((void *)0)
 #endif
@@ -1461,25 +1473,64 @@ AIDSHDEF Aids_Result aids_io_basename(const Aids_String_Slice *filepath, Aids_St
 
     Aids_String_Slice path_slice = *filepath;
     *filename = path_slice;
-    while (aids_string_slice_tokenize(&path_slice, '/', filename));
+    while (path_slice.len > 0) {
+        size_t i = 0;
+        while (i < path_slice.len && !AIDS_PATH_IS_SEP(path_slice.str[i])) {
+            i++;
+        }
+
+        if (i > 0) {
+            *filename = aids_string_slice_from_parts(path_slice.str, i);
+        }
+
+        if (i >= path_slice.len) {
+            break;
+        }
+
+        path_slice.str += i + 1;
+        path_slice.len -= i + 1;
+    }
 
     return AIDS_OK;
 }
 
 AIDSHDEF Aids_Result aids_io_mkdir(const Aids_String_Slice *path, boolean recursive) {
     Aids_Result result = AIDS_OK;
+    char *current_path = NULL;
 
     size_t temp = aids_temp_save();
     char *temp_path = aids_temp_sprintf(SS_Fmt, SS_Arg(*path));
     aids_temp_load(temp);
 
     if (recursive) {
-        char *current_path = (char *)AIDS_REALLOC(NULL, 1);
+        current_path = (char *)AIDS_REALLOC(NULL, 1);
+        if (current_path == NULL) {
+            aids__g_failure_reason = "Memory allocation failed";
+            return_defer(AIDS_ERR);
+        }
         current_path[0] = '\0';
 
         Aids_String_Slice path_slice = *path;
         Aids_String_Slice token;
-        while (aids_string_slice_tokenize(&path_slice, '/', &token)) {
+        boolean is_absolute = path_slice.len > 0 && AIDS_PATH_IS_SEP(path_slice.str[0]);
+        while (path_slice.len > 0) {
+            while (path_slice.len > 0 && AIDS_PATH_IS_SEP(path_slice.str[0])) {
+                path_slice.str++;
+                path_slice.len--;
+            }
+
+            size_t i = 0;
+            while (i < path_slice.len && !AIDS_PATH_IS_SEP(path_slice.str[i])) {
+                i++;
+            }
+
+            if (i == 0) {
+                break;
+            }
+
+            token = aids_string_slice_from_parts(path_slice.str, i);
+
+            boolean is_windows_drive = token.len == 2 && token.str[1] == ':';
             size_t new_size = strlen(current_path) + token.len + 2; // +1 for '/' and +1 for '\0'
             current_path = (char *)AIDS_REALLOC(current_path, new_size);
             if (current_path == NULL) {
@@ -1487,24 +1538,38 @@ AIDSHDEF Aids_Result aids_io_mkdir(const Aids_String_Slice *path, boolean recurs
                 return_defer(AIDS_ERR);
             }
 
-            strcat(current_path, "/");
+            if (current_path[0] == '\0') {
+                if (is_absolute) {
+                    strcat(current_path, "/");
+                }
+            } else if (current_path[strlen(current_path) - 1] != '/') {
+                strcat(current_path, "/");
+            }
             strncat(current_path, (const char *)token.str, token.len);
 
-            if (mkdir(current_path, 0755) != 0 && errno != EEXIST) {
+            if (!is_windows_drive && aids__mkdir(current_path) != 0 && errno != EEXIST) {
                 aids__g_failure_reason = aids_temp_sprintf("Failed to create directory '" SS_Fmt "': %s", SS_Arg(token), strerror(errno));
                 return_defer(AIDS_ERR);
             }
-        }
 
-        AIDS_FREE(current_path);
+            if (i >= path_slice.len) {
+                break;
+            }
+
+            path_slice.str += i + 1;
+            path_slice.len -= i + 1;
+        }
     } else {
-        if (mkdir(temp_path, 0755) != 0 && errno != EEXIST) {
+        if (aids__mkdir(temp_path) != 0 && errno != EEXIST) {
             aids__g_failure_reason = aids_temp_sprintf("Failed to create directory '" SS_Fmt "': %s", SS_Arg(*path), strerror(errno));
             return_defer(AIDS_ERR);
         }
     }
 
 defer:
+    if (current_path != NULL) {
+        AIDS_FREE(current_path);
+    }
     return result;
 }
 
@@ -1516,6 +1581,14 @@ AIDSHDEF Aids_Result aids_io_getcwd(Aids_String_Slice *cwd) {
         aids__g_failure_reason = aids_temp_sprintf("Failed to get current working directory: %s", strerror(errno));
         return_defer(AIDS_ERR);
     }
+
+#ifdef _WIN32
+    for (size_t i = 0; buffer[i] != '\0'; ++i) {
+        if (buffer[i] == '\\') {
+            buffer[i] = '/';
+        }
+    }
+#endif
 
     Aids_String_Builder sb = {0};
     aids_string_builder_init(&sb);
@@ -1658,4 +1731,3 @@ defer:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 */
-

@@ -36,6 +36,12 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `check-the-helper-signature` (x1): glance at one existing call site for a
   by-value-vs-by-pointer aids helper convention before writing a fresh call
   (aids_string_slice_starts_with takes the prefix by value). 20260722-152010
+- `target-compiler-first` (x1): for cross-platform work, run the target compiler
+  before designing portability shims so the first fix set follows real
+  diagnostics. 20260728-095149
+- `serialize-build-artifact-checks` (x1): do not parallelize verification
+  commands that clean or rewrite the same build outputs in one worktree.
+  20260728-095149
 
 ## Domain lessons (project-specific)
 

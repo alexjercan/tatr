@@ -56,10 +56,34 @@
           };
         };
 
+        packages.windows = pkgs.pkgsCross.mingwW64.stdenv.mkDerivation {
+          pname = "tatr-windows";
+          version = "0.1.0";
+          src = ./.;
+
+          buildPhase = ''
+            make windows
+          '';
+
+          installPhase = ''
+            install -d $out/bin
+            install -m 755 dist/tatr.exe $out/bin/tatr.exe
+          '';
+
+          meta = with pkgs.lib; {
+            description = "Task Tracker - Windows executable";
+            homepage = "https://github.com/alexjercan/tatr";
+            license = licenses.mit;
+            platforms = platforms.windows;
+          };
+        };
+
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.clang
+            pkgs.file
             pkgs.valgrind
+            pkgs.pkgsCross.mingwW64.stdenv.cc
           ];
         };
       };

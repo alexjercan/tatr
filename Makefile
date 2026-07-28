@@ -1,10 +1,13 @@
-.PHONY: all clean install guard
+.PHONY: all clean install guard windows
 
 CC = clang
 CFLAGS = -Wall -Wextra -O2 -g
-TARGET = tatr
+TARGET = dist/tatr
+WINDOWS_TARGET = dist/tatr.exe
+WINCC ?= x86_64-w64-mingw32-gcc
 SRC = tatr.c
 PREFIX ?= /usr/local
+INSTALL_NAME = tatr
 
 all: $(TARGET)
 
@@ -25,11 +28,19 @@ guard:
 	fi
 
 $(TARGET): $(SRC) aids.h argparse.h | guard
+	install -d dist
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
 
+windows: $(WINDOWS_TARGET)
+
+$(WINDOWS_TARGET): $(SRC) aids.h argparse.h | guard
+	install -d dist
+	$(WINCC) $(CFLAGS) -o $(WINDOWS_TARGET) $(SRC)
+
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(WINDOWS_TARGET) tatr
+	rmdir dist 2>/dev/null || true
 
 install: $(TARGET)
 	install -d $(PREFIX)/bin
-	install -m 755 $(TARGET) $(PREFIX)/bin/$(TARGET)
+	install -m 755 $(TARGET) $(PREFIX)/bin/$(INSTALL_NAME)

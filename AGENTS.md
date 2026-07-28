@@ -35,7 +35,8 @@ The canonical toolchain (clang, valgrind) comes from the nix dev shell, so all
 builds run through it:
 
 ```bash
-nix develop -c make            # builds ./tatr with clang -Wall -Wextra -O2 -g
+nix develop -c make            # builds dist/tatr with clang -Wall -Wextra -O2 -g
+nix develop -c make windows    # builds dist/tatr.exe with MinGW
 nix develop -c make clean
 nix develop -c make install PREFIX=$HOME/.local
 ```
@@ -47,15 +48,16 @@ have. The guard passes automatically inside `nix develop` (`IN_NIX_SHELL`) and
 inside a nix build sandbox such as `nix flake check` (`NIX_BUILD_TOP`).
 
 If you must build outside nix because the toolchain is provisioned another way
-(CI installs clang/gcc + valgrind via apt), set `TATR_ALLOW_BARE_BUILD=1` to opt
-out of the guard. The code is portable POSIX C and compiles cleanly under both
-clang and gcc (`make CC=gcc`); keep it warning-clean under `-Wall -Wextra`.
+(CI installs clang/gcc + valgrind via apt, or MinGW for `make windows`), set
+`TATR_ALLOW_BARE_BUILD=1` to opt out of the guard. The code is portable POSIX C
+and compiles cleanly under clang, gcc (`make CC=gcc`), and MinGW
+(`make windows`); keep it warning-clean under `-Wall -Wextra`.
 
 ## Testing
 
 `checker.sh` is the test suite. It rebuilds the binary and runs integration
-tests that invoke `./tatr` against throwaway `tasks/` directories. Always run it
-after a change:
+tests that invoke `dist/tatr` against throwaway `tasks/` directories. Always run
+it after a change:
 
 ```bash
 nix develop -c ./checker.sh            # build + run all tests
