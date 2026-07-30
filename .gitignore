@@ -3,3 +3,6 @@
 /dist
 /result
 /compile_flags.txt
+
+# Claims are machine-local coordination state, not versioned history.
+/tasks/.claims/

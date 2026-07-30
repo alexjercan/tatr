@@ -124,6 +124,11 @@ tatr new "..." -k STORY -P <ID> -d <ID>  # a Story under an Epic, blocked on a t
 tatr flow <ID> --to PLANNED  # the plan gate: the only writer of PLAN STATUS
 tatr ls -f ':kind eq EPIC'   # the containers
 tatr ls -f ':depends contains <ID>'  # everything blocked on a task
+tatr frontier <ID>           # the open work under an Epic (READY/BLOCKED/CLAIMED)
+tatr claim <ID>              # take a task for this session (atomic; -r for a shared checkout)
+tatr release <ID> [--force]  # give it back; --force recovers another session's stale claim
+tatr claims                  # what is held in this tasks directory
+tatr context <ID> --phase work  # only the artifact paths that phase needs
 tatr check                   # lint the backlog for process drift (exit 1 on findings)
 tatr scaffold <ID> REVIEW    # write a sibling record from the schema table
 tatr scaffold <ID> --list    # every record kind for a task, path and presence
@@ -189,9 +194,18 @@ write one for any task. `## Steps` and
 for them only from `- FLOW STEP: PLANNED` on - a task `tatr new` just created
 must not be a finding the moment it exists.
 
+`PARENT` and `DEPENDS ON` are a graph, not two strings. `task_graph_load` reads
+every record under one tasks dir once, and `graph_node_problems` answers what a
+task's place in it is worth: `missing-parent`, `missing-dependency`,
+`duplicate-dependency`, `self-parent`, `self-dependency`, `parent-cycle`,
+`dependency-cycle` and `bad-epic-relationship`. A dangling dependency is a
+broken graph, not a blocker to wait for, so it is refused at the plan gate
+rather than treated as one more thing to finish first.
+
 `tatr flow` gates transitions on these same rules, through the same collector
 functions (`record_schema_problems`, `review_round_problems`,
-`spike_record_problems`, `decision_record_problems`, `task_record_problems`):
+`spike_record_problems`, `decision_record_problems`, `task_record_problems`,
+`graph_node_problems`):
 `PLANNING -> PLANNED` owes the plan sections and their proofs,
 `REVIEWING -> COMPOUNDING` a schema-clean REVIEW.md, `COMPOUNDING -> DONE`
 additionally a schema-clean RETRO.md and DECISION.md. A refusal prints the rule
@@ -212,6 +226,24 @@ itself a finding (`unused-exemption`) on a full scan. Do not add exemptions for
 new work - scaffold the record instead. Adding an entry shows up in the diff,
 which is the whole mechanism: it is visible and attributable, unlike the drift
 it replaces.
+
+Two lifecycle guards belong to the graph rather than to a record: a task another
+session has CLAIMED cannot be started, and a `KIND: EPIC` cannot close while any
+of its children is not CLOSED. There is no optional-child marker - a child that
+was dropped is CLOSED with the reason recorded, the same shape a falsified
+investigation already takes - because leaving one OPEN to mean "not required"
+would make the guard unfalsifiable.
+
+A claim is an `O_CREAT|O_EXCL` file under `tasks/.claims/<id>`: the kernel makes
+exactly one racing session the winner, and the winner writes its identity in the
+call that won. Ownership is `TATR_SESSION` (default: the working directory), NOT
+a pid - tatr is a one-shot CLI, so the process that took the claim is gone
+before anything else reads it and a recorded pid could never match again.
+`TATR_CLAIMS_DIR` (default: `<tasks dir>/.claims`) is where claims live; point
+parallel worktrees at one directory so the start guard can see across them
+while each session still edits its own checkout. Nothing steals a claim
+automatically; a session releases its own with no flag, and recovering
+another's is a deliberate `tatr release <ID> --force`.
 
 tatr never executes a Definition of Done proof. `tatr proofs <ID>` prints each
 one as `<n><TAB><kind><TAB><text>`; the shell text of a `cmd:` proof

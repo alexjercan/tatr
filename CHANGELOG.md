@@ -6,6 +6,39 @@ All notable changes to tatr are documented here.
 
 ### Added
 
+- `tatr frontier <ID>`: the open work under an Epic, one tab-separated row per
+  child and never a task body. `READY` rows are ready to pick up, `BLOCKED`
+  rows carry `blocked-by=<ids>` naming only the dependencies that are not yet
+  CLOSED, and `CLAIMED` rows are held by another session. The order is
+  deterministic - state, then priority descending, then ID - so two runs are
+  byte-identical and the output diffs cleanly.
+- `tatr claim <ID>`, `tatr release <ID> [--force]` and `tatr claims`: dividing
+  work between parallel sessions. A claim is a file created with
+  `O_CREAT|O_EXCL`, so exactly one of any number of racing sessions wins and
+  the losers are told who holds it; the winner writes its identity in the call
+  that won the race, so a claim is never anonymous. `tatr flow <ID> --to
+  WORKING` refuses a task another session holds, and a session releases its own
+  claim with no flag. Two environment variables control the model:
+  `TATR_SESSION` (default: the working directory) is the identity ownership is
+  decided on - never a pid, since tatr is a one-shot CLI and the claiming
+  process is gone before anything reads the claim - and `TATR_CLAIMS_DIR`
+  (default: `<tasks dir>/.claims`) is where claims live, so parallel worktrees
+  can share one claims directory while each edits its own checkout. Nothing
+  expires and nothing steals: recovering another session's claim is a
+  deliberate `release --force`. `tasks/.claims/` is machine-local state rather
+  than versioned history and is added to `.gitignore`.
+- `tatr context <ID> --phase <PHASE>`: the artifact paths one flow phase needs,
+  as `<path><TAB>present|missing`. Paths only, never contents. Phases are
+  `understand`, `plan`, `work`, `review`, `compound`, `resume` and `landing`;
+  the first two and `resume` also list the parent Epic's `TASK.md`, because a
+  Story cannot be understood without the container that shaped it. A record the
+  phase owns is listed even when it does not exist yet, since the caller needs
+  the path to create it.
+- Eight `tatr check` rules over the task graph, read from one loader that walks
+  the tasks directory once: `missing-parent`, `missing-dependency`,
+  `duplicate-dependency`, `self-parent`, `self-dependency`, `parent-cycle`,
+  `dependency-cycle` and `bad-epic-relationship`. Every member of a cycle is
+  reported and a task merely downstream of one is not.
 - `tatr scaffold <ID> <RECORD>`: creates a missing sibling record (`SPIKE`,
   `DECISION`, `REVIEW` or `RETRO`) from `RECORD_SCHEMAS[]`, the single in-code
   table `tatr check` now validates records against - so a scaffolded record
@@ -55,6 +88,20 @@ All notable changes to tatr are documented here.
 
 ### Changed
 
+- `tatr flow` refuses to start a task another session has claimed, and refuses
+  to close a `KIND: EPIC` while any of its children is not CLOSED. There is no
+  optional-child marker: a child that was dropped is CLOSED with the reason
+  recorded, because leaving one OPEN to mean "not required" would make the
+  guard unfalsifiable.
+- A `DEPENDS ON` reference that does not resolve is now refused at the plan
+  gate as `missing-dependency` rather than treated as one more blocker to wait
+  for - a dangling edge is a broken graph, not work in progress.
+- `tatr new` refuses a `PARENT` or `DEPENDS ON` that does not resolve, a
+  `PARENT` that is not a `KIND: EPIC`, and a `KIND: STORY` with no parent;
+  `tatr edit` refuses the same for the references it is asked to set. Creating
+  a record the lint rejects on sight is the producer's bug, not the linter's
+  finding. A broken edge is still reachable by hand, which is how one really
+  appears - the referent was removed, or the file was edited directly.
 - `tatr flow` gates every transition on the same record rules `tatr check`
   applies, reading them through the same collector functions rather than a
   second copy - including `bad-severity` and the `DECISION.md` supersede rules,

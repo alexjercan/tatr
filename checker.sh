@@ -62,23 +62,34 @@ fail_test() {
     fi
 }
 
+# Runs the built binary, under valgrind when --memcheck is on.
+#
+# valgrind's own chatter goes to --log-file rather than being merged into the
+# program's output and filtered back out afterwards. That matters for more than
+# tidiness: merging stderr into stdout made `--memcheck` observe DIFFERENT
+# behavior from a native run, so any test that asserts which stream something
+# lands on could only pass one way. The program's stdout and stderr now flow
+# through untouched in both modes, and the two runs test the same thing.
 run_tatr() {
-    local output
     local exit_code
 
     if [ "$MEMCHECK" -eq 1 ]; then
-        output=$($MEMCHECKER --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all --error-exitcode=42 "$TATR_BIN" "$@" 2>&1)
+        local log
+        log=$(mktemp)
+        $MEMCHECKER --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all \
+            --error-exitcode=42 --log-file="$log" "$TATR_BIN" "$@"
         exit_code=$?
 
         if [ $exit_code -eq 42 ]; then
             if [ "$VERBOSE" -eq 1 ]; then
                 echo "  Memory leak detected"
-                echo "$output" | grep -A 10 "LEAK SUMMARY"
+                grep -A 10 "LEAK SUMMARY" "$log"
             fi
+            rm -f "$log"
             return 42
         fi
 
-        echo "$output" | grep -v "==" # Filter out valgrind output
+        rm -f "$log"
         return $exit_code
     else
         "$TATR_BIN" "$@"
@@ -862,8 +873,11 @@ test_v2_task_round_trip() {
     # and then rejected by every later read.)
     printf -- '- NOTE: a bullet may open the body\n\n## Story\n\nMentions "- KIND: EPIC" in prose.\n\n## Steps\n\n- [ ] one\n\n## Definition of Done\n\n- One is done (test: `test_one`).\n' > body.md
 
-    # The dependencies are real records driven to DONE: a task cannot reach
-    # WORKING over an open blocker, so the round-trip fixture earns its state.
+    # The relationships are real records: a Story's parent must be an existing
+    # Epic and a task cannot reach WORKING over an open blocker, so the
+    # round-trip fixture earns every field it then asserts round-trips.
+    local epic=$(new_task_id "The container" -k EPIC)
+    sleep 1
     local dep_one=$(new_task_id "Blocker one")
     sleep 1
     local dep_two=$(new_task_id "Blocker two")
@@ -872,7 +886,7 @@ test_v2_task_round_trip() {
     drive_task_to "$dep_two" DONE
 
     local full_id=$(new_task_id "Every field" -p 42 -t alpha -t beta \
-        -k STORY -P 20260101-000000 \
+        -k STORY -P "$epic" \
         -d "$dep_one" -d "$dep_two" -b body.md)
     drive_task_to "$full_id" WORKING
     sleep 1 # IDs have second resolution and `new` refuses a same-second collision
@@ -894,7 +908,7 @@ test_v2_task_round_trip() {
         && grep -q "^- KIND: STORY$" "$full_file" \
         && grep -q "^- FLOW STEP: WORKING$" "$full_file" \
         && grep -q "^- PLAN STATUS: APPROVED$" "$full_file" \
-        && grep -q "^- PARENT: 20260101-000000$" "$full_file" \
+        && grep -q "^- PARENT: $epic$" "$full_file" \
         && grep -q "^- DEPENDS ON: $dep_one, $dep_two$" "$full_file" \
         && cmp -s full_before.md "$full_file" \
         && grep -q "^- KIND: TASK$" "$bare_file" \
@@ -1021,7 +1035,11 @@ test_v2_rejects_invalid_metadata_atomically() {
     cd "$test_dir"
     mkdir -p tasks
 
-    local id=$(new_task_id "Valid" -k TASK -P 20260101-000000 -d 20260102-000000)
+    local epic=$(new_task_id "The container" -k EPIC)
+    sleep 1
+    local dep=$(new_task_id "The blocker")
+    sleep 1
+    local id=$(new_task_id "Valid" -k TASK -P "$epic" -d "$dep")
     local task_file="tasks/$id/TASK.md"
 
     cp "$task_file" pristine.md
@@ -1102,32 +1120,55 @@ test_v2_new_and_edit_fields() {
     cd "$test_dir"
     mkdir -p tasks
 
-    local id=$(new_task_id "Wire me" -k EPIC -P 20260101-000000 -d 20260102-000000)
+    local epic=$(new_task_id "The container" -k EPIC)
+    sleep 1
+    local dep=$(new_task_id "The blocker")
+    sleep 1
+    local other_epic=$(new_task_id "Another container" -k EPIC)
+    sleep 1
+    local dep_two=$(new_task_id "Another blocker")
+    sleep 1
+    local dep_three=$(new_task_id "A third blocker")
+    sleep 1
+    local id=$(new_task_id "Wire me" -k EPIC -P "$epic" -d "$dep")
     local task_file="tasks/$id/TASK.md"
 
     run_tatr edit "$id" -k STORY \
-        -P 20260104-000000 -d 20260105-000000 -d 20260106-000000 > /dev/null 2>&1
+        -P "$other_epic" -d "$dep_two" -d "$dep_three" > /dev/null 2>&1
     local set_ok=0
     # Kind and relationships are `edit`'s to set; the workflow fields are not,
     # and an edit must leave them exactly where `tatr flow` put them.
     if grep -q "^- KIND: STORY$" "$task_file" \
         && grep -q "^- FLOW STEP: BACKLOG$" "$task_file" \
         && grep -q "^- PLAN STATUS: DRAFT$" "$task_file" \
-        && grep -q "^- PARENT: 20260104-000000$" "$task_file" \
-        && grep -q "^- DEPENDS ON: 20260105-000000, 20260106-000000$" "$task_file"; then
+        && grep -q "^- PARENT: $other_epic$" "$task_file" \
+        && grep -q "^- DEPENDS ON: $dep_two, $dep_three$" "$task_file"; then
         set_ok=1
     fi
 
-    # An empty value clears an optional relationship field.
-    run_tatr edit "$id" -P "" -d "" > /dev/null 2>&1
+    # Clearing a STORY's parent is refused: a Story belongs to an Epic, and
+    # `edit` will not write the relationship the lint rejects on sight.
+    set +e
+    local orphan_out
+    orphan_out=$(run_tatr edit "$id" -P "" 2>&1); local orphan_code=$?
+    set -e
+    local orphan_ok=0
+    if [ $orphan_code -ne 0 ] && echo "$orphan_out" | grep -q "KIND: STORY belongs to an Epic"; then
+        orphan_ok=1
+    fi
+    grep -q "^- PARENT: $other_epic$" "$task_file" || orphan_ok=0
 
-    if [ $set_ok -eq 1 ] \
+    # An empty value clears an optional relationship field on a kind that may
+    # stand alone.
+    run_tatr edit "$id" -k TASK -P "" -d "" > /dev/null 2>&1
+
+    if [ $set_ok -eq 1 ] && [ $orphan_ok -eq 1 ] \
         && ! grep -q "^- PARENT:" "$task_file" \
         && ! grep -q "^- DEPENDS ON:" "$task_file" \
-        && grep -q "^- KIND: STORY$" "$task_file"; then
+        && grep -q "^- KIND: TASK$" "$task_file"; then
         pass_test
     else
-        fail_test "set_ok=$set_ok, file: $(cat "$task_file")"
+        fail_test "set_ok=$set_ok, orphan_ok=$orphan_ok ($orphan_code: $orphan_out), file: $(cat "$task_file")"
     fi
 }
 
@@ -1321,12 +1362,19 @@ test_transition_start_guards() {
     sleep 1
     local id=$(new_task_id "Start me" -d "$blocker")
     sleep 1
-    local dangling=$(new_task_id "Depends on nothing real" -d 20260101-000000)
+    # `new` refuses a dependency that does not resolve, so a record with a
+    # broken edge is written by hand - which is how one really appears: the
+    # referent was removed, or the file was edited directly.
+    local dangling=$(new_task_id "Depends on nothing real")
+    sed -i 's/^- PLAN STATUS: DRAFT$/- PLAN STATUS: DRAFT\n- DEPENDS ON: 20260101-000000/' \
+        "tasks/$dangling/TASK.md"
     local task_file="tasks/$id/TASK.md"
     local ok=1
 
     drive_task_to "$id" PLANNED || ok=0
-    drive_task_to "$dangling" PLANNED || ok=0
+    # The dangling-dependency task walks only as far as PLANNING, which carries
+    # no gates; PLANNED is the transition its broken edge has to be refused at.
+    drive_task_to "$dangling" PLANNING || ok=0
 
     # An open dependency blocks the start and the diagnostic names which one.
     set +e
@@ -1336,13 +1384,16 @@ test_transition_start_guards() {
     [ $dep_code -ne 0 ] || ok=0
     echo "$dep_out" | grep -q "$blocker is not CLOSED" || ok=0
 
-    # A dependency that does not resolve at all is refused too.
+    # A dependency that does not resolve at all is refused EARLIER, at the
+    # record gate: an edge to a task that does not exist is a broken graph, not
+    # a blocker to wait for, so the plan gate never gets to treat it as one.
     set +e
     local dangling_out
-    dangling_out=$(run_tatr flow "$dangling" --to WORKING 2>&1); local dangling_code=$?
+    dangling_out=$(run_tatr flow "$dangling" --to PLANNED 2>&1); local dangling_code=$?
     set -e
     [ $dangling_code -ne 0 ] || ok=0
-    echo "$dangling_out" | grep -q "20260101-000000 does not exist" || ok=0
+    echo "$dangling_out" | grep -q "missing-dependency: DEPENDS ON '20260101-000000' does not exist" || ok=0
+    [ "$(flow_step_of "$dangling")" = "PLANNING" ] || ok=0
 
     # PLAN STATUS: DRAFT at PLANNED only exists by hand correction - the guard
     # still refuses it, and reports it together with the dependency rather
@@ -3057,7 +3108,7 @@ BODY
     set -e
     [ $planned_code -eq 1 ] || ok=0
     echo "$planned_out" | grep -q "20260101-260000: bad-record-schema: TASK.md has no '## Steps' section" || ok=0
-    echo "$planned_out" | grep -q "$id" && ok=0
+    if echo "$planned_out" | grep -q "$id"; then ok=0; fi
 
     if [ $ok -eq 1 ]; then
         pass_test
@@ -3406,6 +3457,655 @@ BODY
     fi
 }
 
+# --- Epic graph, frontier, claims and phase context ---
+
+# Writes a TASK.md with graph fields, for tests about the relationships rather
+# than the body. Args: dir id status kind flow_step priority title, then the
+# optional PARENT / DEPENDS ON lines on stdin.
+write_graph_task() {
+    local dir=$1 id=$2 status=$3 kind=$4 step=$5 priority=$6 title=$7
+    mkdir -p "$dir/tasks/$id"
+    {
+        echo "# $title"
+        echo
+        echo "- STATUS: $status"
+        echo "- PRIORITY: $priority"
+        echo "- TAGS: x"
+        echo "- KIND: $kind"
+        echo "- FLOW STEP: $step"
+        echo "- PLAN STATUS: APPROVED"
+        cat
+        echo
+        # The plan-gate sections, so a graph fixture can also walk the
+        # lifecycle without the record gate having an opinion about its body.
+        if [ "$kind" = "EPIC" ]; then
+            echo "## Done Means"
+            echo
+            echo "1. The children land (manual: the user confirms)."
+            echo
+            echo "## Child Tasks"
+            echo
+            echo "- [ ] the children"
+        else
+            echo "## Steps"
+            echo
+            echo "- [ ] the work itself"
+            echo
+            echo "## Definition of Done"
+            echo
+            echo "- The work is done (test: \`test_the_work\`)."
+        fi
+        echo
+        echo "## Notes"
+        echo
+        echo "- a graph fixture"
+    } > "$dir/tasks/$id/TASK.md"
+}
+
+test_epic_graph_validation() {
+    log_test "check (graph: missing links, duplicates, self-links, cycles, Epic relationships)"
+    local test_dir=$(create_test_dir)
+
+    # A parent that does not exist, a self-dependency, and the same dependency
+    # listed twice.
+    write_graph_task "$test_dir" "20260101-400000" "OPEN" "TASK" "BACKLOG" 10 "Broken edges" <<'META'
+- PARENT: 20260101-499999
+- DEPENDS ON: 20260101-400000, 20260101-400001, 20260101-400001
+META
+    # A Story with no parent at all.
+    write_graph_task "$test_dir" "20260101-400001" "OPEN" "STORY" "BACKLOG" 10 "Orphan story" <<'META'
+META
+    # A two-node PARENT cycle, whose members are also not Epics.
+    write_graph_task "$test_dir" "20260101-400002" "OPEN" "TASK" "BACKLOG" 10 "Parent cycle A" <<'META'
+- PARENT: 20260101-400003
+META
+    write_graph_task "$test_dir" "20260101-400003" "OPEN" "TASK" "BACKLOG" 10 "Parent cycle B" <<'META'
+- PARENT: 20260101-400002
+META
+    # A three-node DEPENDS ON cycle, plus an acyclic dependant that must stay
+    # silent - a cycle detector that reports everything reachable from a cycle
+    # is not a cycle detector.
+    write_graph_task "$test_dir" "20260101-400004" "OPEN" "TASK" "BACKLOG" 10 "Dep cycle A" <<'META'
+- DEPENDS ON: 20260101-400005
+META
+    write_graph_task "$test_dir" "20260101-400005" "OPEN" "TASK" "BACKLOG" 10 "Dep cycle B" <<'META'
+- DEPENDS ON: 20260101-400006
+META
+    write_graph_task "$test_dir" "20260101-400006" "OPEN" "TASK" "BACKLOG" 10 "Dep cycle C" <<'META'
+- DEPENDS ON: 20260101-400004
+META
+    write_graph_task "$test_dir" "20260101-400007" "OPEN" "TASK" "BACKLOG" 10 "Downstream of a cycle" <<'META'
+- DEPENDS ON: 20260101-400004
+META
+    # A task naming itself as its own parent.
+    write_graph_task "$test_dir" "20260101-400008" "OPEN" "TASK" "BACKLOG" 10 "Its own parent" <<'META'
+- PARENT: 20260101-400008
+META
+    # A well-formed Epic and Story: neither may be flagged.
+    write_graph_task "$test_dir" "20260101-400009" "OPEN" "EPIC" "BACKLOG" 10 "A real container" <<'META'
+META
+    write_graph_task "$test_dir" "20260101-400010" "OPEN" "STORY" "BACKLOG" 10 "A real story" <<'META'
+- PARENT: 20260101-400009
+- DEPENDS ON: 20260101-400009
+META
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-400000: missing-parent: PARENT '20260101-499999' does not exist" \
+        && echo "$output" | grep -q "20260101-400000: self-dependency: DEPENDS ON lists the task itself" \
+        && echo "$output" | grep -q "20260101-400000: duplicate-dependency: DEPENDS ON lists '20260101-400001' more than once" \
+        && echo "$output" | grep -q "20260101-400001: bad-epic-relationship: KIND: STORY has no PARENT" \
+        && echo "$output" | grep -q "20260101-400002: bad-epic-relationship: PARENT '20260101-400003' is KIND: TASK, not EPIC" \
+        && echo "$output" | grep -q "20260101-400002: parent-cycle:" \
+        && echo "$output" | grep -q "20260101-400003: parent-cycle:" \
+        && echo "$output" | grep -q "20260101-400004: dependency-cycle:" \
+        && echo "$output" | grep -q "20260101-400005: dependency-cycle:" \
+        && echo "$output" | grep -q "20260101-400006: dependency-cycle:" \
+        && ! echo "$output" | grep -q "20260101-400007" \
+        && echo "$output" | grep -q "20260101-400008: self-parent: PARENT names the task itself" \
+        && ! echo "$output" | grep -q "20260101-400009" \
+        && ! echo "$output" | grep -q "20260101-400010"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_new_refuses_broken_relationships() {
+    log_test "new/edit (a relationship the lint would reject is refused up front)"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+    local ok=1
+    local before
+
+    # Every one of these would be an instant finding on a record that had just
+    # been created, which makes it the producer's bug rather than the linter's.
+    set +e
+    local orphan_out parent_out dep_out kind_out
+    orphan_out=$(run_tatr new "orphan" -k STORY 2>&1);            local orphan_code=$?
+    parent_out=$(run_tatr new "bad parent" -P 20260101-999999 2>&1); local parent_code=$?
+    dep_out=$(run_tatr new "bad dep" -d 20260101-999999 2>&1);    local dep_code=$?
+    set -e
+    [ $orphan_code -ne 0 ] || ok=0
+    [ $parent_code -ne 0 ] || ok=0
+    [ $dep_code -ne 0 ] || ok=0
+    echo "$orphan_out" | grep -q "KIND: STORY belongs to an Epic" || ok=0
+    echo "$parent_out" | grep -q "Parent '20260101-999999' does not exist" || ok=0
+    echo "$dep_out" | grep -q "Dependency '20260101-999999' does not exist" || ok=0
+    # A refused create creates nothing at all.
+    [ "$(ls tasks | wc -l)" -eq 0 ] || ok=0
+
+    # A parent that exists but is not a container is refused too: only an Epic
+    # has children.
+    local plain=$(new_task_id "Not a container")
+    sleep 1
+    set +e
+    kind_out=$(run_tatr new "child of a task" -P "$plain" 2>&1); local kind_code=$?
+    set -e
+    [ $kind_code -ne 0 ] || ok=0
+    echo "$kind_out" | grep -q "is KIND: TASK, not EPIC" || ok=0
+
+    # The real shapes go through, and the backlog stays clean.
+    local epic=$(new_task_id "The container" -k EPIC)
+    sleep 1
+    local story=$(new_task_id "The story" -k STORY -P "$epic" -d "$plain")
+    [ -n "$story" ] || ok=0
+    set +e
+    local check_out
+    check_out=$(run_tatr check 2>&1); local check_code=$?
+    set -e
+    [ $check_code -eq 0 ] || ok=0
+    [ -z "$check_out" ] || ok=0
+
+    # `edit` is held to the same rule for the references it SETS...
+    set +e
+    local edit_out
+    edit_out=$(run_tatr edit "$story" -d 20260101-999999 2>&1); local edit_code=$?
+    set -e
+    [ $edit_code -ne 0 ] || ok=0
+    echo "$edit_out" | grep -q "Dependency '20260101-999999' does not exist" || ok=0
+
+    # ... and an edit that touches something else is not blocked by it. A
+    # dangling edge still gets in by hand, which is how one really appears.
+    sed -i "s|^- DEPENDS ON: .*|- DEPENDS ON: 20260101-999999|" "tasks/$story/TASK.md"
+    before=$(grep -c '' "tasks/$story/TASK.md")
+    run_tatr edit "$story" -p 42 > /dev/null 2>&1 || ok=0
+    grep -q "^- PRIORITY: 42$" "tasks/$story/TASK.md" || ok=0
+    grep -q "^- DEPENDS ON: 20260101-999999$" "tasks/$story/TASK.md" || ok=0
+    # ... and the lint is what reports it.
+    set +e
+    local dangling_check
+    dangling_check=$(run_tatr check 2>&1)
+    set -e
+    echo "$dangling_check" | grep -q "missing-dependency" || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "orphan($orphan_code): $orphan_out | parent($parent_code): $parent_out | dep($dep_code): $dep_out | kind($kind_code): $kind_out | edit($edit_code): $edit_out | check($check_code): $check_out"
+    fi
+}
+
+test_epic_frontier() {
+    log_test "frontier (deterministic; separates unblocked, blocked and claimed)"
+    local test_dir=$(create_test_dir)
+    local ok=1
+
+    write_graph_task "$test_dir" "20260101-410000" "OPEN" "EPIC" "BACKLOG" 0 "The container" <<'META'
+META
+    # The IDs are deliberately laid out so that directory order (which is ID
+    # order) is NOT the expected output order: the CLAIMED row sorts last but
+    # comes first by ID, and the high-priority READY row sorts first but comes
+    # last. A fixture whose natural order already matches cannot tell a sorted
+    # frontier from an unsorted one.
+    #
+    # A CLOSED child is not open work.
+    write_graph_task "$test_dir" "20260101-410001" "CLOSED" "STORY" "DONE" 50 "Landed already" <<'META'
+- PARENT: 20260101-410000
+META
+    write_graph_task "$test_dir" "20260101-410002" "OPEN" "STORY" "PLANNED" 70 "Someone has it" <<'META'
+- PARENT: 20260101-410000
+META
+    # Blocked on one open and one CLOSED dependency: only the open one is a
+    # blocker, so only it may appear in blocked-by.
+    write_graph_task "$test_dir" "20260101-410003" "OPEN" "STORY" "PLANNED" 80 "Blocked on one of two" <<'META'
+- PARENT: 20260101-410000
+- DEPENDS ON: 20260101-410005, 20260101-410001
+META
+    write_graph_task "$test_dir" "20260101-410004" "OPEN" "STORY" "PLANNED" 10 "Ready, low priority" <<'META'
+- PARENT: 20260101-410000
+META
+    write_graph_task "$test_dir" "20260101-410005" "OPEN" "STORY" "PLANNED" 90 "Ready, high priority" <<'META'
+- PARENT: 20260101-410000
+META
+    # A task that is not a child of this Epic must not appear at all.
+    write_graph_task "$test_dir" "20260101-410006" "OPEN" "TASK" "BACKLOG" 99 "Not a child" <<'META'
+META
+
+    TATR_SESSION=agent-x run_tatr -r "$test_dir" claim 20260101-410002 > /dev/null 2>&1 || ok=0
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" frontier 20260101-410000 2>/dev/null)
+    local exit_code=$?
+    set -e
+    [ $exit_code -eq 0 ] || ok=0
+
+    # Deterministic order: READY before BLOCKED before CLAIMED, then priority
+    # descending. Compared as a whole, so a reordering fails rather than
+    # slipping past four independent greps.
+    local want
+    want=$(cat <<EXPECTED
+READY	20260101-410005	p90	PLANNED	Ready, high priority
+READY	20260101-410004	p10	PLANNED	Ready, low priority
+BLOCKED	20260101-410003	p80	PLANNED	Blocked on one of two	blocked-by=20260101-410005
+CLAIMED	20260101-410002	p70	PLANNED	Someone has it	claimed-by=agent-x
+EXPECTED
+)
+    [ "$output" = "$want" ] || ok=0
+    # No task body is expanded: the frontier is a decision aid, not a reader.
+    if echo "$output" | grep -q "a graph fixture"; then ok=0; fi
+    if echo "$output" | grep -q "410001"; then ok=0; fi
+    if echo "$output" | grep -q "410006"; then ok=0; fi
+
+    # A repeat run is byte-identical: nothing about the order depends on
+    # directory iteration order.
+    set +e
+    local again
+    again=$(run_tatr -r "$test_dir" frontier 20260101-410000 2>/dev/null)
+    set -e
+    [ "$again" = "$want" ] || ok=0
+
+    # A frontier is the open work under a CONTAINER; asking a plain task is an
+    # error rather than an empty list that looks like "nothing to do".
+    set +e
+    local not_epic
+    not_epic=$(run_tatr -r "$test_dir" frontier 20260101-410006 2>&1); local not_epic_code=$?
+    set -e
+    [ $not_epic_code -eq 1 ] || ok=0
+    echo "$not_epic" | grep -q "is KIND: TASK, not EPIC" || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: [$output] | not-epic($not_epic_code): $not_epic"
+    fi
+}
+
+test_atomic_claim() {
+    log_test "claim (exactly one concurrent claimant wins; recovery is explicit)"
+    local test_dir=$(create_test_dir)
+    local ok=1
+
+    write_graph_task "$test_dir" "20260101-420000" "OPEN" "TASK" "PLANNED" 10 "Contended" <<'META'
+META
+    # A second task at PLANNED, so the unattributable-claim case is tested on a
+    # start that is legal rather than on one the state machine refuses anyway.
+    write_graph_task "$test_dir" "20260101-420001" "OPEN" "TASK" "PLANNED" 10 "Ghost-claimed" <<'META'
+META
+
+    # Contention: many claimants race for one task and exactly one may win.
+    # Run under the plain binary rather than run_tatr - valgrind serializes
+    # these enough to hide a race, which is the opposite of the point.
+    local winners=0 losers=0 i
+    local pids=()
+    local outdir="$test_dir/race"
+    mkdir -p "$outdir"
+    for i in $(seq 1 24); do
+        ( set +e
+          "$TATR_BIN" -r "$test_dir" claim 20260101-420000 > "$outdir/$i.out" 2>&1
+          echo $? > "$outdir/$i.code" ) &
+        pids+=($!)
+    done
+    for i in "${pids[@]}"; do wait "$i"; done
+    for i in $(seq 1 24); do
+        if [ "$(cat "$outdir/$i.code")" = "0" ]; then
+            winners=$((winners + 1))
+        else
+            losers=$((losers + 1))
+        fi
+    done
+    [ $winners -eq 1 ] || ok=0
+    [ $losers -eq 23 ] || ok=0
+    # Every loser is told who holds it, not just that it failed.
+    grep -l "already claimed by" "$outdir"/*.out > /dev/null 2>&1 || ok=0
+
+    # The claim names an owner, a host, a pid and a time - what a human needs
+    # to decide whether it is live or stale.
+    local claim_file="$test_dir/tasks/.claims/20260101-420000"
+    [ -f "$claim_file" ] || ok=0
+    grep -q "^- SESSION: ." "$claim_file" || ok=0
+    grep -q "^- OWNER: " "$claim_file" || ok=0
+    grep -q "^- HOST: " "$claim_file" || ok=0
+    grep -q "^- PID: [0-9][0-9]*$" "$claim_file" || ok=0
+    grep -q "^- SINCE: [0-9]\{8\}-[0-9]\{6\}$" "$claim_file" || ok=0
+
+    # An active claim blocks a start from ANOTHER session...
+    set +e
+    local start_out
+    start_out=$(TATR_SESSION=other-session run_tatr -r "$test_dir" flow 20260101-420000 --to WORKING 2>&1)
+    local start_code=$?
+    set -e
+    [ $start_code -ne 0 ] || ok=0
+    echo "$start_out" | grep -q "the task is claimed by session" || ok=0
+
+    # `claims` lists it, with the tasks dir it is reading named on stderr so
+    # the rows on stdout stay machine-readable.
+    set +e
+    local claims_out claims_err
+    claims_out=$(run_tatr -r "$test_dir" claims 2>/dev/null)
+    claims_err=$(run_tatr -r "$test_dir" claims 2>&1 >/dev/null)
+    set -e
+    echo "$claims_out" | grep -q "^20260101-420000	" || ok=0
+    # The row names the session ownership is decided on, not just a pid.
+    echo "$claims_out" | grep -q "@" || ok=0
+    [ "$(echo "$claims_out" | wc -l)" -eq 1 ] || ok=0
+    echo "$claims_err" | grep -q "/tasks/.claims" || ok=0
+
+    # ... and does NOT block the session that took it. tatr is a one-shot CLI,
+    # so ownership cannot be a pid: the process that ran `claim` is already
+    # gone. This is the assertion whose absence let a broken identity model
+    # ship green.
+    set +e
+    local owner_out
+    owner_out=$(run_tatr -r "$test_dir" flow 20260101-420000 --to WORKING 2>&1); local owner_code=$?
+    set -e
+    [ $owner_code -eq 0 ] || ok=0
+
+    # A stale claim is recovered only through an explicit command: a release
+    # from another session is refused by default.
+    set +e
+    local steal_out
+    steal_out=$(TATR_SESSION=other-session run_tatr -r "$test_dir" release 20260101-420000 2>&1)
+    local steal_code=$?
+    set -e
+    [ $steal_code -ne 0 ] || ok=0
+    echo "$steal_out" | grep -q "not by this one" || ok=0
+    [ -f "$claim_file" ] || ok=0
+
+    # The owner releases its own claim with no --force at all.
+    run_tatr -r "$test_dir" release 20260101-420000 > /dev/null 2>&1 || ok=0
+    [ ! -f "$claim_file" ] || ok=0
+
+    # --force is what recovers a claim held by a session that is gone.
+    TATR_SESSION=other-session run_tatr -r "$test_dir" claim 20260101-420000 > /dev/null 2>&1 || ok=0
+    [ -f "$claim_file" ] || ok=0
+    run_tatr -r "$test_dir" release 20260101-420000 --force > /dev/null 2>&1 || ok=0
+    [ ! -f "$claim_file" ] || ok=0
+
+    # A claim file with no SESSION field is unattributable. It must count as
+    # SOMEONE ELSE'S: treating it as ours would let a truncated or hand-written
+    # claim silently unblock the guard `--force` exists for.
+    local ghost_file="$test_dir/tasks/.claims/20260101-420001"
+    printf '# Claim\n\n- OWNER: ghost\n- HOST: nowhere\n' > "$ghost_file"
+    set +e
+    local ghost_start ghost_release
+    ghost_start=$(run_tatr -r "$test_dir" flow 20260101-420001 --to WORKING 2>&1)
+    local ghost_start_code=$?
+    ghost_release=$(run_tatr -r "$test_dir" release 20260101-420001 2>&1)
+    local ghost_release_code=$?
+    set -e
+    [ $ghost_start_code -ne 0 ] || ok=0
+    echo "$ghost_start" | grep -q "the task is claimed by session" || ok=0
+    [ $ghost_release_code -ne 0 ] || ok=0
+    [ -f "$ghost_file" ] || ok=0
+    run_tatr -r "$test_dir" release 20260101-420001 --force > /dev/null 2>&1 || ok=0
+    [ ! -f "$ghost_file" ] || ok=0
+
+    # Released, the start is no longer blocked for anyone. Asserted on a
+    # --to WORKING transition, because that is the only edge the claim guard
+    # inspects: on any other edge this could not fail whatever the claim state.
+    set +e
+    local free_out
+    free_out=$(TATR_SESSION=other-session run_tatr -r "$test_dir" flow 20260101-420001 --to WORKING 2>&1)
+    local free_code=$?
+    set -e
+    [ $free_code -eq 0 ] || ok=0
+
+    # Releasing what nobody holds is an error, not a silent success.
+    set +e
+    run_tatr -r "$test_dir" release 20260101-420000 > /dev/null 2>&1
+    [ $? -ne 0 ] || ok=0
+    set -e
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "winners: $winners, losers: $losers | start($start_code): $start_out | owner($owner_code): $owner_out | steal($steal_code): $steal_out | ghost($ghost_start_code/$ghost_release_code): $ghost_start | free($free_code): $free_out | claims: $claims_out"
+    fi
+}
+
+test_claim_session_identity() {
+    log_test "claim (identity is stable in a checkout and rejects a corrupt id)"
+    local test_dir=$(create_test_dir)
+    local ok=1
+
+    write_graph_task "$test_dir" "20260101-450000" "OPEN" "TASK" "PLANNED" 10 "Subdir claim" <<'META'
+META
+    mkdir -p "$test_dir/deep/nested"
+
+    # Running tatr from a subdirectory of the same checkout is ordinary - the
+    # tasks dir is found by walking up - so it must not change WHO you are.
+    # The default identity is the tasks tree, not the working directory.
+    ( cd "$test_dir" && run_tatr claim 20260101-450000 > /dev/null 2>&1 ) || ok=0
+    set +e
+    local sub_out
+    sub_out=$( cd "$test_dir/deep/nested" && run_tatr release 20260101-450000 2>&1 )
+    local sub_code=$?
+    set -e
+    [ $sub_code -eq 0 ] || ok=0
+    [ ! -f "$test_dir/tasks/.claims/20260101-450000" ] || ok=0
+
+    # A session id carrying a newline would write a claim whose owner can never
+    # match it again, and whose first line another session could forge. Refused
+    # rather than sanitised.
+    set +e
+    local nl_out ws_out
+    nl_out=$(TATR_SESSION="$(printf 'alpha\nbeta')" run_tatr -r "$test_dir" claim 20260101-450000 2>&1)
+    local nl_code=$?
+    ws_out=$(TATR_SESSION="   " run_tatr -r "$test_dir" claim 20260101-450000 2>&1)
+    local ws_code=$?
+    set -e
+    [ $nl_code -ne 0 ] || ok=0
+    echo "$nl_out" | grep -q "control character" || ok=0
+    [ $ws_code -ne 0 ] || ok=0
+    echo "$ws_out" | grep -q "only whitespace" || ok=0
+    [ ! -f "$test_dir/tasks/.claims/20260101-450000" ] || ok=0
+
+    # A value is trimmed identically on write and on compare, so padding does
+    # not lock a session out of its own claim.
+    TATR_SESSION="  padded  " run_tatr -r "$test_dir" claim 20260101-450000 > /dev/null 2>&1 || ok=0
+    grep -q "^- SESSION: padded$" "$test_dir/tasks/.claims/20260101-450000" || ok=0
+    TATR_SESSION="padded" run_tatr -r "$test_dir" release 20260101-450000 > /dev/null 2>&1 || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "sub($sub_code): $sub_out | newline($nl_code): $nl_out | ws($ws_code): $ws_out"
+    fi
+}
+
+test_claims_across_worktrees() {
+    log_test "claim (TATR_CLAIMS_DIR makes the guard fire across separate trees)"
+    local shared=$(create_test_dir)
+    local worktree=$(create_test_dir)
+    local ok=1
+
+    # The topology this feature exists for: two sessions, each with its own
+    # checkout of the same tasks, sharing one claims directory. Without
+    # TATR_CLAIMS_DIR each tree has its own tasks/.claims and the guard could
+    # never fire - a claim taken in one would simply be invisible in the other.
+    local dir
+    for dir in "$shared" "$worktree"; do
+        write_graph_task "$dir" "20260101-440000" "OPEN" "TASK" "PLANNED" 10 "Shared work" <<'META'
+META
+    done
+    export TATR_CLAIMS_DIR="$shared/tasks/.claims"
+
+    TATR_SESSION=agent-A run_tatr -r "$shared" claim 20260101-440000 > /dev/null 2>&1 || ok=0
+
+    # Session B, working in its OWN tree, is refused the start by a claim that
+    # lives in neither of its own task folders.
+    set +e
+    local other_out
+    other_out=$(TATR_SESSION=agent-B run_tatr -r "$worktree" flow 20260101-440000 --to WORKING 2>&1)
+    local other_code=$?
+    set -e
+    [ $other_code -ne 0 ] || ok=0
+    echo "$other_out" | grep -q "claimed by session 'agent-A'" || ok=0
+
+    # Session A may start it from its own tree, which is not where it claimed.
+    set +e
+    local own_out
+    own_out=$(TATR_SESSION=agent-A run_tatr -r "$worktree" flow 20260101-440000 --to WORKING 2>&1)
+    local own_code=$?
+    set -e
+    [ $own_code -eq 0 ] || ok=0
+
+    # Both trees see the one claims directory.
+    local listed
+    listed=$(run_tatr -r "$worktree" claims 2>/dev/null)
+    echo "$listed" | grep -q "^20260101-440000	agent-A	" || ok=0
+
+    unset TATR_CLAIMS_DIR
+    # Without the override each tree is back to its own claims dir, so the
+    # worktree sees no claim at all - the scoping is real, not incidental.
+    listed=$(run_tatr -r "$worktree" claims 2>/dev/null)
+    [ -z "$listed" ] || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "other($other_code): $other_out | own($own_code): $own_out | listed: $listed"
+    fi
+}
+
+test_epic_lifecycle_guards() {
+    log_test "flow (blocked starts and open-child Epic closes are refused)"
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+    local ok=1
+
+    local epic=$(new_task_id "The container" -k EPIC)
+    sleep 1
+    local child=$(new_task_id "The child" -k STORY -P "$epic")
+    sleep 1
+    local blocked=$(new_task_id "Blocked child" -k STORY -P "$epic" -d "$child")
+
+    drive_task_to "$epic" COMPOUNDING || ok=0
+
+    # An Epic's work is its children's: it cannot close while any is open, and
+    # the refusal names every one of them rather than the first.
+    set +e
+    local close_out
+    close_out=$(run_tatr flow "$epic" --to DONE 2>&1); local close_code=$?
+    set -e
+    [ $close_code -ne 0 ] || ok=0
+    echo "$close_out" | grep -q "child $child is not CLOSED" || ok=0
+    echo "$close_out" | grep -q "child $blocked is not CLOSED" || ok=0
+    [ "$(flow_step_of "$epic")" = "COMPOUNDING" ] || ok=0
+
+    # A blocked Story cannot start over its open blocker.
+    drive_task_to "$blocked" PLANNED || ok=0
+    set +e
+    local start_out
+    start_out=$(run_tatr flow "$blocked" --to WORKING 2>&1); local start_code=$?
+    set -e
+    [ $start_code -ne 0 ] || ok=0
+    echo "$start_out" | grep -q "dependency $child is not CLOSED" || ok=0
+
+    # With every child CLOSED, the Epic closes.
+    drive_task_to "$child" DONE || ok=0
+    drive_task_to "$blocked" DONE || ok=0
+    run_tatr flow "$epic" --to DONE > /dev/null 2>&1 || ok=0
+    [ "$(flow_step_of "$epic")" = "DONE" ] || ok=0
+
+    # And the state the lifecycle produced is one the lint calls clean.
+    set +e
+    local check_out
+    check_out=$(run_tatr check 2>&1); local check_code=$?
+    set -e
+    [ $check_code -eq 0 ] || ok=0
+    [ -z "$check_out" ] || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "close($close_code): $close_out | start($start_code): $start_out | check($check_code): $check_out"
+    fi
+}
+
+test_phase_context_selection() {
+    log_test "context (each phase lists only the artifacts it owns)"
+    local test_dir=$(create_test_dir)
+    local ok=1
+
+    write_graph_task "$test_dir" "20260101-430000" "OPEN" "EPIC" "BACKLOG" 0 "The container" <<'META'
+META
+    write_graph_task "$test_dir" "20260101-430001" "OPEN" "STORY" "WORKING" 10 "The story" <<'META'
+- PARENT: 20260101-430000
+META
+    run_tatr -r "$test_dir" scaffold 20260101-430001 REVIEW > /dev/null 2>&1 || ok=0
+
+    phase_paths() {
+        run_tatr -r "$test_dir" context 20260101-430001 --phase "$1" 2>/dev/null \
+            | sed 's|.*/||; s|\t.*||'
+    }
+
+    # Review owns the task and its review, and nothing else: a phase that lists
+    # every record is not a context, it is an ls.
+    [ "$(phase_paths review | tr '\n' ' ')" = "TASK.md REVIEW.md " ] || ok=0
+    [ "$(phase_paths compound | tr '\n' ' ')" = "TASK.md REVIEW.md RETRO.md " ] || ok=0
+    [ "$(phase_paths landing | tr '\n' ' ')" = "TASK.md REVIEW.md RETRO.md " ] || ok=0
+    [ "$(phase_paths work | tr '\n' ' ')" = "TASK.md DECISION.md REVIEW.md " ] || ok=0
+    # Understanding looks outward: a Story cannot be understood without the
+    # Epic that gave it its shape, so the parent's record is in the set.
+    [ "$(phase_paths understand | tr '\n' ' ')" = "TASK.md SPIKE.md DECISION.md TASK.md " ] || ok=0
+    [ "$(phase_paths resume | tr '\n' ' ')" = "TASK.md SPIKE.md DECISION.md REVIEW.md RETRO.md TASK.md " ] || ok=0
+
+    # Presence is reported, and a record the phase owns is listed whether or
+    # not it exists yet - the caller needs the path in order to create it.
+    set +e
+    local review_out
+    review_out=$(run_tatr -r "$test_dir" context 20260101-430001 --phase review 2>/dev/null)
+    set -e
+    echo "$review_out" | grep -q "/20260101-430001/TASK.md	present" || ok=0
+    echo "$review_out" | grep -q "/20260101-430001/REVIEW.md	present" || ok=0
+    set +e
+    local compound_out
+    compound_out=$(run_tatr -r "$test_dir" context 20260101-430001 --phase compound 2>/dev/null)
+    set -e
+    echo "$compound_out" | grep -q "/20260101-430001/RETRO.md	missing" || ok=0
+
+    # Paths only: no phase ever prints a record's contents.
+    if echo "$review_out" | grep -q "a graph fixture"; then ok=0; fi
+    if echo "$review_out" | grep -q "^# "; then ok=0; fi
+
+    # A task with no parent does not get a phantom parent row.
+    [ "$(run_tatr -r "$test_dir" context 20260101-430000 --phase understand 2>/dev/null | wc -l)" -eq 3 ] || ok=0
+
+    # An unknown phase is refused by name.
+    set +e
+    local bad_out
+    bad_out=$(run_tatr -r "$test_dir" context 20260101-430001 --phase deploy 2>&1); local bad_code=$?
+    set -e
+    [ $bad_code -ne 0 ] || ok=0
+    echo "$bad_out" | grep -q "Invalid phase 'deploy'" || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "review: [$review_out] | compound: [$compound_out] | bad($bad_code): $bad_out"
+    fi
+}
+
 test_existing_artifacts_are_classified() {
     log_test "check (this repo's own artifacts pass or are explicitly exempted)"
     local ok=1
@@ -3488,7 +4188,7 @@ test_transition_cannot_mint_a_flagged_record() {
     echo "$review_out" | grep -q "bad-review-round: REVIEW.md has no '## Round 1' heading" || ok=0
     echo "$review_out" | grep -q "bad-record-schema: REVIEW.md has no '- TASK: ' line" || ok=0
 
-    run_tatr scaffold "$id" REVIEW > /dev/null 2>&1 && ok=0   # refuses to clobber
+    if run_tatr scaffold "$id" REVIEW > /dev/null 2>&1; then ok=0; fi  # refuses to clobber
     rm -f "$dir/REVIEW.md"
     run_tatr scaffold "$id" REVIEW > /dev/null 2>&1 || ok=0
     sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/;
@@ -3771,6 +4471,14 @@ test_check_dod_proof_syntax
 test_check_spike_records
 test_check_exemptions
 test_proof_listing_does_not_execute
+test_epic_graph_validation
+test_new_refuses_broken_relationships
+test_epic_frontier
+test_atomic_claim
+test_claim_session_identity
+test_claims_across_worktrees
+test_epic_lifecycle_guards
+test_phase_context_selection
 test_existing_artifacts_are_classified
 test_transition_cannot_mint_a_flagged_record
 test_check_decision_absent_unaffected

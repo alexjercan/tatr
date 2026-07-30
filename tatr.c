@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <limits.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #define TATR_VERSION "0.1.0"
 
@@ -48,6 +51,17 @@ typedef struct {
 // Defined below with the other HUID helpers; the parser needs it to validate
 // the PARENT and DEPENDS ON references it reads.
 static boolean ishuid(const Aids_String_Slice *slice);
+
+// Defined with the artifact scans below. `new` needs them to check that a
+// PARENT or DEPENDS ON reference resolves before it creates a record whose
+// relationships the lint would reject on sight.
+static boolean task_sibling_read(const Aids_String_Slice *tasks_dir,
+                                 const Aids_String_Slice *huid,
+                                 const char *name,
+                                 Aids_String_Slice *content);
+static boolean task_sibling_exists(const Aids_String_Slice *tasks_dir,
+                                   const Aids_String_Slice *huid,
+                                   const char *name);
 
 static boolean enum_from_string(const Aids_String_Slice *slice,
                                 const Aids_String_Slice *table,
@@ -995,6 +1009,69 @@ static boolean task_apply_v2_meta_arguments(Argparse_Parser *parser, Task *task)
     return true;
 }
 
+// Checks that a new task's PARENT and DEPENDS ON name records that exist, and
+// that a Story is given the Epic it belongs to. Returns false after logging.
+// This is the same question graph_node_problems asks of an existing record; it
+// is asked here as well because `new` is the one producer that could otherwise
+// create a task the lint rejects on sight, and there is no gate between the
+// two.
+static boolean new_relationships_resolve(const Aids_String_Slice *cwd, const Task *task) {
+    Aids_String_Slice tasks_dir = {0};
+    boolean ok = true;
+
+    if (task->meta.parent.len == 0 && task->meta.depends_on.count == 0) {
+        if (task->meta.kind == Task_Kind_STORY) {
+            aids_log(AIDS_ERROR, "A KIND: STORY belongs to an Epic: pass -P/--parent <epic id>");
+            return false;
+        }
+        return true; // nothing to resolve, so no tasks dir needed
+    }
+    if (tasks_dir_path_build(cwd, &tasks_dir) != AIDS_OK) {
+        return false;
+    }
+
+    if (task->meta.parent.len > 0) {
+        Aids_String_Slice raw = {0};
+        if (!task_sibling_read(&tasks_dir, &task->meta.parent, TASK_FILE_NAME_CSTR, &raw)) {
+            aids_log(AIDS_ERROR, "Parent '" SS_Fmt "' does not exist", SS_Arg(task->meta.parent));
+            ok = false;
+        } else {
+            Task parent = {0};
+            task_init_empty(&parent);
+            if (task_deserialize(raw, &parent) != AIDS_OK) {
+                aids_log(AIDS_ERROR, "Parent '" SS_Fmt "' does not parse", SS_Arg(task->meta.parent));
+                AIDS_FREE(raw.str);
+                ok = false;
+            } else {
+                parent._buffer = raw.str;
+                if (parent.meta.kind != Task_Kind_EPIC) {
+                    aids_log(AIDS_ERROR, "Parent '" SS_Fmt "' is KIND: " SS_Fmt ", not EPIC: only a container has children",
+                             SS_Arg(task->meta.parent), SS_Arg(Task_Kind_Strings[parent.meta.kind]));
+                    ok = false;
+                }
+            }
+            task_cleanup(&parent);
+        }
+    } else if (task->meta.kind == Task_Kind_STORY) {
+        aids_log(AIDS_ERROR, "A KIND: STORY belongs to an Epic: pass -P/--parent <epic id>");
+        ok = false;
+    }
+
+    for (size_t i = 0; i < task->meta.depends_on.count; ++i) {
+        Aids_String_Slice *dep = NULL;
+        if (aids_array_get((Aids_Array *)&task->meta.depends_on, i, (void **)&dep) != AIDS_OK) {
+            continue;
+        }
+        if (!task_sibling_exists(&tasks_dir, dep, TASK_FILE_NAME_CSTR)) {
+            aids_log(AIDS_ERROR, "Dependency '" SS_Fmt "' does not exist", SS_Arg(*dep));
+            ok = false;
+        }
+    }
+
+    AIDS_FREE(tasks_dir.str);
+    return ok;
+}
+
 // Reads the whole of stdin into an owned slice. Used by `new --body-file -`.
 static Aids_Result read_stdin_all(Aids_String_Slice *out) {
     Aids_Result result = AIDS_OK;
@@ -1130,6 +1207,15 @@ static int main_new(const Tatr_Context *ctx) {
             }
         }
         task.description = body;
+    }
+
+    // A relationship the graph rules would reject is refused HERE, before the
+    // record exists: `tatr new` must not mint a task that `tatr check` flags
+    // the moment it is created, for the same reason the plan gate owns the
+    // plan sections rather than `new` doing. Checked after the body is read so
+    // that a bad path and a bad reference fail the same way - creating nothing.
+    if (!new_relationships_resolve(&ctx->cwd, &task)) {
+        return_defer(1);
     }
 
     char huid_str[HUID_LENGTH] = {0};
@@ -1462,6 +1548,16 @@ static int main_edit(const Tatr_Context *ctx) {
     }
 
     if (!task_apply_v2_meta_arguments(&parser, &task)) {
+        return_defer(1);
+    }
+
+    // Only when this edit SETS a relationship or a kind: an edit that touches
+    // the title must not be blocked by a dangling reference it did not create,
+    // but an edit that writes one is the same producer `new` is.
+    if ((argparse_get_value(&parser, "parent") != NULL ||
+         argparse_get_value(&parser, "kind") != NULL ||
+         argparse_get_values(&parser, "depends-on", (char *[ARGPARSE_CAPACITY]){0}) > 0) &&
+        !new_relationships_resolve(&ctx->cwd, &task)) {
         return_defer(1);
     }
 
@@ -4452,6 +4548,670 @@ static void task_record_problems(Task_Kind kind, Flow_Step step,
     dod_proof_problems(task_raw, problems);
 }
 
+static int string_slice_compare_fn(const void *a, const void *b) {
+    return aids_string_slice_compare((const Aids_String_Slice *)a,
+                                     (const Aids_String_Slice *)b);
+}
+
+// ---------------------------------------------------------------------------
+// The task graph. PARENT and DEPENDS ON are typed references, but until now
+// nothing asked whether they resolve: `tatr flow` would treat a dependency that
+// does not exist as one more thing to wait for. The graph is a property of the
+// whole record set, so it is loaded once and answered from, rather than
+// re-walked per question.
+//
+// A graph is a flat array of nodes - every task is one directory under one
+// tasks dir - so a reference resolves by linear scan over at most a few hundred
+// entries. That is fast enough to be uninteresting and keeps the loader honest:
+// there is no index to fall out of date.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    Aids_String_Slice huid;    // borrowed from the node's own owned copy
+    Aids_String_Slice title;
+    Task_Kind kind;
+    Task_Status status;
+    Flow_Step flow_step;
+    unsigned int priority;
+    Aids_String_Slice parent;  // len 0 when unset
+    Aids_Array depends_on;     /* Aids_String_Slice, borrowed from _buffer */
+    boolean parsed;            // false when the record did not deserialize
+    unsigned char *_buffer;    // owns huid, title, parent and the dependency slices
+    Aids_String_Slice _huid_owned;
+} Graph_Node;
+
+typedef struct {
+    Aids_Array nodes;          /* Graph_Node */
+    boolean initialized;
+} Task_Graph;
+
+static void task_graph_init(Task_Graph *graph) {
+    aids_array_init(&graph->nodes, sizeof(Graph_Node));
+    graph->initialized = true;
+}
+
+static void task_graph_free(Task_Graph *graph) {
+    if (!graph->initialized) {
+        return;
+    }
+    for (size_t i = 0; i < graph->nodes.count; ++i) {
+        Graph_Node *node = NULL;
+        if (aids_array_get(&graph->nodes, i, (void **)&node) != AIDS_OK) {
+            continue;
+        }
+        aids_array_free(&node->depends_on);
+        if (node->_buffer != NULL) {
+            AIDS_FREE(node->_buffer);
+        }
+        if (node->_huid_owned.str != NULL) {
+            AIDS_FREE(node->_huid_owned.str);
+        }
+    }
+    aids_array_free(&graph->nodes);
+    graph->initialized = false;
+}
+
+// Loads every HUID-named directory under <tasks_dir> into the graph. A record
+// that does not parse becomes a node with parsed=false rather than being
+// dropped: the graph must still know the ID exists, or every reference to it
+// would be reported as dangling on top of the parse failure that is the real
+// problem.
+static Aids_Result task_graph_load(const Aids_String_Slice *tasks_dir, Task_Graph *graph) {
+    Aids_Result result = AIDS_OK;
+    Aids_Array entries = {0};
+
+    aids_array_init(&entries, sizeof(Aids_String_Slice));
+    if (aids_io_listdir(tasks_dir, &entries) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list tasks directory: %s", aids_failure_reason());
+        cleanup_string_slice_array(&entries);
+        return_defer(AIDS_ERR);
+    }
+    aids_array_sort(&entries, string_slice_compare_fn);
+
+    for (size_t i = 0; i < entries.count; ++i) {
+        Aids_String_Slice *entry = NULL;
+        if (aids_array_get(&entries, i, (void **)&entry) != AIDS_OK || !ishuid(entry)) {
+            continue;
+        }
+
+        Graph_Node node = {0};
+        aids_array_init(&node.depends_on, sizeof(Aids_String_Slice));
+
+        Aids_String_Builder huid_sb = {0};
+        aids_string_builder_init(&huid_sb);
+        if (aids_string_builder_append(&huid_sb, SS_Fmt, SS_Arg(*entry)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to copy HUID: %s", aids_failure_reason());
+            aids_string_builder_free(&huid_sb);
+            aids_array_free(&node.depends_on);
+            cleanup_string_slice_array(&entries);
+            return_defer(AIDS_ERR);
+        }
+        aids_string_builder_to_slice(&huid_sb, &node._huid_owned);
+        node.huid = node._huid_owned;
+
+        Aids_String_Slice raw = {0};
+        if (task_sibling_read(tasks_dir, entry, TASK_FILE_NAME_CSTR, &raw)) {
+            Task task = {0};
+            task_init_empty(&task);
+            if (task_deserialize(raw, &task) == AIDS_OK) {
+                node.parsed = true;
+                node.title = task.title;
+                node.kind = task.meta.kind;
+                node.status = task.meta.status;
+                node.flow_step = task.meta.flow_step;
+                node.priority = task.meta.priority;
+                node.parent = task.meta.parent;
+                for (size_t d = 0; d < task.meta.depends_on.count; ++d) {
+                    Aids_String_Slice *dep = NULL;
+                    if (aids_array_get(&task.meta.depends_on, d, (void **)&dep) == AIDS_OK) {
+                        aids_array_append(&node.depends_on, dep);
+                    }
+                }
+                node._buffer = raw.str; // the node now owns the bytes its slices point into
+                task._buffer = NULL;    // ... so the task must not free them
+            } else {
+                AIDS_FREE(raw.str);
+            }
+            task_cleanup(&task);
+        }
+
+        if (aids_array_append(&graph->nodes, &node) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append graph node: %s", aids_failure_reason());
+            aids_array_free(&node.depends_on);
+            if (node._buffer != NULL) {
+                AIDS_FREE(node._buffer);
+            }
+            AIDS_FREE(node._huid_owned.str);
+            cleanup_string_slice_array(&entries);
+            return_defer(AIDS_ERR);
+        }
+    }
+
+    cleanup_string_slice_array(&entries);
+
+defer:
+    return result;
+}
+
+static Graph_Node *task_graph_find(const Task_Graph *graph, Aids_String_Slice huid) {
+    for (size_t i = 0; i < graph->nodes.count; ++i) {
+        Graph_Node *node = NULL;
+        if (aids_array_get((Aids_Array *)&graph->nodes, i, (void **)&node) != AIDS_OK) {
+            continue;
+        }
+        if (aids_string_slice_compare(&node->huid, &huid) == 0) {
+            return node;
+        }
+    }
+    return NULL;
+}
+
+// Walks a chain from <start> and reports whether it returns to <start>. <next>
+// picks the successor of a node, so one walk serves both the PARENT chain (one
+// successor) and each DEPENDS ON edge (walked once per edge). The step limit is
+// the node count: a chain longer than that has necessarily revisited something.
+typedef boolean (*Graph_Next_Fn)(const Graph_Node *node, Aids_String_Slice *out);
+
+static boolean graph_parent_next(const Graph_Node *node, Aids_String_Slice *out) {
+    if (node->parent.len == 0) {
+        return false;
+    }
+    *out = node->parent;
+    return true;
+}
+
+static boolean graph_chain_returns_to(const Task_Graph *graph,
+                                      Aids_String_Slice start,
+                                      Aids_String_Slice from,
+                                      Graph_Next_Fn next) {
+    Aids_String_Slice at = from;
+    for (size_t steps = 0; steps <= graph->nodes.count; ++steps) {
+        if (aids_string_slice_compare(&at, &start) == 0) {
+            return true;
+        }
+        Graph_Node *node = task_graph_find(graph, at);
+        if (node == NULL || !node->parsed) {
+            return false;
+        }
+        Aids_String_Slice up = {0};
+        if (!next(node, &up)) {
+            return false;
+        }
+        at = up;
+    }
+    return false;
+}
+
+// True when <start> can reach itself by following DEPENDS ON edges.
+//
+// <seen> marks the nodes already expanded, so every node is expanded at most
+// once and the walk is O(V+E). Without it a legal diamond-shaped graph - two
+// tasks depending on a third, repeated - is explored exponentially: measured at
+// 0.016s for 48 tasks, 3.2s for 72 and 12.4s for 78, on a walk that runs for
+// every dependency edge of every task on every `tatr check` and every gated
+// transition. A depth bound stops infinite recursion but not that blow-up.
+static boolean graph_depends_reaches(const Task_Graph *graph,
+                                     Aids_String_Slice start,
+                                     Aids_String_Slice from,
+                                     boolean *seen) {
+    if (aids_string_slice_compare(&from, &start) == 0) {
+        return true;
+    }
+    for (size_t i = 0; i < graph->nodes.count; ++i) {
+        Graph_Node *candidate = NULL;
+        if (aids_array_get((Aids_Array *)&graph->nodes, i, (void **)&candidate) != AIDS_OK) {
+            continue;
+        }
+        if (aids_string_slice_compare(&candidate->huid, &from) != 0) {
+            continue;
+        }
+        if (seen[i]) {
+            return false; // this subgraph has already been explored
+        }
+        seen[i] = true;
+        if (!candidate->parsed) {
+            return false;
+        }
+        for (size_t d = 0; d < candidate->depends_on.count; ++d) {
+            Aids_String_Slice *dep = NULL;
+            if (aids_array_get(&candidate->depends_on, d, (void **)&dep) != AIDS_OK) {
+                continue;
+            }
+            if (graph_depends_reaches(graph, start, *dep, seen)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return false; // the reference does not resolve; missing-dependency says so
+}
+
+// missing-parent / self-parent / parent-cycle / bad-epic-relationship /
+// missing-dependency / duplicate-dependency / self-dependency /
+// dependency-cycle: everything one task's place in the graph is held to.
+// Collected as data like every other record rule, so `check` prints them and
+// `flow` refuses transitions on them through the same call.
+static void graph_node_problems(const Task_Graph *graph,
+                                const Graph_Node *node,
+                                Record_Problems *problems) {
+    if (!node->parsed) {
+        return; // malformed-header is the finding; its fields are not readable
+    }
+
+    if (node->parent.len > 0) {
+        if (aids_string_slice_compare(&node->parent, &node->huid) == 0) {
+            record_problems_add(problems, "self-parent", "PARENT names the task itself");
+        } else {
+            Graph_Node *parent = task_graph_find(graph, node->parent);
+            if (parent == NULL) {
+                record_problems_add(problems, "missing-parent",
+                                    "PARENT '" SS_Fmt "' does not exist", SS_Arg(node->parent));
+            } else {
+                if (parent->parsed && parent->kind != Task_Kind_EPIC) {
+                    record_problems_add(problems, "bad-epic-relationship",
+                                        "PARENT '" SS_Fmt "' is KIND: " SS_Fmt ", not EPIC",
+                                        SS_Arg(node->parent),
+                                        SS_Arg(Task_Kind_Strings[parent->kind]));
+                }
+                if (graph_chain_returns_to(graph, node->huid, node->parent, graph_parent_next)) {
+                    record_problems_add(problems, "parent-cycle",
+                                        "the PARENT chain from '" SS_Fmt "' returns to this task",
+                                        SS_Arg(node->parent));
+                }
+            }
+        }
+    } else if (node->kind == Task_Kind_STORY) {
+        record_problems_add(problems, "bad-epic-relationship",
+                            "KIND: STORY has no PARENT (a Story belongs to an Epic)");
+    }
+
+    for (size_t i = 0; i < node->depends_on.count; ++i) {
+        Aids_String_Slice *dep = NULL;
+        if (aids_array_get((Aids_Array *)&node->depends_on, i, (void **)&dep) != AIDS_OK) {
+            continue;
+        }
+        // Duplicates are reported once, on the second occurrence.
+        boolean duplicate = false;
+        for (size_t j = 0; j < i; ++j) {
+            Aids_String_Slice *earlier = NULL;
+            if (aids_array_get((Aids_Array *)&node->depends_on, j, (void **)&earlier) == AIDS_OK &&
+                aids_string_slice_compare(earlier, dep) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            record_problems_add(problems, "duplicate-dependency",
+                                "DEPENDS ON lists '" SS_Fmt "' more than once", SS_Arg(*dep));
+            continue;
+        }
+        if (aids_string_slice_compare(dep, &node->huid) == 0) {
+            record_problems_add(problems, "self-dependency",
+                                "DEPENDS ON lists the task itself");
+            continue;
+        }
+        if (task_graph_find(graph, *dep) == NULL) {
+            record_problems_add(problems, "missing-dependency",
+                                "DEPENDS ON '" SS_Fmt "' does not exist", SS_Arg(*dep));
+            continue;
+        }
+        // One visited set per edge walked: a node already expanded for THIS
+        // edge cannot yield a new answer, but it must still be expandable when
+        // the next edge is walked.
+        boolean *seen = calloc(graph->nodes.count > 0 ? graph->nodes.count : 1, sizeof(boolean));
+        if (seen == NULL) {
+            aids_log(AIDS_ERROR, "Failed to allocate the dependency walk's visited set");
+            continue;
+        }
+        boolean cycles = graph_depends_reaches(graph, node->huid, *dep, seen);
+        free(seen);
+        if (cycles) {
+            record_problems_add(problems, "dependency-cycle",
+                                "the DEPENDS ON chain from '" SS_Fmt "' returns to this task",
+                                SS_Arg(*dep));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Claims: the coordination primitive for parallel sessions. A claim is a file
+// created with O_CREAT|O_EXCL under "<tasks_dir>/.claims/<id>", which the
+// kernel makes atomic: of any number of racing sessions exactly one open()
+// succeeds and the rest get EEXIST. The winner writes its owner payload in the
+// same call that won the race, so a claim is never anonymous.
+//
+// Two environment variables decide WHERE claims live and WHO holds one, and
+// both exist because a claim has to outlive the process that took it and reach
+// across working trees:
+//
+//   TATR_CLAIMS_DIR   the claims directory, default "<tasks_dir>/.claims".
+//                     A worktree session points this at the shared checkout's
+//                     claims dir so that `claim` and the `flow` guard read the
+//                     SAME directory even though they resolve different tasks
+//                     trees. Without it the guard could never fire in the
+//                     topology the feature exists for.
+//   TATR_SESSION      the session identity, default the process's working
+//                     directory. tatr is a one-shot CLI: the process that ran
+//                     `tatr claim` is gone by the time anything else runs, so
+//                     ownership CANNOT be a pid. It is whatever names the
+//                     session across invocations - the worktree path by
+//                     default, or an explicit id when the session moves around.
+//
+// There is no timeout and no automatic steal - "the owner is slow" and "the
+// owner is dead" are indistinguishable to tatr, so recovering a stale claim is
+// a deliberate `tatr release <id> --force`.
+//
+// The default directory is dotted so that every HUID scan skips it for free and
+// one .gitignore line covers the lot; a claim is machine state, and the task's
+// own folder holds only versioned history.
+// ---------------------------------------------------------------------------
+
+#define CLAIMS_DIR_NAME_CSTR ".claims"
+
+// The claims directory: TATR_CLAIMS_DIR verbatim when set, else
+// "<tasks_dir>/.claims".
+static Aids_Result claims_dir_path_build(const Aids_String_Slice *tasks_dir,
+                                         Aids_String_Slice *out) {
+    const char *override = getenv("TATR_CLAIMS_DIR");
+    Aids_String_Builder sb = {0};
+    Aids_Result appended;
+
+    aids_string_builder_init(&sb);
+    if (override != NULL && override[0] != '\0') {
+        appended = aids_string_builder_append(&sb, "%s", override);
+    } else {
+        appended = aids_string_builder_append(&sb, SS_Fmt "/%s", SS_Arg(*tasks_dir),
+                                              CLAIMS_DIR_NAME_CSTR);
+    }
+    if (appended != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to build claims directory path: %s", aids_failure_reason());
+        aids_string_builder_free(&sb);
+        return AIDS_ERR;
+    }
+    aids_string_builder_to_slice(&sb, out);
+    return AIDS_OK;
+}
+
+// Fills <buffer> with "<claims_dir>/<huid>". Returns false when the path would
+// be truncated, which must never silently name a different file.
+static boolean claim_path_build(const Aids_String_Slice *tasks_dir,
+                                Aids_String_Slice huid,
+                                char *buffer, size_t size) {
+    Aids_String_Slice claims_dir = {0};
+    if (claims_dir_path_build(tasks_dir, &claims_dir) != AIDS_OK) {
+        return false;
+    }
+    int written = snprintf(buffer, size, SS_Fmt "/" SS_Fmt,
+                           SS_Arg(claims_dir), SS_Arg(huid));
+    AIDS_FREE(claims_dir.str);
+    return written > 0 && (size_t)written < size;
+}
+
+// The identity of the session taking a claim. Not the pid: tatr is a one-shot
+// CLI, so a pid recorded by `tatr claim` names a process that has already
+// exited and can never match again.
+//
+// TATR_SESSION when set, else the tasks directory found by walking up from the
+// process's REAL working directory. Not the cwd itself: running tatr from a
+// subdirectory of a checkout is ordinary, and it must not change who you are.
+// Not `-r` either: pointing at a shared tree is how sessions cooperate, so it
+// must not make them the same session. The tasks tree a session works in is
+// stable across its invocations and different between parallel worktrees,
+// which is exactly the identity wanted.
+//
+// The value is written into a line-oriented record and compared after trimming,
+// so a value carrying a newline could forge or orphan a claim: it is rejected
+// rather than sanitised, because a session id that is not what the caller
+// asked for is its own kind of wrong.
+static Aids_Result claim_session_id(Aids_String_Slice *out) {
+    const char *override = getenv("TATR_SESSION");
+    if (override != NULL && override[0] != '\0') {
+        for (const char *c = override; *c != '\0'; ++c) {
+            if (iscntrl((unsigned char)*c)) {
+                aids_log(AIDS_ERROR, "TATR_SESSION contains a control character; "
+                         "a session id is one line of text");
+                return AIDS_ERR;
+            }
+        }
+        // Trimmed BEFORE the copy, exactly as artifact_field trims on read, or
+        // a value with a trailing space would never match itself. Trimming the
+        // slice afterwards would move its str pointer into the middle of the
+        // allocation, and freeing that is undefined.
+        const char *start = override;
+        const char *end = override + strlen(override);
+        while (start < end && isspace((unsigned char)*start)) {
+            start++;
+        }
+        while (end > start && isspace((unsigned char)*(end - 1))) {
+            end--;
+        }
+        if (start == end) {
+            aids_log(AIDS_ERROR, "TATR_SESSION is only whitespace; unset it to use the default");
+            return AIDS_ERR;
+        }
+
+        Aids_String_Builder sb = {0};
+        aids_string_builder_init(&sb);
+        if (aids_string_builder_append(&sb, "%.*s", (int)(end - start), start) != AIDS_OK) {
+            aids_string_builder_free(&sb);
+            return AIDS_ERR;
+        }
+        aids_string_builder_to_slice(&sb, out);
+        return AIDS_OK;
+    }
+
+    Aids_String_Slice cwd = {0};
+    if (aids_io_getcwd(&cwd) != AIDS_OK) {
+        return AIDS_ERR;
+    }
+    Aids_String_Slice tasks_dir = {0};
+    if (tasks_dir_path_build(&cwd, &tasks_dir) == AIDS_OK) {
+        AIDS_FREE(cwd.str);
+        *out = tasks_dir;
+        return AIDS_OK;
+    }
+    *out = cwd; // no tasks tree above us; the directory itself is the identity
+    return AIDS_OK;
+}
+
+typedef struct {
+    Aids_String_Slice session; // the identity ownership is decided on
+    Aids_String_Slice owner;
+    Aids_String_Slice host;
+    Aids_String_Slice pid;
+    Aids_String_Slice since;
+    Aids_String_Slice _buffer; // owns the five slices above
+} Claim;
+
+static void claim_free(Claim *claim) {
+    if (claim->_buffer.str != NULL) {
+        AIDS_FREE(claim->_buffer.str);
+        claim->_buffer = (Aids_String_Slice){0};
+    }
+}
+
+// Reads the claim on <huid>, if there is one. Returns false when the task is
+// unclaimed. A claim file that exists but cannot be read or parsed still counts
+// as a claim: the safe reading of "something is there but I cannot tell who" is
+// that the task is taken.
+static boolean claim_read(const Aids_String_Slice *tasks_dir,
+                          Aids_String_Slice huid,
+                          Claim *claim) {
+    char path_buffer[PATH_MAX];
+    if (!claim_path_build(tasks_dir, huid, path_buffer, sizeof(path_buffer))) {
+        return false;
+    }
+    if (access(path_buffer, F_OK) != 0) {
+        return false;
+    }
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    Aids_String_Slice content = {0};
+    if (aids_io_read(&path, &content, "r") != AIDS_OK) {
+        return true; // claimed by someone we cannot name
+    }
+    claim->_buffer = content;
+    artifact_field(content, "- SESSION: ", &claim->session);
+    artifact_field(content, "- OWNER: ", &claim->owner);
+    artifact_field(content, "- HOST: ", &claim->host);
+    artifact_field(content, "- PID: ", &claim->pid);
+    artifact_field(content, "- SINCE: ", &claim->since);
+    return true;
+}
+
+static boolean task_is_claimed(const Aids_String_Slice *tasks_dir, Aids_String_Slice huid) {
+    char path_buffer[PATH_MAX];
+    if (!claim_path_build(tasks_dir, huid, path_buffer, sizeof(path_buffer))) {
+        return false;
+    }
+    return access(path_buffer, F_OK) == 0;
+}
+
+// The machine this claim was taken on, for the diagnostic a contended claim
+// prints. Best-effort by design: a claim whose host is "unknown" is still a
+// claim, and no caller should fail because a hostname was unavailable.
+static boolean tatr_hostname(char *buffer, size_t size) {
+#if defined(_WIN32)
+    const char *name = getenv("COMPUTERNAME");
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    int written = snprintf(buffer, size, "%s", name);
+    return written > 0 && (size_t)written < size;
+#else
+    return gethostname(buffer, size - 1) == 0;
+#endif
+}
+
+// Renders the claim payload of the calling process.
+static Aids_Result claim_payload_build(Aids_String_Slice *out) {
+    Aids_String_Builder sb = {0};
+    Aids_Result result = AIDS_OK;
+    char host[256] = {0};
+    char stamp[HUID_LENGTH] = {0};
+    const char *user = getenv("USER");
+
+    // gethostname lives in <winsock2.h> under MinGW and needs a linked socket
+    // library there, which is far too much machinery for one diagnostic field.
+    // Windows publishes the same answer as an environment variable.
+    if (!tatr_hostname(host, sizeof(host))) {
+        snprintf(host, sizeof(host), "unknown");
+    }
+    if (huid(stamp) != AIDS_OK) {
+        return AIDS_ERR;
+    }
+
+    Aids_String_Slice session = {0};
+    if (claim_session_id(&session) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to determine the session identity: %s", aids_failure_reason());
+        return AIDS_ERR;
+    }
+
+    aids_string_builder_init(&sb);
+    // SESSION first: it is the field ownership is decided on. OWNER, HOST, PID
+    // and SINCE are for the human reading a contended claim, not for the
+    // comparison - a pid cannot be compared across one-shot invocations.
+    if (aids_string_builder_append(&sb,
+            "# Claim\n\n- SESSION: " SS_Fmt "\n- OWNER: %s\n- HOST: %s\n- PID: %ld\n- SINCE: %s\n",
+            SS_Arg(session),
+            user != NULL && user[0] != '\0' ? user : "unknown",
+            host, (long)getpid(), stamp) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to build claim payload: %s", aids_failure_reason());
+        aids_string_builder_free(&sb);
+        return_defer(AIDS_ERR);
+    }
+    aids_string_builder_to_slice(&sb, out);
+
+defer:
+    if (session.str != NULL) {
+        AIDS_FREE(session.str);
+    }
+    return result;
+}
+
+// True when <claim> belongs to a session other than this one. A claim with no
+// SESSION field at all counts as someone else's: an unattributable claim is
+// exactly the case `--force` exists for, and guessing it is ours would let a
+// corrupt file silently unblock the guard.
+static boolean claim_held_by_other_session(const Claim *claim) {
+    Aids_String_Slice mine = {0};
+    if (claim->session.len == 0) {
+        return true;
+    }
+    if (claim_session_id(&mine) != AIDS_OK) {
+        return true;
+    }
+    boolean other = aids_string_slice_compare(&claim->session, &mine) != 0;
+    AIDS_FREE(mine.str);
+    return other;
+}
+
+typedef enum {
+    Claim_Result_TAKEN,      // this process now owns the claim
+    Claim_Result_CONTENDED,  // someone else got there first
+    Claim_Result_ERROR
+} Claim_Result;
+
+// Takes the claim on <huid> with one atomic O_CREAT|O_EXCL open. Everything
+// that could fail before the race - building the payload, creating the claims
+// directory - happens first, so the only thing between the open and the write
+// is the write itself.
+static Claim_Result claim_take(const Aids_String_Slice *tasks_dir, Aids_String_Slice huid) {
+    Aids_String_Slice payload = {0};
+    Aids_String_Slice claims_dir = {0};
+    Claim_Result result = Claim_Result_ERROR;
+    int fd = -1;
+
+    if (claim_payload_build(&payload) != AIDS_OK) {
+        return Claim_Result_ERROR;
+    }
+    if (claims_dir_path_build(tasks_dir, &claims_dir) != AIDS_OK) {
+        goto cleanup;
+    }
+    if (!aids_io_isdir(&claims_dir) && aids_io_mkdir(&claims_dir, true) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to create claims directory '" SS_Fmt "': %s",
+                 SS_Arg(claims_dir), aids_failure_reason());
+        goto cleanup;
+    }
+
+    char path_buffer[PATH_MAX];
+    if (!claim_path_build(tasks_dir, huid, path_buffer, sizeof(path_buffer))) {
+        aids_log(AIDS_ERROR, "Failed to build claim path: path too long");
+        goto cleanup;
+    }
+
+    // The atomic step. O_EXCL makes this the whole race: exactly one caller
+    // gets a descriptor, every other gets EEXIST.
+    fd = open(path_buffer, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    if (fd < 0) {
+        result = (errno == EEXIST) ? Claim_Result_CONTENDED : Claim_Result_ERROR;
+        if (result == Claim_Result_ERROR) {
+            aids_log(AIDS_ERROR, "Failed to create claim '%s': %s", path_buffer, strerror(errno));
+        }
+        goto cleanup;
+    }
+
+    if (write(fd, payload.str, payload.len) != (ssize_t)payload.len) {
+        aids_log(AIDS_ERROR, "Failed to write claim '%s': %s", path_buffer, strerror(errno));
+        close(fd);
+        fd = -1;
+        unlink(path_buffer); // an unattributable claim is worse than none
+        goto cleanup;
+    }
+    result = Claim_Result_TAKEN;
+
+cleanup:
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (payload.str != NULL) {
+        AIDS_FREE(payload.str);
+    }
+    if (claims_dir.str != NULL) {
+        AIDS_FREE(claims_dir.str);
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // flow: the guarded lifecycle. `tatr flow <ID> [--to <STEP>]` is the only
 // writer of STATUS, FLOW STEP and PLAN STATUS - `new` and `edit` cannot set
@@ -4654,6 +5414,7 @@ static void flow_unmet_add_problems(Flow_Unmet *unmet, const Record_Problems *pr
 // Its own sections, its dependencies and its DECISION.md are checked like
 // anyone's.
 static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
+                                     const Task_Graph *graph,
                                      const Aids_String_Slice *huid,
                                      const Task *task,
                                      Aids_String_Slice task_raw,
@@ -4683,6 +5444,13 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
     if (record_gate) {
         Record_Problems problems = {0};
         task_record_problems(task->meta.kind, to, task_raw, &problems);
+        // The task's place in the graph, read from the same loader `check`
+        // reads: a dependency that does not exist must be a refusal, not one
+        // more thing to wait for.
+        const Graph_Node *node = graph != NULL ? task_graph_find(graph, *huid) : NULL;
+        if (node != NULL) {
+            graph_node_problems(graph, node, &problems);
+        }
         flow_unmet_add_problems(unmet, &problems);
 
         // Any SPIKE.md the task carries is held to its schema; only its
@@ -4701,6 +5469,21 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
     }
 
     if (plan_gate) {
+        // A claim is how parallel sessions divide work, so starting a task
+        // another session holds is the exact collision claims exist to
+        // prevent. A claim this process took is not in its own way.
+        if (to == Flow_Step_WORKING) {
+            Claim holder = {0};
+            if (claim_read(tasks_dir, *huid, &holder) && claim_held_by_other_session(&holder)) {
+                flow_unmet_add(unmet, "the task is claimed by session '" SS_Fmt "' ("
+                               SS_Fmt "@" SS_Fmt ", since " SS_Fmt "); set TATR_SESSION to that "
+                               "id if it is yours, or release it with `tatr release " SS_Fmt
+                               " --force` if that session is gone",
+                               SS_Arg(holder.session), SS_Arg(holder.owner),
+                               SS_Arg(holder.host), SS_Arg(holder.since), SS_Arg(*huid));
+            }
+            claim_free(&holder);
+        }
         if (!exempt && task->meta.plan_status != Plan_Status_APPROVED) {
             flow_unmet_add(unmet, "the plan is not approved (PLAN STATUS: " SS_Fmt "); "
                            "walk the plan gate with `tatr flow " SS_Fmt " --to PLANNED` "
@@ -4746,6 +5529,27 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
     }
 
     if (close_gate) {
+        // An Epic's work is its children's: it cannot be done while any of them
+        // is not. A child that was dropped is CLOSED with the reason recorded -
+        // there is no optional-child marker, because leaving one OPEN to mean
+        // "not required" would make this guard unfalsifiable.
+        if (task->meta.kind == Task_Kind_EPIC && graph != NULL) {
+            for (size_t i = 0; i < graph->nodes.count; ++i) {
+                Graph_Node *child = NULL;
+                if (aids_array_get((Aids_Array *)&graph->nodes, i, (void **)&child) != AIDS_OK ||
+                    !child->parsed) {
+                    continue;
+                }
+                if (child->parent.len == 0 ||
+                    aids_string_slice_compare(&child->parent, huid) != 0) {
+                    continue;
+                }
+                if (child->status != Task_Status_CLOSED) {
+                    flow_unmet_add(unmet, "child " SS_Fmt " is not CLOSED (STATUS: " SS_Fmt ")",
+                                   SS_Arg(child->huid), SS_Arg(Task_Status_Strings[child->status]));
+                }
+            }
+        }
         if (!exempt) {
             size_t unchecked = artifact_count_unchecked_steps(task_raw);
             if (unchecked > 0) {
@@ -4787,6 +5591,8 @@ static int main_flow(const Tatr_Context *ctx) {
     Aids_String_Slice task_file_path = {0};
     Aids_String_Slice raw = {0};
     Flow_Unmet unmet = {0};
+    Task_Graph graph = {0};
+    boolean graph_loaded = false;
 
     argparse_parser_init(&parser, "tatr flow", "Move a task to its next flow step", TATR_VERSION);
 
@@ -4854,7 +5660,13 @@ static int main_flow(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
-    flow_check_preconditions(&tasks_dir, &id, &task, raw, from, to, &unmet);
+    task_graph_init(&graph);
+    graph_loaded = true;
+    if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    flow_check_preconditions(&tasks_dir, &graph, &id, &task, raw, from, to, &unmet);
     if (unmet.count > 0) {
         aids_log(AIDS_ERROR, "Refusing to move " SS_Fmt " from " SS_Fmt " to " SS_Fmt
                  ": %zu precondition(s) not met",
@@ -4885,6 +5697,9 @@ static int main_flow(const Tatr_Context *ctx) {
            SS_Arg(Task_Status_Strings[task.meta.status]));
 
 defer:
+    if (graph_loaded) {
+        task_graph_free(&graph);
+    }
     if (task_initialized) {
         task_cleanup(&task);
     }
@@ -4904,11 +5719,6 @@ defer:
 // 0 when clean. Unlike ls, a malformed task is a FINDING here, not an abort:
 // the whole point is to surface broken artifacts.
 // ---------------------------------------------------------------------------
-
-static int string_slice_compare_fn(const void *a, const void *b) {
-    return aids_string_slice_compare((const Aids_String_Slice *)a,
-                                     (const Aids_String_Slice *)b);
-}
 
 static boolean slice_contains_cstr(Aids_String_Slice haystack, const char *needle) {
     unsigned long needle_len = strlen(needle);
@@ -5114,6 +5924,7 @@ static size_t check_decision(Check_Exemptions *ex,
 
 // Lints one task directory. Returns the number of findings printed.
 static size_t check_task(Check_Exemptions *ex,
+                         const Task_Graph *graph,
                          const Aids_String_Slice *tasks_dir,
                          const Aids_String_Slice *huid) {
     size_t findings = 0;
@@ -5154,6 +5965,17 @@ static size_t check_task(Check_Exemptions *ex,
         Record_Problems problems = {0};
         task_record_problems(task.meta.kind, task.meta.flow_step, raw, &problems);
         findings += check_report_problems(ex, huid, &problems);
+    }
+
+    // The task's place in the graph: PARENT and DEPENDS ON must resolve, not
+    // repeat, not name the task itself, and not form a cycle.
+    if (graph != NULL) {
+        const Graph_Node *node = task_graph_find(graph, *huid);
+        if (node != NULL) {
+            Record_Problems problems = {0};
+            graph_node_problems(graph, node, &problems);
+            findings += check_report_problems(ex, huid, &problems);
+        }
     }
 
     // A SPIKE task's research lives in its SPIKE.md sibling; without one the
@@ -5349,6 +6171,8 @@ static int main_check(const Tatr_Context *ctx) {
     boolean project_dirs_initialized = false;
     size_t findings = 0;
     Check_Exemptions exemptions = {0};
+    Task_Graph graph = {0};
+    boolean graph_loaded = false;
     boolean full_scan = false;
 
     argparse_parser_init(&parser, "tatr check", "Lint task artifacts for process drift", TATR_VERSION);
@@ -5384,7 +6208,12 @@ static int main_check(const Tatr_Context *ctx) {
             return_defer(1);
         }
         check_exemptions_load(&exemptions, &tasks_dir);
-        findings += check_task(&exemptions, &tasks_dir, &id);
+        task_graph_init(&graph);
+        graph_loaded = true;
+        if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
+            return_defer(1);
+        }
+        findings += check_task(&exemptions, &graph, &tasks_dir, &id);
     } else {
         full_scan = true;
         aids_array_init(&project_dirs, sizeof(Aids_String_Slice));
@@ -5406,6 +6235,14 @@ static int main_check(const Tatr_Context *ctx) {
             }
             Aids_String_Slice tasks_path = aids_string_slice_from_cstr(tasks_path_buffer);
             check_exemptions_load(&exemptions, &tasks_path);
+            if (graph_loaded) {
+                task_graph_free(&graph);
+            }
+            task_graph_init(&graph);
+            graph_loaded = true;
+            if (task_graph_load(&tasks_path, &graph) != AIDS_OK) {
+                return_defer(1);
+            }
             Aids_Array entries = {0};
             aids_array_init(&entries, sizeof(Aids_String_Slice));
             if (aids_io_listdir(&tasks_path, &entries) != AIDS_OK) {
@@ -5422,7 +6259,7 @@ static int main_check(const Tatr_Context *ctx) {
                 if (!ishuid(huid_entry)) {
                     continue;
                 }
-                findings += check_task(&exemptions, &tasks_path, huid_entry);
+                findings += check_task(&exemptions, &graph, &tasks_path, huid_entry);
             }
             cleanup_string_slice_array(&entries);
         }
@@ -5444,6 +6281,9 @@ static int main_check(const Tatr_Context *ctx) {
     }
 
 defer:
+    if (graph_loaded) {
+        task_graph_free(&graph);
+    }
     check_exemptions_free(&exemptions);
     if (tasks_dir.str != NULL) {
         AIDS_FREE(tasks_dir.str);
@@ -5853,6 +6693,583 @@ defer:
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// claim / release / claims: the parallel-session coordination verbs.
+// ---------------------------------------------------------------------------
+
+static int main_claim(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Claim existing = {0};
+
+    argparse_parser_init(&parser, "tatr claim", "Claim a task for this session", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    switch (claim_take(&tasks_dir, id)) {
+    case Claim_Result_TAKEN:
+        printf("Claimed " SS_Fmt "\n", SS_Arg(id));
+        break;
+    case Claim_Result_CONTENDED:
+        // Naming the holder is the whole point: a contended claim is a
+        // question about who, not a failure to report.
+        if (claim_read(&tasks_dir, id, &existing) && existing.session.len > 0) {
+            aids_log(AIDS_ERROR, "Task " SS_Fmt " is already claimed by session '" SS_Fmt "' ("
+                     SS_Fmt "@" SS_Fmt ", since " SS_Fmt ")",
+                     SS_Arg(id), SS_Arg(existing.session), SS_Arg(existing.owner),
+                     SS_Arg(existing.host), SS_Arg(existing.since));
+        } else {
+            aids_log(AIDS_ERROR, "Task " SS_Fmt " is already claimed", SS_Arg(id));
+        }
+        fprintf(stderr, "  if that session is gone, recover it with "
+                "`tatr release " SS_Fmt " --force`\n", SS_Arg(id));
+        return_defer(1);
+    case Claim_Result_ERROR:
+        return_defer(1);
+    }
+
+defer:
+    claim_free(&existing);
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+static int main_release(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Claim existing = {0};
+
+    argparse_parser_init(&parser, "tatr release", "Release a claim on a task", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'F',
+        .long_name = "force",
+        .description = "Release a claim held by another session (recovers a stale claim)",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    if (!claim_read(&tasks_dir, id, &existing)) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is not claimed", SS_Arg(id));
+        return_defer(1);
+    }
+
+    // Releasing someone else's claim is a deliberate recovery, never a
+    // side effect: tatr cannot tell a dead session from a slow one, so it
+    // refuses to guess and makes the human say so.
+    boolean force = argparse_get_flag(&parser, "force");
+    if (!force && claim_held_by_other_session(&existing)) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is claimed by session '" SS_Fmt "' ("
+                 SS_Fmt "@" SS_Fmt ", since " SS_Fmt "), not by this one",
+                 SS_Arg(id), SS_Arg(existing.session), SS_Arg(existing.owner),
+                 SS_Arg(existing.host), SS_Arg(existing.since));
+        fprintf(stderr, "  set TATR_SESSION to that id if it is yours, "
+                "or recover the claim with --force if that session is gone\n");
+        return_defer(1);
+    }
+
+    char path_buffer[PATH_MAX];
+    if (!claim_path_build(&tasks_dir, id, path_buffer, sizeof(path_buffer))) {
+        aids_log(AIDS_ERROR, "Failed to build claim path: path too long");
+        return_defer(1);
+    }
+    // Re-read immediately before unlinking. This narrows, but cannot close, the
+    // window in which the claim we decided about was released and re-taken by
+    // another session: POSIX has no "unlink this exact file" primitive to hold
+    // it open across. A `--force` release is deliberate anyway, and a
+    // same-session one is racing only itself.
+    if (!force) {
+        Claim recheck = {0};
+        boolean still_ours = claim_read(&tasks_dir, id, &recheck) &&
+                             !claim_held_by_other_session(&recheck);
+        claim_free(&recheck);
+        if (!still_ours) {
+            aids_log(AIDS_ERROR, "Task " SS_Fmt " changed hands while releasing it; nothing was removed",
+                     SS_Arg(id));
+            return_defer(1);
+        }
+    }
+    if (unlink(path_buffer) != 0) {
+        aids_log(AIDS_ERROR, "Failed to remove claim '%s': %s", path_buffer, strerror(errno));
+        return_defer(1);
+    }
+
+    printf("Released " SS_Fmt "\n", SS_Arg(id));
+
+defer:
+    claim_free(&existing);
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+static int main_claims(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice claims_dir = {0};
+    Aids_Array entries = {0};
+    boolean entries_initialized = false;
+
+    argparse_parser_init(&parser, "tatr claims", "List the claims in this tasks directory", TATR_VERSION);
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    if (tasks_dir_path_build(&ctx->cwd, &tasks_dir) != AIDS_OK) {
+        return_defer(1);
+    }
+    if (claims_dir_path_build(&tasks_dir, &claims_dir) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    // The directory is named on stderr, not stdout: a claim is scoped to one
+    // tasks dir, and a caller reading the list needs to know WHICH - but the
+    // machine-readable rows stay alone on stdout.
+    fprintf(stderr, "claims in " SS_Fmt "\n", SS_Arg(claims_dir));
+
+    if (!aids_io_isdir(&claims_dir)) {
+        return_defer(0); // no claims directory means no claims
+    }
+
+    aids_array_init(&entries, sizeof(Aids_String_Slice));
+    entries_initialized = true;
+    if (aids_io_listdir(&claims_dir, &entries) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list claims directory: %s", aids_failure_reason());
+        return_defer(1);
+    }
+    aids_array_sort(&entries, string_slice_compare_fn);
+
+    for (size_t i = 0; i < entries.count; ++i) {
+        Aids_String_Slice *name = NULL;
+        if (aids_array_get(&entries, i, (void **)&name) != AIDS_OK || !ishuid(name)) {
+            continue;
+        }
+        Claim claim = {0};
+        if (!claim_read(&tasks_dir, *name, &claim)) {
+            continue;
+        }
+        printf(SS_Fmt "\t" SS_Fmt "\t" SS_Fmt "@" SS_Fmt "\t" SS_Fmt "\n",
+               SS_Arg(*name), SS_Arg(claim.session), SS_Arg(claim.owner),
+               SS_Arg(claim.host), SS_Arg(claim.since));
+        claim_free(&claim);
+    }
+
+defer:
+    if (entries_initialized) {
+        cleanup_string_slice_array(&entries);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (claims_dir.str != NULL) {
+        AIDS_FREE(claims_dir.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// frontier: the open work under an Epic, at a glance. Prints one row per child,
+// never a task body - the point is to decide what to pick up without loading
+// the whole map. Deterministic: READY before BLOCKED before CLAIMED, then
+// priority descending, then ID ascending.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    Frontier_State_READY,
+    Frontier_State_BLOCKED,
+    Frontier_State_CLAIMED
+} Frontier_State;
+
+static const char *FRONTIER_STATE_NAMES[] = {
+    [Frontier_State_READY] = "READY",
+    [Frontier_State_BLOCKED] = "BLOCKED",
+    [Frontier_State_CLAIMED] = "CLAIMED"
+};
+
+typedef struct {
+    const Graph_Node *node;
+    Frontier_State state;
+} Frontier_Row;
+
+static int frontier_compare(const void *a, const void *b) {
+    const Frontier_Row *ra = (const Frontier_Row *)a;
+    const Frontier_Row *rb = (const Frontier_Row *)b;
+    if (ra->state != rb->state) {
+        return ra->state < rb->state ? -1 : 1;
+    }
+    if (ra->node->priority != rb->node->priority) {
+        return ra->node->priority > rb->node->priority ? -1 : 1; // higher first
+    }
+    return aids_string_slice_compare(&ra->node->huid, &rb->node->huid);
+}
+
+static int main_frontier(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Task_Graph graph = {0};
+    boolean graph_loaded = false;
+    Aids_Array rows = {0};
+    boolean rows_initialized = false;
+
+    argparse_parser_init(&parser, "tatr frontier", "Show the open work under an Epic", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Epic task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_graph_init(&graph);
+    graph_loaded = true;
+    if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    Graph_Node *epic = task_graph_find(&graph, id);
+    if (epic == NULL || !epic->parsed) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " could not be read", SS_Arg(id));
+        return_defer(1);
+    }
+    if (epic->kind != Task_Kind_EPIC) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is KIND: " SS_Fmt ", not EPIC: a frontier is the open work under a container",
+                 SS_Arg(id), SS_Arg(Task_Kind_Strings[epic->kind]));
+        return_defer(1);
+    }
+
+    aids_array_init(&rows, sizeof(Frontier_Row));
+    rows_initialized = true;
+
+    for (size_t i = 0; i < graph.nodes.count; ++i) {
+        Graph_Node *node = NULL;
+        if (aids_array_get(&graph.nodes, i, (void **)&node) != AIDS_OK || !node->parsed) {
+            continue;
+        }
+        if (node->parent.len == 0 || aids_string_slice_compare(&node->parent, &id) != 0) {
+            continue;
+        }
+        if (node->status == Task_Status_CLOSED) {
+            continue; // the frontier is OPEN work
+        }
+
+        Frontier_State state = Frontier_State_READY;
+        for (size_t d = 0; d < node->depends_on.count; ++d) {
+            Aids_String_Slice *dep = NULL;
+            if (aids_array_get(&node->depends_on, d, (void **)&dep) != AIDS_OK) {
+                continue;
+            }
+            Graph_Node *dep_node = task_graph_find(&graph, *dep);
+            // An unresolvable or unreadable dependency blocks: it cannot be
+            // shown to be CLOSED, and check reports the dangling edge itself.
+            if (dep_node == NULL || !dep_node->parsed || dep_node->status != Task_Status_CLOSED) {
+                state = Frontier_State_BLOCKED;
+                break;
+            }
+        }
+        // A claim outranks readiness in the display: work someone already holds
+        // is not work to pick up, whether or not its blockers cleared.
+        if (task_is_claimed(&tasks_dir, node->huid)) {
+            state = Frontier_State_CLAIMED;
+        }
+
+        Frontier_Row row = { .node = node, .state = state };
+        if (aids_array_append(&rows, &row) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to append frontier row: %s", aids_failure_reason());
+            return_defer(1);
+        }
+    }
+
+    aids_array_sort(&rows, frontier_compare);
+
+    for (size_t i = 0; i < rows.count; ++i) {
+        Frontier_Row *row = NULL;
+        if (aids_array_get(&rows, i, (void **)&row) != AIDS_OK) {
+            continue;
+        }
+        printf("%s\t" SS_Fmt "\tp%u\t" SS_Fmt "\t" SS_Fmt,
+               FRONTIER_STATE_NAMES[row->state], SS_Arg(row->node->huid),
+               row->node->priority, SS_Arg(Flow_Step_Strings[row->node->flow_step]),
+               SS_Arg(row->node->title));
+        if (row->state == Frontier_State_CLAIMED) {
+            // Naming the holder is what makes a CLAIMED row actionable: your
+            // own claim is work you already picked up, someone else's is not
+            // yours to take.
+            Claim holder = {0};
+            if (claim_read(&tasks_dir, row->node->huid, &holder)) {
+                Aids_String_Slice who = holder.session.len > 0
+                    ? holder.session
+                    : aids_string_slice_from_cstr("(unattributed)");
+                printf("\tclaimed-by=" SS_Fmt, SS_Arg(who));
+            }
+            claim_free(&holder);
+        }
+        if (row->state == Frontier_State_BLOCKED) {
+            // The blockers are the actionable part of a BLOCKED row: they name
+            // what to finish first.
+            printf("\tblocked-by=");
+            boolean first = true;
+            for (size_t d = 0; d < row->node->depends_on.count; ++d) {
+                Aids_String_Slice *dep = NULL;
+                if (aids_array_get((Aids_Array *)&row->node->depends_on, d, (void **)&dep) != AIDS_OK) {
+                    continue;
+                }
+                Graph_Node *dep_node = task_graph_find(&graph, *dep);
+                if (dep_node != NULL && dep_node->parsed && dep_node->status == Task_Status_CLOSED) {
+                    continue;
+                }
+                printf("%s" SS_Fmt, first ? "" : ",", SS_Arg(*dep));
+                first = false;
+            }
+        }
+        printf("\n");
+    }
+
+defer:
+    if (rows_initialized) {
+        aids_array_free(&rows);
+    }
+    if (graph_loaded) {
+        task_graph_free(&graph);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// context: the minimal artifact path set a flow phase needs. Paths only, never
+// contents - a caller reads what it decides to read, and a phase that owns a
+// record it has not written yet still needs the path to create it.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    Phase_UNDERSTAND,
+    Phase_PLAN,
+    Phase_WORK,
+    Phase_REVIEW,
+    Phase_COMPOUND,
+    Phase_RESUME,
+    Phase_LANDING
+} Phase;
+
+static Aids_String_Slice Phase_Strings[] = {
+    [Phase_UNDERSTAND] = (Aids_String_Slice) { .str = (unsigned char *)"understand", .len = 10 },
+    [Phase_PLAN] = (Aids_String_Slice) { .str = (unsigned char *)"plan", .len = 4 },
+    [Phase_WORK] = (Aids_String_Slice) { .str = (unsigned char *)"work", .len = 4 },
+    [Phase_REVIEW] = (Aids_String_Slice) { .str = (unsigned char *)"review", .len = 6 },
+    [Phase_COMPOUND] = (Aids_String_Slice) { .str = (unsigned char *)"compound", .len = 8 },
+    [Phase_RESUME] = (Aids_String_Slice) { .str = (unsigned char *)"resume", .len = 6 },
+    [Phase_LANDING] = (Aids_String_Slice) { .str = (unsigned char *)"landing", .len = 7 }
+};
+
+#define PHASE_VALUES_CSTR "understand, plan, work, review, compound, resume or landing"
+
+// The record kinds each phase owns, terminated by -1. Derived from what the
+// flow skills actually read and write at each step: understanding reads the
+// research and the decision, planning writes the decision, work reads the
+// review it must answer, compound writes the retro, and landing needs the
+// records that go into the commit. `resume` is the one phase that wants
+// everything, because it has no idea where it is picking up from.
+static const int *phase_record_kinds(Phase phase) {
+    static const int understand[] = {Record_Kind_TASK, Record_Kind_SPIKE, Record_Kind_DECISION, -1};
+    static const int plan[]       = {Record_Kind_TASK, Record_Kind_SPIKE, Record_Kind_DECISION, -1};
+    static const int work[]       = {Record_Kind_TASK, Record_Kind_DECISION, Record_Kind_REVIEW, -1};
+    static const int review[]     = {Record_Kind_TASK, Record_Kind_REVIEW, -1};
+    static const int compound[]   = {Record_Kind_TASK, Record_Kind_REVIEW, Record_Kind_RETRO, -1};
+    static const int resume[]     = {Record_Kind_TASK, Record_Kind_SPIKE, Record_Kind_DECISION,
+                                     Record_Kind_REVIEW, Record_Kind_RETRO, -1};
+    static const int landing[]    = {Record_Kind_TASK, Record_Kind_REVIEW, Record_Kind_RETRO, -1};
+    switch (phase) {
+    case Phase_UNDERSTAND: return understand;
+    case Phase_PLAN:       return plan;
+    case Phase_WORK:       return work;
+    case Phase_REVIEW:     return review;
+    case Phase_COMPOUND:   return compound;
+    case Phase_RESUME:     return resume;
+    case Phase_LANDING:    return landing;
+    }
+    return resume; // unreachable: the enum is closed
+}
+
+// The understand phase is the one that needs to look OUTWARD: a Story cannot be
+// understood without the Epic that gave it its shape.
+static boolean phase_includes_parent(Phase phase) {
+    return phase == Phase_UNDERSTAND || phase == Phase_PLAN || phase == Phase_RESUME;
+}
+
+static int main_context(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+
+    argparse_parser_init(&parser, "tatr context",
+                         "Show the artifact paths a flow phase needs", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'P',
+        .long_name = "phase",
+        .description = "Flow phase (" PHASE_VALUES_CSTR "; default: resume)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    Phase phase = Phase_RESUME;
+    char *phase_str = argparse_get_value(&parser, "phase");
+    if (phase_str != NULL) {
+        Aids_String_Slice phase_slice = aids_string_slice_from_cstr(phase_str);
+        int value = 0;
+        if (!enum_from_string(&phase_slice, Phase_Strings, ENUM_COUNT(Phase_Strings), &value)) {
+            aids_log(AIDS_ERROR, "Invalid phase '%s': expected " PHASE_VALUES_CSTR, phase_str);
+            return_defer(1);
+        }
+        phase = (Phase)value;
+    }
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+    if (task_load(&task_file_path, &task) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    const int *kinds = phase_record_kinds(phase);
+    for (size_t i = 0; kinds[i] >= 0; ++i) {
+        const Record_Schema *schema = &RECORD_SCHEMAS[kinds[i]];
+        printf(SS_Fmt "/" SS_Fmt "/%s\t%s\n", SS_Arg(tasks_dir), SS_Arg(id), schema->file_name,
+               task_sibling_exists(&tasks_dir, &id, schema->file_name) ? "present" : "missing");
+    }
+
+    if (phase_includes_parent(phase) && task.meta.parent.len > 0) {
+        printf(SS_Fmt "/" SS_Fmt "/%s\t%s\n", SS_Arg(tasks_dir), SS_Arg(task.meta.parent),
+               TASK_FILE_NAME_CSTR,
+               task_sibling_exists(&tasks_dir, &task.meta.parent, TASK_FILE_NAME_CSTR)
+                   ? "present" : "missing");
+    }
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
 static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "Usage: %s [-r ROOT] <subcommand> [options]\n", parser->name);
     fprintf(stderr, "\n");
@@ -5870,6 +7287,11 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  rm           Remove a task by ID\n");
     fprintf(stderr, "  scaffold     Create a missing sibling record from the schema\n");
     fprintf(stderr, "  proofs       List the Definition of Done proofs of a task\n");
+    fprintf(stderr, "  frontier     Show the open work under an Epic\n");
+    fprintf(stderr, "  context      Show the artifact paths a flow phase needs\n");
+    fprintf(stderr, "  claim        Claim a task for this session\n");
+    fprintf(stderr, "  release      Release a claim on a task\n");
+    fprintf(stderr, "  claims       List the claims in this tasks directory\n");
     fprintf(stderr, "  check        Lint task artifacts for process drift\n");
     fprintf(stderr, "\n");
 }
@@ -5962,6 +7384,21 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "proofs") == 0) {
         result = main_proofs(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "frontier") == 0) {
+        result = main_frontier(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "context") == 0) {
+        result = main_context(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "claim") == 0) {
+        result = main_claim(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "release") == 0) {
+        result = main_release(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "claims") == 0) {
+        result = main_claims(&ctx);
         return_defer(result);
     } else if (strcmp(subcommand, "check") == 0) {
         result = main_check(&ctx);

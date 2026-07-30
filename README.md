@@ -22,6 +22,9 @@ primarily a toy project inspired by Tsoding's streams.
 - **Guarded lifecycle**: `tatr flow` is the only writer of the workflow fields, and every transition is checked before it is written
 - **One record schema**: `tatr scaffold` writes the sibling records (SPIKE, DECISION, REVIEW, RETRO) from the same in-code table `tatr check` validates them against
 - **Structured DoD proofs**: `tatr proofs` prints each Definition of Done proof as data - tatr never executes any of it
+- **Epic graph**: `PARENT` and `DEPENDS ON` are validated as a graph - dangling links, duplicates, self-links and cycles are findings, not silent waits
+- **Parallel sessions**: `tatr frontier` shows the open work under an Epic, and `tatr claim` divides it between sessions with an atomic filesystem claim
+- **Phase context**: `tatr context <id> --phase <phase>` prints only the artifact paths one flow phase needs
 - **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
 - **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
 - **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
@@ -125,6 +128,24 @@ tatr -r /path/to/project new "Task title"
 `edit` takes the same options and replaces the field it is given. On `edit`, an
 empty value clears an optional relationship field: `tatr edit <id> -P ""` drops
 the parent and `-d ""` drops every dependency.
+
+Relationships are checked before the record is written, so `new` cannot create a
+task that `tatr check` would flag the moment it exists: `-k STORY` requires a
+`-P`, and every `-P`/`-d` must name a task that exists, with `-P` naming a
+`KIND: EPIC`. A refused create creates nothing at all.
+
+```console
+$ tatr new "Add the frontier view" -k STORY
+ERROR: A KIND: STORY belongs to an Epic: pass -P/--parent <epic id>
+
+$ tatr new "Add the frontier view" -P 20260101-999999
+ERROR: Parent '20260101-999999' does not exist
+```
+
+`edit` applies the same rule to the references it is asked to set. An edit that
+touches something else is not blocked by a dangling edge it did not create - a
+reference can still break when its referent is removed, and `tatr check` is what
+reports that.
 
 A task is always born `- STATUS: OPEN`, `- FLOW STEP: BACKLOG`,
 `- PLAN STATUS: DRAFT`. Those three workflow fields cannot be set here: they
@@ -404,6 +425,17 @@ tatr check --ledger LESSONS.md   # also lint a lessons ledger
 - `nonreciprocal-supersede`: a supersede link resolves in only one direction -
   A says `SUPERSEDED by B` but B carries no `- Supersedes: A` line, or the
   reverse.
+- `missing-parent` / `missing-dependency`: a `PARENT` or `DEPENDS ON` reference
+  names a task that does not exist. A dangling dependency is a broken graph, not
+  a blocker to wait for.
+- `self-parent` / `self-dependency`: a task names itself as its own parent or
+  its own dependency.
+- `duplicate-dependency`: the same ID appears twice in one `DEPENDS ON` list.
+- `parent-cycle` / `dependency-cycle`: following `PARENT` or `DEPENDS ON` from
+  the task returns to it. Every member of a cycle is reported; a task merely
+  downstream of one is not.
+- `bad-epic-relationship`: a `PARENT` that does not name a `KIND: EPIC` record,
+  or a `KIND: STORY` with no parent at all.
 - `unused-exemption`: an entry in `tasks/EXEMPTIONS.md` never fired on a full
   scan (reported against the task it names).
 - `closed-unchecked`: a CLOSED task still has unchecked `- [ ]` items under
@@ -453,10 +485,13 @@ sections are kind-specific: `TASK`/`STORY` owe `## Steps` and
 
 The same rules gate the lifecycle. `tatr flow` reads them through the same
 functions `check` does, so a transition can never mint a record the lint would
-immediately flag: `PLANNING -> PLANNED` requires the plan sections and their
-proofs, `REVIEWING -> COMPOUNDING` requires a schema-clean REVIEW.md, and
-`COMPOUNDING -> DONE` requires all of that plus a schema-clean RETRO.md and
-DECISION.md. A refusal names the same rule slug the lint would print:
+immediately flag: `PLANNING -> PLANNED` requires the plan sections, their
+proofs and a well-formed place in the graph, `REVIEWING -> COMPOUNDING`
+requires a schema-clean REVIEW.md, and `COMPOUNDING -> DONE` requires all of
+that plus a schema-clean RETRO.md and DECISION.md. Two guards are the graph's
+alone: a task another session has claimed cannot be started, and a
+`KIND: EPIC` cannot close while any of its children is not CLOSED. A refusal
+names the same rule slug the lint would print:
 
 ```console
 $ tatr flow 20260101-100000 --to PLANNED
@@ -547,6 +582,122 @@ tab-separated fields.
 
 **Options:**
 - `-k, --kind <KIND>`: only list proofs of one kind (`test`, `cmd` or `manual`)
+
+### Working an Epic in Parallel
+
+`tatr frontier <epic-id>` prints the open work under an Epic, one row per child
+and never a task body - the point is to decide what to pick up without loading
+the whole map:
+
+```console
+$ tatr frontier 20260101-410000
+READY	20260101-410005	p90	PLANNED	Ready, high priority
+READY	20260101-410004	p10	PLANNED	Ready, low priority
+BLOCKED	20260101-410003	p80	PLANNED	Blocked on one of two	blocked-by=20260101-410005
+CLAIMED	20260101-410002	p70	PLANNED	Someone has it
+```
+
+The order is deterministic: `READY` before `BLOCKED` before `CLAIMED`, then
+priority descending, then ID ascending. `blocked-by` lists only the
+dependencies that are not yet CLOSED. A CLOSED child is not open work and does
+not appear; neither does a task that is not a child of this Epic.
+
+`tatr claim <id>` takes a task for the current session, `tatr release <id>`
+gives it back, and `tatr claims` lists what is held:
+
+```console
+$ tatr claim 20260101-410002
+Claimed 20260101-410002
+
+$ tatr claims
+claims in /repo/tasks/.claims
+20260101-410002	/repo	alex@nixos	20260730-214809
+```
+
+A claim is a file created with `O_CREAT|O_EXCL` under `tasks/.claims/<id>`,
+which the kernel makes atomic: of any number of racing sessions exactly one
+wins and the rest are told who holds it. The winner writes its identity in the
+same call that wins the race, so a claim is never anonymous. `tatr flow <id>
+--to WORKING` refuses to start a task another session holds.
+
+Two environment variables control who holds a claim and where claims live:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TATR_SESSION` | the working directory | The identity ownership is decided on. |
+| `TATR_CLAIMS_DIR` | `<tasks dir>/.claims` | Where claims are read and written. |
+
+`TATR_SESSION` exists because tatr is a one-shot CLI: the process that ran
+`tatr claim` has exited by the time anything else runs, so ownership **cannot**
+be a process id. It is whatever names the session across invocations. The
+default - the working directory - distinguishes parallel sessions that each
+work in their own tree; set it explicitly when a session moves around.
+
+`TATR_CLAIMS_DIR` exists because separate worktrees have separate `tasks/`
+trees, so a claim written in one would be invisible in the other. Point both
+sessions at one claims directory and the guard works across trees, while each
+session still edits its own checkout:
+
+```bash
+export TATR_CLAIMS_DIR=/path/to/main/checkout/tasks/.claims
+export TATR_SESSION=agent-a
+
+tatr claim 20260101-410002                 # taken in the shared claims dir
+tatr flow 20260101-410002 --to WORKING     # edits THIS worktree's TASK.md
+```
+
+Another session with a different `TATR_SESSION` is then refused that start:
+
+```console
+$ TATR_SESSION=agent-b tatr flow 20260101-410002 --to WORKING
+ERROR: Refusing to move 20260101-410002 from PLANNED to WORKING: 1 precondition(s) not met
+  - the task is claimed by session 'agent-a' (alex@nixos, since 20260730-222012); release it with `tatr release 20260101-410002 --force` if that session is gone
+```
+
+There is no timeout and nothing steals a claim automatically: "the owner is
+slow" and "the owner is dead" are indistinguishable to tatr. A session releases
+its own claim with no flag; recovering someone else's is deliberate:
+
+```bash
+tatr release 20260101-410002            # your own claim
+tatr release 20260101-410002 --force    # a session that is gone
+```
+
+`tasks/.claims/` is machine-local state rather than versioned history, so it
+belongs in `.gitignore` (this repository ignores it).
+
+**Options:**
+- `release -F, --force`: release a claim held by another session
+
+### Listing a Phase's Context
+
+`tatr context <id> --phase <phase>` prints the artifact paths one flow phase
+needs, and nothing else - paths only, never contents:
+
+```console
+$ tatr context 20260101-410003 --phase review
+/repo/tasks/20260101-410003/TASK.md	present
+/repo/tasks/20260101-410003/REVIEW.md	missing
+
+$ tatr context 20260101-410003 --phase understand
+/repo/tasks/20260101-410003/TASK.md	present
+/repo/tasks/20260101-410003/SPIKE.md	missing
+/repo/tasks/20260101-410003/DECISION.md	missing
+/repo/tasks/20260101-410000/TASK.md	present
+```
+
+Phases are `understand`, `plan`, `work`, `review`, `compound`, `resume` and
+`landing` (default `resume`, which lists everything because it has no idea
+where it is picking up from). `understand`, `plan` and `resume` also list the
+parent Epic's `TASK.md`: a Story cannot be understood without the container
+that gave it its shape.
+
+A record the phase owns is listed whether or not it exists yet, because the
+caller needs the path in order to create it - `review` names `REVIEW.md` before
+there is one.
+
+**Options:**
+- `-P, --phase <PHASE>`: the flow phase (default: `resume`)
 
 ### Global Options
 

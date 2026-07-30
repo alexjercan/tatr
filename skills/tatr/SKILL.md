@@ -23,6 +23,11 @@ tatr flow <id> [-o|--to <STEP>]
 tatr rm <id>
 tatr scaffold <id> [SPIKE|DECISION|REVIEW|RETRO] [-l|--list] [-n|--dry-run]
 tatr proofs <id> [-k|--kind test|cmd|manual]
+tatr frontier <id>
+tatr context <id> [-P|--phase understand|plan|work|review|compound|resume|landing]
+tatr claim <id>
+tatr release <id> [-F|--force]
+tatr claims
 tatr check [<id>] [-L|--ledger <file>]
 ```
 
@@ -38,13 +43,16 @@ tatr check [<id>] [-L|--ledger <file>]
 only by `tatr flow`; `new` and `edit` reject `-s`, `-f` and `-S` with a pointer
 to it.
 
-- `tatr new` creates the task directory and TASK.md, then prints the task ID. Defaults are `OPEN`, priority 0, `KIND: TASK`, `FLOW STEP: BACKLOG`, `PLAN STATUS: DRAFT`, and no relationships. `-b/--body-file <file>` seeds the description body from a file (`-` reads stdin) - prefer it over creating an empty task and editing the file afterwards. If the generated ID already exists (two `new` calls in the same second), tatr fails instead of overwriting; retry after the second changes.
+- `tatr new` creates the task directory and TASK.md, then prints the task ID. Defaults are `OPEN`, priority 0, `KIND: TASK`, `FLOW STEP: BACKLOG`, `PLAN STATUS: DRAFT`, and no relationships. `-b/--body-file <file>` seeds the description body from a file (`-` reads stdin) - prefer it over creating an empty task and editing the file afterwards. If the generated ID already exists (two `new` calls in the same second), tatr fails instead of overwriting; retry after the second changes. Relationships are validated up front: `-k STORY` requires `-P`, and `-P`/`-d` must name tasks that exist, with `-P` naming a `KIND: EPIC`. A refused create creates nothing. `edit` applies the same rule to the references it is asked to set, so an edit that touches something else is not blocked by a dangling edge it did not create.
 - `tatr ls` prints one line per task: `<filepath>: [PRIORITY: N, KIND: K, FLOW STEP: F, TAGS: ...] Title`. `-s/--sort` orders by `created` (default), `priority` (descending), or `title`; `-R` recurses into nested `tasks/` dirs; `-f` filters with the query language below.
 - `tatr show <id>` prints one task's full details: the whole record exactly as it would be written back, with a clickable file path.
 - `tatr edit <id>` updates fields in place without opening an editor. Only passed flags change; the description body is preserved. `-t` and `-d` replace their lists, they do not merge; an empty value (`-P ""`, `-d ""`) clears an optional relationship field. Invalid values are rejected and the file is left untouched.
 - `tatr flow <id>` moves the task one step along the lifecycle, or to `--to <STEP>`. It is the only writer of `STATUS`, `FLOW STEP` and `PLAN STATUS`, and it refuses any transition whose preconditions are unmet, reporting every one of them and leaving TASK.md byte-identical. Those preconditions include the record rules below, read through the same functions `tatr check` uses, so a refusal names the same rule slug and no transition can mint a record the lint would flag: `PLANNING -> PLANNED` owes `## Steps`, `## Definition of Done` and a proof on every DoD item; `REVIEWING -> COMPOUNDING` a schema-clean REVIEW.md; `COMPOUNDING -> DONE` additionally a schema-clean RETRO.md and DECISION.md. `tatr scaffold` writes records that satisfy them. See Lifecycle below.
 - `tatr scaffold <id> <RECORD>` writes a missing sibling record from the schema table in `tatr.c` - the same table `tatr check` validates against, so a scaffolded record passes the lint with its `TODO` placeholders still in place. Prints `<path><TAB><RECORD>`. Kinds are `SPIKE`, `DECISION`, `REVIEW` and `RETRO`; `TASK.md` is `tatr new`'s job. `--list` prints every kind with its path and `present`/`missing`; `--dry-run` prints the path it would write and writes nothing. It refuses to overwrite an existing record, and there is no `--force`: an existing record is edited by hand, in the diff.
 - `tatr proofs <id>` prints each `## Definition of Done` proof as one `<n><TAB><kind><TAB><text>` line, where kind is `test`, `cmd` or `manual`. **Nothing is executed** - a `cmd:` proof's shell text round-trips verbatim, and running it is your decision, in your shell. A whitespace run collapses to a single space only when it holds a newline (a continued bullet's wrap) or a tab (the field separator), so every line is exactly three fields and intra-line spacing survives byte for byte. `-k/--kind` filters to one kind. Use it to get the exact contract to run during `/work` and `/review` instead of re-reading the DoD prose.
+- `tatr frontier <id>` prints the open work under an Epic, one tab-separated row per child and never a task body: `<STATE><TAB><id><TAB>p<priority><TAB><flow step><TAB><title>`, plus `<TAB>blocked-by=<ids>` on a BLOCKED row. STATE is READY, BLOCKED or CLAIMED. The order is deterministic - READY, BLOCKED, CLAIMED, then priority descending, then id ascending - so it is safe to diff between runs. CLOSED children and non-children never appear. Use it to pick up work without reading every task.
+- `tatr context <id> --phase <phase>` prints only the artifact paths that phase needs, as `<path><TAB>present|missing`. Paths only, never contents. Phases: `understand`, `plan`, `work`, `review`, `compound`, `resume` (the default, everything), `landing`. `understand`, `plan` and `resume` also list the parent Epic's TASK.md. A record the phase owns is listed even when missing, because you need the path to create it.
+- `tatr claim <id>` / `tatr release <id>` / `tatr claims` divide work between parallel sessions. A claim is an atomic `O_CREAT|O_EXCL` file; exactly one of any number of racing sessions wins and the losers are told who holds it. `tatr flow <id> --to WORKING` refuses a task another session holds. Ownership is `TATR_SESSION` (default: the working directory), never a pid - tatr is one-shot, so the claiming process is gone before anything reads the claim. `TATR_CLAIMS_DIR` (default `<tasks dir>/.claims`) is where claims live: **set it to one shared directory across parallel worktrees**, or each tree gets its own and the guard can never fire. A session releases its own claim with no flag; `release --force` recovers one from a session that is gone. Nothing expires.
 - `tatr rm <id>` deletes the task's directory after validating the ID and resolving the existing `tasks/<id>/` path.
 - `tatr check` lints task artifacts for process drift. Findings print as `<id>: <rule>: <detail>`, exit 1 on any finding, and exit 0 with no output when clean. There is no `--strict` flag: record-completeness checks are on by default. With `<id>`, it checks one task. With `-L/--ledger <file>`, it also checks the lessons ledger for stalled promotions.
 
@@ -64,6 +72,11 @@ Default `tatr check` rules:
 - `dangling-seeded-task`: a task ID under a `SPIKE.md`'s `## Next steps` has no `TASK.md`.
 - `dangling-decision-task`: a `DECISION.md`'s `- TASK:` pointer is not a task ID, or names a task that does not exist.
 - `nonreciprocal-supersede`: a supersede link resolves one way only - A says `SUPERSEDED by B` but B has no `- Supersedes: A` line, or the reverse.
+- `missing-parent` / `missing-dependency`: a `PARENT` or `DEPENDS ON` reference names a task that does not exist.
+- `self-parent` / `self-dependency`: a task names itself.
+- `duplicate-dependency`: the same ID twice in one `DEPENDS ON` list.
+- `parent-cycle` / `dependency-cycle`: following the links from a task returns to it. Every member of a cycle is reported; a task downstream of one is not.
+- `bad-epic-relationship`: a `PARENT` that is not a `KIND: EPIC`, or a `KIND: STORY` with no parent.
 - `unused-exemption`: an entry in `tasks/EXEMPTIONS.md` never fired on a full scan.
 - `closed-unchecked`: a CLOSED task has unchecked `- [ ]` items under `## Steps`.
 - `closed-missing-review`: a CLOSED task has no `REVIEW.md`.

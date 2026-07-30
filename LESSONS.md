@@ -65,11 +65,22 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `no-outcome-before-the-run` (x1): never write a verdict, count or "confirmed"
   into a record before the thing producing it has run, however certain the
   outcome looks. 20260730-154657
-- `mutation-test-the-new-guard` (x2): delete each new guard one at a time and
-  watch its own test go red - cheap, and it turns "this test would fail without
-  the fix" from an assertion into a check. The mutation must remove the SIDE
-  EFFECT, not just the return value: `0 * report(...)` still prints.
-  20260730-154657, 20260730-154745
+- `identity-must-outlive-the-process` (x1): before comparing an identity, name
+  when each side is WRITTEN - a pid recorded by a one-shot CLI names a process
+  that has already exited, so the claim owner could never start or release its
+  own task. 20260730-154740
+- `test-the-success-path-not-only-the-refusal` (x1): a suite of refusals passes
+  just as happily when nothing works at all; three of this session's four
+  MAJOR-or-worse findings were features whose happy path had no assertion.
+  20260730-154740
+- `two-halves-must-be-run-together` (x1): when a design has a writer and a
+  reader that must agree (claim and guard, lint and lifecycle), the smallest
+  end-to-end scenario exercising BOTH is the evidence - each half working alone
+  is the failure mode. 20260730-154740
+- `a-recursion-bound-is-not-a-complexity-bound` (x1): a depth limit stops
+  infinite recursion, not exponential work; decide whether a graph walk may
+  revisit a node and carry a visited set (12.4s to 0.005s on 78 tasks).
+  20260730-154740
 - `serialize-build-artifact-checks` (x1): do not parallelize verification
   commands that clean or rewrite the same build outputs in one worktree.
   20260728-095149
@@ -98,6 +109,12 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
   its own toolchain). 20260705-172803, 20260709-193044, 20260718-235158, 20260720-220059
 
 ## Pending promotions (3+ occurrences, user decides)
+
+- `mutation-test-the-new-guard` (x3): delete each new guard one at a time and
+  watch its own test go red, BEFORE review - every gap it found this way was
+  cheaper than a review round. The mutation must remove the SIDE EFFECT, not
+  just the return value: `0 * report(...)` still prints.
+  20260730-154657, 20260730-154745, 20260730-154740
 
 - `test-first-for-check-messages` (x3): for a check rule, write the test with
   its exact expected message before the emitting code, so the format is designed
