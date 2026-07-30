@@ -9,6 +9,21 @@
 
 #define TATR_VERSION "0.1.0"
 
+// Format-checks a vararg reporter, so a message built with SS_Fmt but missing
+// its SS_Arg is a compile error rather than a garbage finding. MinGW's default
+// printf archetype is msvcrt's, which does not know %zu; the gnu archetype
+// matches the ANSI stdio the Windows build actually links, and without it
+// every %zu in a checked reporter becomes a warning under `make windows`.
+#if defined(__MINGW_PRINTF_FORMAT)
+#define TATR_PRINTF_FORMAT(fmt_index, first_arg) \
+    __attribute__((format(__MINGW_PRINTF_FORMAT, fmt_index, first_arg)))
+#elif defined(__GNUC__)
+#define TATR_PRINTF_FORMAT(fmt_index, first_arg) \
+    __attribute__((format(printf, fmt_index, first_arg)))
+#else
+#define TATR_PRINTF_FORMAT(fmt_index, first_arg)
+#endif
+
 #define HUID_FORMAT_CSTR "%Y%m%d-%H%M%S"
 #define HUID_LENGTH 16 // "20240630-235959" + null terminator
 
@@ -3495,6 +3510,949 @@ static boolean check_task_is_container(const Task *task) {
 }
 
 // ---------------------------------------------------------------------------
+// Record schemas: the one in-code source for what each sibling record looks
+// like. `tatr scaffold` writes from this table and `tatr check` validates
+// against it, so a format change is one edit and the scaffolder can never emit
+// a record the linter rejects. Skill prose points at the CLI instead of
+// carrying its own copy of the template.
+// ---------------------------------------------------------------------------
+
+#define RECORD_MAX_FIELDS 6
+#define RECORD_MAX_SECTIONS 8
+
+typedef enum {
+    Record_Kind_TASK,
+    Record_Kind_SPIKE,
+    Record_Kind_DECISION,
+    Record_Kind_REVIEW,
+    Record_Kind_RETRO
+} Record_Kind;
+
+typedef struct {
+    const char *name;         // "REVIEW", as written on the command line
+    const char *file_name;    // "REVIEW.md"
+    const char *title_prefix; // the exact "# " line prefix the record opens with
+    // Required "- KEY: " header lines, NULL-terminated. Each must be present
+    // with a non-empty value.
+    const char *fields[RECORD_MAX_FIELDS];
+    // Required "## " headings, NULL-terminated. Each must be present with at
+    // least one non-blank line under it.
+    const char *sections[RECORD_MAX_SECTIONS];
+    // Everything after the header block in a scaffolded record, or NULL when
+    // the sections list generates it. TASK.md alone is not scaffoldable here:
+    // `tatr new` creates it, and it is typed metadata rather than prose.
+    const char *body_template;
+} Record_Schema;
+
+// REVIEW.md's body is round-structured rather than section-structured, so its
+// shape is validated by review_round_problems and scaffolded from this literal.
+#define REVIEW_BODY_TEMPLATE \
+    "## Round 1\n" \
+    "\n" \
+    "- REVIEWER: TODO\n" \
+    "- VERDICT: REQUEST_CHANGES\n" \
+    "\n" \
+    "- [ ] R1.1 (MAJOR) file:line - TODO\n"
+
+static const Record_Schema RECORD_SCHEMAS[] = {
+    [Record_Kind_TASK] = {
+        .name = "TASK",
+        .file_name = TASK_FILE_NAME_CSTR,
+        .title_prefix = "# ",
+        .fields = {NULL},
+        // TASK sections are kind-specific; see task_required_sections.
+        .sections = {NULL},
+        .body_template = NULL,
+    },
+    [Record_Kind_SPIKE] = {
+        .name = "SPIKE",
+        .file_name = "SPIKE.md",
+        .title_prefix = "# Spike: ",
+        .fields = {"- DATE: ", "- STATUS: ", "- TAGS: ", NULL},
+        .sections = {"## Question", "## Context", "## Options considered",
+                     "## Recommendation", "## Open questions", "## Next steps", NULL},
+        .body_template = NULL,
+    },
+    [Record_Kind_DECISION] = {
+        .name = "DECISION",
+        .file_name = "DECISION.md",
+        .title_prefix = "# Decision: ",
+        .fields = {"- DATE: ", "- STATUS: ", "- TASK: ", "- TAGS: ", NULL},
+        .sections = {"## Context", "## Decision", "## Alternatives considered",
+                     "## Consequences", NULL},
+        .body_template = NULL,
+    },
+    [Record_Kind_REVIEW] = {
+        .name = "REVIEW",
+        .file_name = "REVIEW.md",
+        .title_prefix = "# Review: ",
+        .fields = {"- TASK: ", "- BRANCH: ", NULL},
+        .sections = {NULL},
+        .body_template = REVIEW_BODY_TEMPLATE,
+    },
+    [Record_Kind_RETRO] = {
+        .name = "RETRO",
+        .file_name = "RETRO.md",
+        .title_prefix = "# Retro: ",
+        .fields = {"- TASK: ", "- BRANCH: ", "- REVIEW ROUNDS: ", NULL},
+        .sections = {"## What went well", "## What went wrong",
+                     "## What to improve next time", "## Action items", NULL},
+        .body_template = NULL,
+    },
+};
+
+#define RECORD_KIND_COUNT ENUM_COUNT(RECORD_SCHEMAS)
+#define RECORD_VALUES_CSTR "TASK, SPIKE, DECISION, REVIEW or RETRO"
+
+static boolean record_kind_from_string(const Aids_String_Slice *slice, Record_Kind *out) {
+    for (size_t i = 0; i < RECORD_KIND_COUNT; ++i) {
+        Aids_String_Slice name = aids_string_slice_from_cstr((char *)RECORD_SCHEMAS[i].name);
+        if (aids_string_slice_compare(slice, &name) == 0) {
+            *out = (Record_Kind)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The allowed values of a SPIKE.md's "- STATUS: " line, as the spike skill
+// defines them: the exploration either landed on a direction, could not answer
+// its question, or ruled the idea out. There is no fourth answer.
+static Aids_String_Slice Spike_Status_Strings[] = {
+    (Aids_String_Slice) { .str = (unsigned char *)"RECOMMENDED", .len = 11 },
+    (Aids_String_Slice) { .str = (unsigned char *)"INCONCLUSIVE", .len = 12 },
+    (Aids_String_Slice) { .str = (unsigned char *)"DROPPED", .len = 7 }
+};
+
+#define SPIKE_STATUS_VALUES_CSTR "RECOMMENDED, INCONCLUSIVE or DROPPED"
+
+// The allowed values of a REVIEW.md round's "- VERDICT: " line.
+static Aids_String_Slice Verdict_Strings[] = {
+    (Aids_String_Slice) { .str = (unsigned char *)"APPROVE", .len = 7 },
+    (Aids_String_Slice) { .str = (unsigned char *)"REQUEST_CHANGES", .len = 15 }
+};
+
+#define VERDICT_VALUES_CSTR "APPROVE or REQUEST_CHANGES"
+
+// The "## " sections a TASK.md must carry, by kind. An Epic container's record
+// IS its own TASK.md - the done definition and the child queue live there -
+// while a work task carries the Steps and the proofs. A SPIKE task's research
+// lives in its SPIKE.md sibling, so its TASK.md is only asked for a Question.
+static const char *const *task_required_sections(Task_Kind kind) {
+    static const char *work[] = {"## Steps", "## Definition of Done", NULL};
+    static const char *epic[] = {"## Done Means", "## Child Tasks", NULL};
+    static const char *spike[] = {"## Question", NULL};
+    switch (kind) {
+    case Task_Kind_EPIC:  return epic;
+    case Task_Kind_SPIKE: return spike;
+    case Task_Kind_TASK:
+    case Task_Kind_STORY: return work;
+    }
+    return work; // unreachable: the enum is closed
+}
+
+// The value of a "- KEY: " line, with any inline comment stripped and trimmed.
+// First occurrence wins, matching artifact_decision_status. Returns false when
+// the record carries no such line at all; an empty value returns true with a
+// zero-length slice, so the caller can tell "absent" from "blank".
+static boolean artifact_field(Aids_String_Slice doc, const char *key,
+                              Aids_String_Slice *out) {
+    Aids_String_Slice format = aids_string_slice_from_cstr((char *)key);
+    Aids_String_Slice key_only = format;
+    key_only.len -= 1; // the trailing space is optional when the value is empty
+    Aids_String_Slice scan = doc;
+    Aids_String_Slice line = {0};
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, key_only)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, key_only.len);
+        Aids_String_Slice value = artifact_strip_inline_comment(l);
+        aids_string_slice_trim(&value);
+        *out = value;
+        return true;
+    }
+    return false;
+}
+
+// Whether a "## <heading>" section is present, and whether it carries at least
+// one non-blank line before the next "## " heading. The heading match is exact
+// (after trimming the right edge), so "## Steps taken later" is a different
+// section - the same rule artifact_count_unchecked_steps already follows.
+static void artifact_section_state(Aids_String_Slice doc, const char *heading,
+                                   boolean *present, boolean *nonempty) {
+    Aids_String_Slice want = aids_string_slice_from_cstr((char *)heading);
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    Aids_String_Slice scan = doc;
+    Aids_String_Slice line = {0};
+    boolean inside = false;
+    *present = false;
+    *nonempty = false;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        aids_string_slice_trim_right(&l);
+        if (aids_string_slice_starts_with(&l, any_heading)) {
+            if (inside) {
+                return; // the section ended; whatever we saw is the answer
+            }
+            inside = aids_string_slice_compare(&l, &want) == 0;
+            if (inside) {
+                *present = true;
+            }
+            continue;
+        }
+        if (inside && l.len > 0) {
+            *nonempty = true;
+        }
+    }
+}
+
+// A REVIEW.md finding line, parsed strictly: "- [ ] R<round>.<index> (SEV) ...".
+// The tolerant artifact_parse_finding_line above decides whether a line IS a
+// finding; this one decides whether its ID is well-formed, so a malformed ID is
+// reported rather than silently skipped.
+typedef struct {
+    unsigned long round;
+    unsigned long index;
+} Artifact_Finding_Id;
+
+static boolean artifact_parse_finding_id(Aids_String_Slice line,
+                                         Artifact_Finding_Id *out) {
+    Aids_String_Slice l = line;
+    aids_string_slice_trim(&l);
+    Aids_String_Slice box = aids_string_slice_from_cstr("- [ ] R");
+    if (l.len < box.len) {
+        return false;
+    }
+    aids_string_slice_skip(&l, box.len); // "- [x] R" has the same length
+    unsigned long i = 0;
+    unsigned long round = 0;
+    while (i < l.len && isdigit(l.str[i])) {
+        round = round * 10 + (unsigned long)(l.str[i] - '0');
+        i++;
+    }
+    if (i == 0 || i >= l.len || l.str[i] != '.') {
+        return false;
+    }
+    i++;
+    unsigned long digits = 0;
+    unsigned long index = 0;
+    while (i < l.len && isdigit(l.str[i])) {
+        index = index * 10 + (unsigned long)(l.str[i] - '0');
+        i++;
+        digits++;
+    }
+    if (digits == 0) {
+        return false;
+    }
+    out->round = round;
+    out->index = index;
+    return true;
+}
+
+// The proof kinds a "## Definition of Done" item may carry. tatr parses them
+// and prints them; it never runs them. A `cmd:` proof is shell text that
+// round-trips verbatim, and the decision to execute it belongs to the caller's
+// shell, where the user can see the command.
+typedef enum {
+    Proof_Kind_TEST,
+    Proof_Kind_CMD,
+    Proof_Kind_MANUAL
+} Proof_Kind;
+
+static const char *PROOF_KIND_NAMES[] = {
+    [Proof_Kind_TEST] = "test",
+    [Proof_Kind_CMD] = "cmd",
+    [Proof_Kind_MANUAL] = "manual"
+};
+
+#define PROOF_MARKERS_CSTR "test:, cmd: or manual:"
+
+// Finds the next "(<kind>: <text>)" proof at or after *cursor inside one
+// Definition of Done item. Returns false when the item holds no further proof.
+// The text may span lines - a wrapped bullet is contiguous in the buffer - so
+// the scan runs to the matching ')' wherever it lands.
+static boolean artifact_next_proof(Aids_String_Slice item, size_t *cursor,
+                                   Proof_Kind *kind, Aids_String_Slice *text) {
+    while (*cursor < item.len) {
+        if (item.str[*cursor] != '(') {
+            (*cursor)++;
+            continue;
+        }
+        size_t open = *cursor;
+        Aids_String_Slice rest = aids_string_slice_from_parts(item.str + open + 1,
+                                                              item.len - open - 1);
+        boolean matched = false;
+        for (size_t k = 0; k < ENUM_COUNT(PROOF_KIND_NAMES); ++k) {
+            char marker_buffer[16];
+            snprintf(marker_buffer, sizeof(marker_buffer), "%s:", PROOF_KIND_NAMES[k]);
+            Aids_String_Slice marker = aids_string_slice_from_cstr(marker_buffer);
+            if (!aids_string_slice_starts_with(&rest, marker)) {
+                continue;
+            }
+            size_t close = open + 1 + marker.len;
+            int depth = 1;
+            while (close < item.len) {
+                if (item.str[close] == '(') {
+                    depth++;
+                } else if (item.str[close] == ')') {
+                    depth--;
+                    if (depth == 0) {
+                        break;
+                    }
+                }
+                close++;
+            }
+            if (close >= item.len) {
+                break; // an unclosed proof group is not a proof
+            }
+            Aids_String_Slice value = aids_string_slice_from_parts(
+                item.str + open + 1 + marker.len,
+                close - (open + 1 + marker.len));
+            aids_string_slice_trim(&value);
+            *kind = (Proof_Kind)k;
+            *text = value;
+            *cursor = close + 1;
+            matched = true;
+            break;
+        }
+        if (matched) {
+            return true;
+        }
+        (*cursor)++;
+    }
+    return false;
+}
+
+// Walks the "- " items of the "## Definition of Done" section. An item runs
+// from its bullet line through every continuation line that follows, so a
+// wrapped proof is still one contiguous slice. Returns false when the section
+// holds no further item; *cursor is opaque state seeded to 0.
+static boolean artifact_next_dod_item(Aids_String_Slice task_raw, size_t *cursor,
+                                      Aids_String_Slice *item) {
+    Aids_String_Slice heading = aids_string_slice_from_cstr("## Definition of Done");
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    Aids_String_Slice bullet = aids_string_slice_from_cstr("- ");
+
+    // Locate the section body once per call; the cursor is a byte offset into
+    // task_raw, so restarting the scan is cheap and keeps the state a plain
+    // integer the caller can seed with 0.
+    size_t pos = 0;
+    size_t section_start = 0;
+    size_t section_end = task_raw.len;
+    boolean found = false;
+    while (pos < task_raw.len) {
+        size_t line_end = pos;
+        while (line_end < task_raw.len && task_raw.str[line_end] != '\n') {
+            line_end++;
+        }
+        Aids_String_Slice line = aids_string_slice_from_parts(task_raw.str + pos,
+                                                              line_end - pos);
+        aids_string_slice_trim_right(&line);
+        if (aids_string_slice_starts_with(&line, any_heading)) {
+            if (found) {
+                section_end = pos;
+                break;
+            }
+            if (aids_string_slice_compare(&line, &heading) == 0) {
+                found = true;
+                section_start = line_end < task_raw.len ? line_end + 1 : task_raw.len;
+            }
+        }
+        pos = line_end < task_raw.len ? line_end + 1 : task_raw.len;
+    }
+    if (!found) {
+        return false;
+    }
+
+    size_t at = *cursor > section_start ? *cursor : section_start;
+    while (at < section_end) {
+        size_t line_end = at;
+        while (line_end < section_end && task_raw.str[line_end] != '\n') {
+            line_end++;
+        }
+        Aids_String_Slice line = aids_string_slice_from_parts(task_raw.str + at,
+                                                              line_end - at);
+        Aids_String_Slice trimmed = line;
+        aids_string_slice_trim(&trimmed);
+        if (!aids_string_slice_starts_with(&trimmed, bullet)) {
+            at = line_end < section_end ? line_end + 1 : section_end;
+            continue;
+        }
+        // Absorb the continuation lines: anything non-blank that does not open
+        // a new bullet belongs to this item.
+        size_t item_end = line_end;
+        size_t next = line_end < section_end ? line_end + 1 : section_end;
+        while (next < section_end) {
+            size_t next_end = next;
+            while (next_end < section_end && task_raw.str[next_end] != '\n') {
+                next_end++;
+            }
+            Aids_String_Slice cont = aids_string_slice_from_parts(task_raw.str + next,
+                                                                  next_end - next);
+            Aids_String_Slice cont_trimmed = cont;
+            aids_string_slice_trim(&cont_trimmed);
+            if (cont_trimmed.len == 0 || aids_string_slice_starts_with(&cont_trimmed, bullet)) {
+                break;
+            }
+            item_end = next_end;
+            next = next_end < section_end ? next_end + 1 : section_end;
+        }
+        *item = aids_string_slice_from_parts(task_raw.str + at, item_end - at);
+        *cursor = next;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Record validation, as a pure collector. Both `check` and `flow` ask these
+// functions the same questions and get the same answers back as data: `check`
+// prints each problem as a finding, `flow` collects them as unmet
+// preconditions. That is what makes the tying invariant hold - a transition
+// cannot produce a state the lint would flag, because neither side owns its
+// own copy of a rule. Nothing here prints.
+// ---------------------------------------------------------------------------
+
+#define RECORD_PROBLEM_CAPACITY 32
+#define RECORD_PROBLEM_MESSAGE_SIZE 256
+
+typedef struct {
+    const char *rule; // the `check` rule slug this problem would be reported as
+    char message[RECORD_PROBLEM_MESSAGE_SIZE];
+} Record_Problem;
+
+typedef struct {
+    Record_Problem items[RECORD_PROBLEM_CAPACITY];
+    size_t count;
+} Record_Problems;
+
+static void record_problems_add(Record_Problems *problems, const char *rule,
+                                const char *fmt, ...) TATR_PRINTF_FORMAT(3, 4);
+
+static void record_problems_add(Record_Problems *problems, const char *rule,
+                                const char *fmt, ...) {
+    if (problems->count >= RECORD_PROBLEM_CAPACITY) {
+        return; // a record with 32 problems has been told enough
+    }
+    problems->items[problems->count].rule = rule;
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(problems->items[problems->count].message,
+              RECORD_PROBLEM_MESSAGE_SIZE, fmt, args);
+    va_end(args);
+    problems->count++;
+}
+
+// bad-record-schema: the title prefix, the required "- KEY:" header fields and
+// the required "## " sections a record kind declares in RECORD_SCHEMAS.
+static void record_schema_problems(Record_Kind kind,
+                                   Aids_String_Slice doc,
+                                   const char *const *sections_override,
+                                   Record_Problems *problems) {
+    const Record_Schema *schema = &RECORD_SCHEMAS[kind];
+
+    Aids_String_Slice prefix = aids_string_slice_from_cstr((char *)schema->title_prefix);
+    Aids_String_Slice first = {0};
+    Aids_String_Slice scan = doc;
+    if (!aids_string_slice_tokenize(&scan, '\n', &first)) {
+        first = doc;
+    }
+    aids_string_slice_trim_right(&first);
+    if (!aids_string_slice_starts_with(&first, prefix) || first.len <= prefix.len) {
+        record_problems_add(problems, "bad-record-schema",
+                            "%s does not open with '%s<title>'",
+                            schema->file_name, schema->title_prefix);
+    }
+
+    for (size_t i = 0; i < RECORD_MAX_FIELDS && schema->fields[i] != NULL; ++i) {
+        Aids_String_Slice value = {0};
+        if (!artifact_field(doc, schema->fields[i], &value)) {
+            record_problems_add(problems, "bad-record-schema", "%s has no '%s' line",
+                                schema->file_name, schema->fields[i]);
+        } else if (value.len == 0) {
+            record_problems_add(problems, "bad-record-schema", "%s has an empty '%s' value",
+                                schema->file_name, schema->fields[i]);
+        }
+    }
+
+    const char *const *sections = sections_override != NULL ? sections_override : schema->sections;
+    for (size_t i = 0; sections[i] != NULL; ++i) {
+        boolean present = false;
+        boolean nonempty = false;
+        artifact_section_state(doc, sections[i], &present, &nonempty);
+        if (!present) {
+            record_problems_add(problems, "bad-record-schema", "%s has no '%s' section",
+                                schema->file_name, sections[i]);
+        } else if (!nonempty) {
+            record_problems_add(problems, "bad-record-schema", "%s section '%s' is empty",
+                                schema->file_name, sections[i]);
+        }
+    }
+}
+
+// Checks that an enum-valued field carries one of its allowed values.
+static void record_enum_problem(Record_Problems *problems, const char *rule,
+                                const char *what, Aids_String_Slice value,
+                                const Aids_String_Slice *table, size_t count,
+                                const char *values_hint) {
+    int index = 0;
+    if (enum_from_string(&value, table, count, &index)) {
+        return;
+    }
+    record_problems_add(problems, rule, "invalid %s '" SS_Fmt "' (use %s)",
+                        what, SS_Arg(value), values_hint);
+}
+
+// bad-review-round / bad-verdict / missing-reviewer / bad-finding-id /
+// bad-severity / approve-with-open-findings: everything a REVIEW.md's round
+// structure is held to. Rounds are appended and numbered from 1; each carries a
+// reviewer and one verdict from the vocabulary; each finding ID is
+// R<this round>.<next index> and its severity is one of the four.
+static void review_round_problems(Aids_String_Slice review, Record_Problems *problems) {
+    Aids_String_Slice round_heading = aids_string_slice_from_cstr("## Round ");
+    Aids_String_Slice reviewer_format = aids_string_slice_from_cstr("- REVIEWER: ");
+    Aids_String_Slice verdict_format = aids_string_slice_from_cstr("- VERDICT: ");
+    Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
+
+    Aids_String_Slice scan = review;
+    Aids_String_Slice line = {0};
+    unsigned long expected_round = 1;
+    unsigned long current_round = 0;
+    unsigned long expected_finding = 1;
+    boolean saw_reviewer = false;
+    boolean saw_verdict = false;
+    Aids_String_Slice last_verdict = {0};
+
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        aids_string_slice_trim_right(&l);
+
+        if (aids_string_slice_starts_with(&l, round_heading)) {
+            if (current_round > 0 && !saw_reviewer) {
+                record_problems_add(problems, "missing-reviewer",
+                                    "REVIEW.md round %lu has no '- REVIEWER: ' line",
+                                    current_round);
+            }
+            if (current_round > 0 && !saw_verdict) {
+                record_problems_add(problems, "bad-verdict",
+                                    "REVIEW.md round %lu has no '- VERDICT: ' line",
+                                    current_round);
+            }
+            Aids_String_Slice number = l;
+            aids_string_slice_skip(&number, round_heading.len);
+            unsigned long parsed = 0;
+            unsigned long digits = 0;
+            while (digits < number.len && isdigit(number.str[digits])) {
+                parsed = parsed * 10 + (unsigned long)(number.str[digits] - '0');
+                digits++;
+            }
+            if (digits == 0) {
+                record_problems_add(problems, "bad-review-round",
+                                    "REVIEW.md heading '" SS_Fmt "' has no round number",
+                                    SS_Arg(l));
+                parsed = expected_round;
+            } else if (parsed != expected_round) {
+                record_problems_add(problems, "bad-review-round",
+                                    "REVIEW.md round %lu follows round %lu (rounds are numbered from 1 without gaps)",
+                                    parsed, expected_round - 1);
+            }
+            current_round = parsed;
+            expected_round = parsed + 1;
+            expected_finding = 1;
+            saw_reviewer = false;
+            saw_verdict = false;
+            continue;
+        }
+
+        if (aids_string_slice_starts_with(&l, reviewer_format)) {
+            Aids_String_Slice value = l;
+            aids_string_slice_skip(&value, reviewer_format.len);
+            aids_string_slice_trim(&value);
+            if (value.len == 0) {
+                record_problems_add(problems, "missing-reviewer",
+                                    "REVIEW.md round %lu has an empty REVIEWER", current_round);
+            }
+            saw_reviewer = true;
+            continue;
+        }
+
+        if (aids_string_slice_starts_with(&l, verdict_format)) {
+            Aids_String_Slice value = l;
+            aids_string_slice_skip(&value, verdict_format.len);
+            aids_string_slice_trim_left(&value);
+            unsigned long tok = 0;
+            while (tok < value.len && !isspace(value.str[tok])) {
+                tok++;
+            }
+            value.len = tok;
+            record_enum_problem(problems, "bad-verdict", "VERDICT", value,
+                                Verdict_Strings, ENUM_COUNT(Verdict_Strings),
+                                VERDICT_VALUES_CSTR);
+            last_verdict = value;
+            saw_verdict = true;
+            continue;
+        }
+
+        Aids_String_Slice severity = {0};
+        boolean resolved = false;
+        if (!artifact_parse_finding_line(l, &severity, &resolved)) {
+            continue;
+        }
+        if (!artifact_severity_is_known(severity)) {
+            record_problems_add(problems, "bad-severity",
+                                "unknown severity '" SS_Fmt "' in REVIEW.md (use BLOCKER|MAJOR|MINOR|NIT)",
+                                SS_Arg(severity));
+        }
+        Artifact_Finding_Id id = {0};
+        if (!artifact_parse_finding_id(l, &id)) {
+            record_problems_add(problems, "bad-finding-id",
+                                "REVIEW.md finding is not 'R<round>.<index>': " SS_Fmt,
+                                SS_Arg(l));
+            continue;
+        }
+        if (id.round != current_round) {
+            record_problems_add(problems, "bad-finding-id",
+                                "REVIEW.md finding R%lu.%lu sits in round %lu",
+                                id.round, id.index, current_round);
+        } else if (id.index != expected_finding) {
+            record_problems_add(problems, "bad-finding-id",
+                                "REVIEW.md finding R%lu.%lu follows R%lu.%lu (findings are numbered from 1 without gaps)",
+                                id.round, id.index, current_round, expected_finding - 1);
+            expected_finding = id.index;
+        }
+        expected_finding++;
+    }
+
+    if (current_round == 0) {
+        record_problems_add(problems, "bad-review-round",
+                            "REVIEW.md has no '## Round 1' heading");
+        return;
+    }
+    if (!saw_reviewer) {
+        record_problems_add(problems, "missing-reviewer",
+                            "REVIEW.md round %lu has no '- REVIEWER: ' line", current_round);
+    }
+    if (!saw_verdict) {
+        record_problems_add(problems, "bad-verdict",
+                            "REVIEW.md round %lu has no '- VERDICT: ' line", current_round);
+    }
+
+    // A review that says APPROVE while a BLOCKER or MAJOR is still unticked
+    // approves work it has itself declared unfinished.
+    if (saw_verdict && aids_string_slice_compare(&last_verdict, &approve) == 0) {
+        size_t open = artifact_count_open_blocking_findings(review);
+        if (open > 0) {
+            record_problems_add(problems, "approve-with-open-findings",
+                                "REVIEW.md verdict is APPROVE with %lu open BLOCKER/MAJOR finding(s)",
+                                (unsigned long)open);
+        }
+    }
+}
+
+// Resolves a DECISION.md supersede reference to an existing DECISION.md. The
+// canonical ref is "tasks/<id>/DECISION.md", but a bare "<id>" works too: every
+// task is flat under one tasks dir, so we pull the first path segment that is a
+// well-formed HUID and check "<tasks_dir>/<huid>/DECISION.md" on disk. A ref
+// with no HUID segment (e.g. the literal "tasks/<id>/DECISION.md" placeholder)
+// does not resolve.
+static boolean check_supersede_ref_resolves(const Aids_String_Slice *tasks_dir,
+                                            Aids_String_Slice ref) {
+    Aids_String_Slice scan = ref;
+    Aids_String_Slice segment = {0};
+    Aids_String_Slice huid = {0};
+    boolean found = false;
+    while (aids_string_slice_tokenize(&scan, '/', &segment)) {
+        Aids_String_Slice s = segment;
+        aids_string_slice_trim(&s);
+        if (ishuid(&s)) {
+            huid = s;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/DECISION.md",
+                 SS_Arg(*tasks_dir), SS_Arg(huid)) < 0) {
+        return false;
+    }
+    return access(path_buffer, F_OK) == 0;
+}
+
+// Extracts the first well-formed HUID path segment of a DECISION.md reference.
+// The canonical form is "tasks/<id>/DECISION.md", but a bare "<id>" works too:
+// every task is flat under one tasks dir.
+static boolean check_ref_huid(Aids_String_Slice ref, Aids_String_Slice *out) {
+    Aids_String_Slice scan = ref;
+    Aids_String_Slice segment = {0};
+    while (aids_string_slice_tokenize(&scan, '/', &segment)) {
+        Aids_String_Slice s = segment;
+        aids_string_slice_trim(&s);
+        if (ishuid(&s)) {
+            *out = s;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Reads "<tasks_dir>/<ref huid>/DECISION.md" and reports whether it names
+// <expect> on a "- Supersedes: " line. This is the back half of the reciprocal
+// supersede rule: A saying it was superseded by B is only a record if B says it
+// supersedes A. Returns false when the replacement has no DECISION.md at all,
+// which the dangling-supersede rule reports separately.
+static boolean check_supersede_is_reciprocal(const Aids_String_Slice *tasks_dir,
+                                             Aids_String_Slice replacement,
+                                             Aids_String_Slice expect) {
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/DECISION.md",
+                 SS_Arg(*tasks_dir), SS_Arg(replacement)) < 0) {
+        return false;
+    }
+    if (access(path_buffer, F_OK) != 0) {
+        return false;
+    }
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    Aids_String_Slice content = {0};
+    if (aids_io_read(&path, &content, "r") != AIDS_OK) {
+        return false;
+    }
+
+    Aids_String_Slice supersedes_format = aids_string_slice_from_cstr("- Supersedes: ");
+    Aids_String_Slice scan = content;
+    Aids_String_Slice line = {0};
+    boolean reciprocal = false;
+    while (!reciprocal && aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, supersedes_format)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, supersedes_format.len);
+        Aids_String_Slice ref = artifact_strip_inline_comment(l);
+        aids_string_slice_trim(&ref);
+        Aids_String_Slice ref_huid = {0};
+        if (check_ref_huid(ref, &ref_huid) &&
+            aids_string_slice_compare(&ref_huid, &expect) == 0) {
+            reciprocal = true;
+        }
+    }
+    AIDS_FREE(content.str);
+    return reciprocal;
+}
+
+// bad-spike-status / dangling-seeded-task, plus the SPIKE.md schema. Fires on
+// PRESENCE: any SPIKE.md is validated, whatever the task's KIND, because
+// `tatr scaffold <id> SPIKE` will write one for any task. Only the
+// missing-spike-record rule is kind-gated, and that lives in check_task.
+static void spike_record_problems(const Aids_String_Slice *tasks_dir,
+                                  Aids_String_Slice spike,
+                                  Record_Problems *problems) {
+    record_schema_problems(Record_Kind_SPIKE, spike, NULL, problems);
+
+    Aids_String_Slice status = {0};
+    if (artifact_field(spike, "- STATUS: ", &status) && status.len > 0) {
+        record_enum_problem(problems, "bad-spike-status", "SPIKE.md STATUS", status,
+                            Spike_Status_Strings, ENUM_COUNT(Spike_Status_Strings),
+                            SPIKE_STATUS_VALUES_CSTR);
+    }
+
+    // Every task ID named under "## Next steps" must resolve: a spike whose
+    // seeded pointers dangle has recorded a direction nobody can pick up.
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    Aids_String_Slice want = aids_string_slice_from_cstr("## Next steps");
+    Aids_String_Slice scan = spike;
+    Aids_String_Slice line = {0};
+    boolean inside = false;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        aids_string_slice_trim_right(&l);
+        if (aids_string_slice_starts_with(&l, any_heading)) {
+            if (inside) {
+                break;
+            }
+            inside = aids_string_slice_compare(&l, &want) == 0;
+            continue;
+        }
+        if (!inside) {
+            continue;
+        }
+        for (unsigned long i = 0; i + (HUID_LENGTH - 1) <= l.len; ++i) {
+            Aids_String_Slice candidate = aids_string_slice_from_parts(l.str + i, HUID_LENGTH - 1);
+            if (!ishuid(&candidate)) {
+                continue;
+            }
+            char path_buffer[PATH_MAX];
+            if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
+                         SS_Arg(*tasks_dir), SS_Arg(candidate), TASK_FILE_NAME_CSTR) < 0) {
+                continue;
+            }
+            if (access(path_buffer, F_OK) != 0) {
+                record_problems_add(problems, "dangling-seeded-task",
+                                    "SPIKE.md seeds '" SS_Fmt "' which has no TASK.md",
+                                    SS_Arg(candidate));
+            }
+            i += HUID_LENGTH - 2; // consume the match
+        }
+    }
+}
+
+// bad-proof-syntax: every "## Definition of Done" item must carry at least one
+// test:, cmd: or manual: proof. A criterion nothing can check is a wish.
+static void dod_proof_problems(Aids_String_Slice task_raw, Record_Problems *problems) {
+    size_t cursor = 0;
+    Aids_String_Slice item = {0};
+    while (artifact_next_dod_item(task_raw, &cursor, &item)) {
+        size_t proof_cursor = 0;
+        Proof_Kind kind = Proof_Kind_TEST;
+        Aids_String_Slice text = {0};
+        if (artifact_next_proof(item, &proof_cursor, &kind, &text)) {
+            continue;
+        }
+        // Name the item by its first line, so the problem points at a place.
+        Aids_String_Slice first = item;
+        Aids_String_Slice head = {0};
+        if (!aids_string_slice_tokenize(&first, '\n', &head)) {
+            head = item;
+        }
+        aids_string_slice_trim(&head);
+        record_problems_add(problems, "bad-proof-syntax",
+                            "Definition of Done item has no %s proof: " SS_Fmt,
+                            PROOF_MARKERS_CSTR, SS_Arg(head));
+    }
+}
+
+// bad-record-schema / dangling-decision-task / bad-decision-status /
+// dangling-supersede / nonreciprocal-supersede: everything a DECISION.md is
+// held to. Fires by presence only, so a task without one is never touched.
+static void decision_record_problems(const Aids_String_Slice *tasks_dir,
+                                     const Aids_String_Slice *huid,
+                                     Aids_String_Slice decision,
+                                     Record_Problems *problems) {
+    Aids_String_Slice supersedes_format = aids_string_slice_from_cstr("- Supersedes: ");
+    Aids_String_Slice line = {0};
+
+    record_schema_problems(Record_Kind_DECISION, decision, NULL, problems);
+
+    // dangling-decision-task: the record must point at a task that exists.
+    Aids_String_Slice task_ref = {0};
+    if (artifact_field(decision, "- TASK: ", &task_ref) && task_ref.len > 0) {
+        Aids_String_Slice task_huid = {0};
+        char path_buffer[PATH_MAX];
+        if (!check_ref_huid(task_ref, &task_huid)) {
+            record_problems_add(problems, "dangling-decision-task",
+                                "DECISION.md TASK '" SS_Fmt "' is not a task ID",
+                                SS_Arg(task_ref));
+        } else if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
+                            SS_Arg(*tasks_dir), SS_Arg(task_huid), TASK_FILE_NAME_CSTR) >= 0 &&
+                   access(path_buffer, F_OK) != 0) {
+            record_problems_add(problems, "dangling-decision-task",
+                                "DECISION.md TASK '" SS_Fmt "' has no TASK.md",
+                                SS_Arg(task_huid));
+        }
+    }
+
+    // bad-decision-status: validate the first "- STATUS: " value. A missing
+    // STATUS line is itself a problem (a decision record needs a lifecycle).
+    Aids_String_Slice value = {0};
+    Aids_String_Slice ref = {0};
+    switch (artifact_decision_status(decision, &value, &ref)) {
+    case Decision_Status_ACCEPTED:
+        break;
+    case Decision_Status_SUPERSEDED: {
+        if (!check_supersede_ref_resolves(tasks_dir, ref)) {
+            record_problems_add(problems, "dangling-supersede",
+                                "STATUS supersedes '" SS_Fmt "' which has no DECISION.md",
+                                SS_Arg(ref));
+            break;
+        }
+        Aids_String_Slice replacement = {0};
+        if (check_ref_huid(ref, &replacement) &&
+            !check_supersede_is_reciprocal(tasks_dir, replacement, *huid)) {
+            record_problems_add(problems, "nonreciprocal-supersede",
+                                "STATUS supersedes '" SS_Fmt "' but its DECISION.md has no '- Supersedes: " SS_Fmt "' line",
+                                SS_Arg(replacement), SS_Arg(*huid));
+        }
+        break;
+    }
+    case Decision_Status_INVALID:
+        record_problems_add(problems, "bad-decision-status",
+                            "invalid STATUS '" SS_Fmt "' in DECISION.md (use ACCEPTED or 'SUPERSEDED by <ref>')",
+                            SS_Arg(value));
+        break;
+    case Decision_Status_MISSING:
+        record_problems_add(problems, "bad-decision-status",
+                            "DECISION.md has no STATUS line");
+        break;
+    }
+
+    // dangling-supersede / nonreciprocal-supersede: every "- Supersedes: <ref>"
+    // header must resolve, and the record it names must say it was superseded
+    // by this one.
+    Aids_String_Slice scan = decision;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, supersedes_format)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, supersedes_format.len);
+        Aids_String_Slice header_ref = artifact_strip_inline_comment(l);
+        aids_string_slice_trim(&header_ref);
+        if (header_ref.len == 0) {
+            continue; // an empty header is treated as absent, not dangling
+        }
+        if (!check_supersede_ref_resolves(tasks_dir, header_ref)) {
+            record_problems_add(problems, "dangling-supersede",
+                                "Supersedes '" SS_Fmt "' which has no DECISION.md",
+                                SS_Arg(header_ref));
+            continue;
+        }
+        Aids_String_Slice superseded = {0};
+        if (!check_ref_huid(header_ref, &superseded)) {
+            continue;
+        }
+        Aids_String_Slice old_content = {0};
+        Aids_String_Slice old_value = {0};
+        Aids_String_Slice old_ref = {0};
+        Aids_String_Slice back = {0};
+        boolean reciprocal = false;
+        if (task_sibling_read(tasks_dir, &superseded, "DECISION.md", &old_content)) {
+            if (artifact_decision_status(old_content, &old_value, &old_ref) == Decision_Status_SUPERSEDED &&
+                check_ref_huid(old_ref, &back) &&
+                aids_string_slice_compare(&back, huid) == 0) {
+                reciprocal = true;
+            }
+            AIDS_FREE(old_content.str);
+        }
+        if (!reciprocal) {
+            record_problems_add(problems, "nonreciprocal-supersede",
+                                "Supersedes '" SS_Fmt "' but its DECISION.md STATUS does not say 'SUPERSEDED by " SS_Fmt "'",
+                                SS_Arg(superseded), SS_Arg(*huid));
+        }
+    }
+}
+
+// The record problems of a TASK.md itself: the plan gate's sections (owed only
+// from PLANNED on, since they ARE its output) and the DoD proof contracts.
+//
+// <step> is the step the record is being judged AT, which is not always the one
+// it currently carries: `check` passes the task's own step, while `flow` passes
+// the step it is about to move to. That is what lets the plan gate refuse to
+// mint a PLANNED record the lint would immediately flag.
+static void task_record_problems(Task_Kind kind, Flow_Step step,
+                                 Aids_String_Slice task_raw,
+                                 Record_Problems *problems) {
+    if (step >= Flow_Step_PLANNED) {
+        record_schema_problems(Record_Kind_TASK, task_raw,
+                               task_required_sections(kind), problems);
+    }
+    dod_proof_problems(task_raw, problems);
+}
+
+// ---------------------------------------------------------------------------
 // flow: the guarded lifecycle. `tatr flow <ID> [--to <STEP>]` is the only
 // writer of STATUS, FLOW STEP and PLAN STATUS - `new` and `edit` cannot set
 // them - so a record can only reach a state by walking edges whose
@@ -3657,23 +4615,44 @@ static void flow_check_dependencies(const Aids_String_Slice *tasks_dir,
     }
 }
 
+// Appends one message per record problem the shared collectors found, so a
+// refusal names the same thing `tatr check` would have named. The rule slug is
+// carried through: an agent that reads "bad-record-schema: RETRO.md has no
+// '## Action items' section" from a refused transition can find the same rule
+// in the lint documentation.
+static void flow_unmet_add_problems(Flow_Unmet *unmet, const Record_Problems *problems) {
+    for (size_t i = 0; i < problems->count; ++i) {
+        flow_unmet_add(unmet, "%s: %s", problems->items[i].rule, problems->items[i].message);
+    }
+}
+
 // Evaluates every precondition the edge <from> -> <to> carries and appends one
-// message per unmet one. Three gates exist, and an edge either carries a gate
+// message per unmet one. Four gates exist, and an edge either carries a gate
 // whole or not at all:
 //
+//   PLANNING   -> PLANNED      the record gate: the sections the plan produces
 //   PLANNED    -> WORKING      the plan gate: an approved plan, CLOSED deps
-//   REVIEWING  -> COMPOUNDING  the review gate: an approved REVIEW.md
-//   COMPOUNDING-> DONE         both of the above, plus the close gate:
-//                              no unchecked Steps, a RETRO.md, and a valid
-//                              DECISION.md status when the task carries one
+//   REVIEWING  -> COMPOUNDING  the review gate: an approved, well-formed
+//                              REVIEW.md
+//   COMPOUNDING-> DONE         all of the above, plus the close gate:
+//                              no unchecked Steps, a schema-clean RETRO.md,
+//                              and a valid DECISION.md when the task has one
 //
-// REVIEWING -> WORKING and the three pre-plan edges carry no preconditions:
-// going back to fix something must never be harder than going forward.
+// REVIEWING -> WORKING and the two remaining pre-plan edges carry no
+// preconditions: going back to fix something must never be harder than going
+// forward.
+//
+// The record gate is what keeps AGENTS.md's tying invariant true: `flow` and
+// `check` ask the SAME collector functions the same questions, so no
+// transition can mint a record the lint would immediately flag. The plan-gate
+// sections are judged at the step being moved TO, because PLANNING -> PLANNED
+// is the transition that makes the record owe them.
 //
 // KIND: EPIC is exempt from exactly the four requirements it is already exempt
-// from in `tatr check` - plan approval, review, retro and unchecked Steps -
-// because an Epic container's record lives in its children. Its dependencies
-// and its DECISION.md are checked like anyone's.
+// from in `tatr check` - plan approval, review presence, retro presence and
+// unchecked Steps - because an Epic container's record lives in its children.
+// Its own sections, its dependencies and its DECISION.md are checked like
+// anyone's.
 static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
                                      const Aids_String_Slice *huid,
                                      const Task *task,
@@ -3681,19 +4660,44 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
                                      Flow_Step from,
                                      Flow_Step to,
                                      Flow_Unmet *unmet) {
+    boolean record_gate = false;
     boolean plan_gate = false;
     boolean review_gate = false;
     boolean close_gate = false;
     boolean exempt = check_task_is_container(task);
 
-    if (from == Flow_Step_PLANNED && to == Flow_Step_WORKING) {
+    if (from == Flow_Step_PLANNING && to == Flow_Step_PLANNED) {
+        record_gate = true;
+    } else if (from == Flow_Step_PLANNED && to == Flow_Step_WORKING) {
+        record_gate = true;
         plan_gate = true;
     } else if (from == Flow_Step_REVIEWING && to == Flow_Step_COMPOUNDING) {
         review_gate = true;
     } else if (from == Flow_Step_COMPOUNDING && to == Flow_Step_DONE) {
+        record_gate = true;
         plan_gate = true;
         review_gate = true;
         close_gate = true;
+    }
+
+    if (record_gate) {
+        Record_Problems problems = {0};
+        task_record_problems(task->meta.kind, to, task_raw, &problems);
+        flow_unmet_add_problems(unmet, &problems);
+
+        // Any SPIKE.md the task carries is held to its schema; only its
+        // ABSENCE is a question for a SPIKE-kind task, matching `check`.
+        Aids_String_Slice spike = {0};
+        if (!task_sibling_read(tasks_dir, huid, "SPIKE.md", &spike)) {
+            if (task->meta.kind == Task_Kind_SPIKE) {
+                flow_unmet_add(unmet, "missing-spike-record: KIND: SPIKE task has no SPIKE.md");
+            }
+        } else {
+            Record_Problems spike_problems = {0};
+            spike_record_problems(tasks_dir, spike, &spike_problems);
+            flow_unmet_add_problems(unmet, &spike_problems);
+            AIDS_FREE(spike.str);
+        }
     }
 
     if (plan_gate) {
@@ -3726,10 +4730,17 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
                 flow_unmet_add(unmet, "the latest REVIEW.md verdict is '" SS_Fmt "', not APPROVE",
                                SS_Arg(verdict));
             }
-            size_t open = artifact_count_open_blocking_findings(review);
-            if (open > 0) {
-                flow_unmet_add(unmet, "REVIEW.md has %zu open BLOCKER/MAJOR finding(s)", open);
-            }
+            // The record's SHAPE is never exempt: a container that carries a
+            // REVIEW.md is held to the same schema as anyone's, or the
+            // transition would mint a state the lint flags. The open
+            // BLOCKER/MAJOR count lives in review_round_problems as
+            // approve-with-open-findings and is not repeated here: the verdict
+            // check above already refuses anything but APPROVE, so the two
+            // conditions coincide and one message is enough.
+            Record_Problems problems = {0};
+            record_schema_problems(Record_Kind_REVIEW, review, NULL, &problems);
+            review_round_problems(review, &problems);
+            flow_unmet_add_problems(unmet, &problems);
             AIDS_FREE(review.str);
         }
     }
@@ -3740,26 +4751,28 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
             if (unchecked > 0) {
                 flow_unmet_add(unmet, "%zu unchecked Steps item(s) remain", unchecked);
             }
-            if (!task_sibling_exists(tasks_dir, huid, "RETRO.md")) {
+        }
+        // Presence is the container-exempt part; a RETRO.md that IS there is
+        // held to its schema whatever the kind.
+        Aids_String_Slice retro = {0};
+        if (!task_sibling_read(tasks_dir, huid, "RETRO.md", &retro)) {
+            if (!exempt) {
                 flow_unmet_add(unmet, "there is no RETRO.md: the retro has not been written");
             }
+        } else {
+            Record_Problems problems = {0};
+            record_schema_problems(Record_Kind_RETRO, retro, NULL, &problems);
+            flow_unmet_add_problems(unmet, &problems);
+            AIDS_FREE(retro.str);
         }
         Aids_String_Slice decision = {0};
         if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
-            Aids_String_Slice value = {0};
-            Aids_String_Slice ref = {0};
-            switch (artifact_decision_status(decision, &value, &ref)) {
-            case Decision_Status_ACCEPTED:
-            case Decision_Status_SUPERSEDED:
-                break;
-            case Decision_Status_INVALID:
-                flow_unmet_add(unmet, "DECISION.md has an invalid STATUS '" SS_Fmt
-                               "' (use ACCEPTED or 'SUPERSEDED by <ref>')", SS_Arg(value));
-                break;
-            case Decision_Status_MISSING:
-                flow_unmet_add(unmet, "DECISION.md has no STATUS line");
-                break;
-            }
+            // The whole DECISION.md rule set, not a subset of it: a supersede
+            // link that dangles or resolves only one way is exactly the kind of
+            // state the lint would flag on a record this gate had just closed.
+            Record_Problems problems = {0};
+            decision_record_problems(tasks_dir, huid, decision, &problems);
+            flow_unmet_add_problems(unmet, &problems);
             AIDS_FREE(decision.str);
         }
     }
@@ -3910,100 +4923,198 @@ static boolean slice_contains_cstr(Aids_String_Slice haystack, const char *needl
     return false;
 }
 
-// Resolves a DECISION.md supersede reference to an existing DECISION.md. The
-// canonical ref is "tasks/<id>/DECISION.md", but a bare "<id>" works too: every
-// task is flat under one tasks dir, so we pull the first path segment that is a
-// well-formed HUID and check "<tasks_dir>/<huid>/DECISION.md" on disk. A ref
-// with no HUID segment (e.g. the literal "tasks/<id>/DECISION.md" placeholder)
-// does not resolve.
-static boolean check_supersede_ref_resolves(const Aids_String_Slice *tasks_dir,
-                                            Aids_String_Slice ref) {
-    Aids_String_Slice scan = ref;
-    Aids_String_Slice segment = {0};
-    Aids_String_Slice huid = {0};
-    boolean found = false;
-    while (aids_string_slice_tokenize(&scan, '/', &segment)) {
-        Aids_String_Slice s = segment;
-        aids_string_slice_trim(&s);
-        if (ishuid(&s)) {
-            huid = s;
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        return false;
-    }
-    char path_buffer[PATH_MAX];
-    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/DECISION.md",
-                 SS_Arg(*tasks_dir), SS_Arg(huid)) < 0) {
-        return false;
-    }
-    return access(path_buffer, F_OK) == 0;
+// ---------------------------------------------------------------------------
+// Historical exemptions. Sibling records that predate a schema rule are
+// classified rather than rewritten: the flow trail is append-only history, so a
+// task record is not edited to satisfy a rule invented after it was written.
+// `tasks/EXEMPTIONS.md` classifies each such record explicitly, one
+// "- <task-id> <rule>: <reason>" line per suppressed finding. Every finding
+// routes through check_finding, so any rule can be exempted the same way, and
+// an exemption that never fires is itself a finding - the list cannot rot.
+// Adding an entry is visible in the diff, which is the same argument that
+// keeps `tatr flow` free of a --force flag.
+// ---------------------------------------------------------------------------
+
+#define EXEMPTIONS_FILE_NAME_CSTR "EXEMPTIONS.md"
+
+typedef struct {
+    Aids_String_Slice huid;
+    Aids_String_Slice rule;
+    boolean used;
+} Check_Exemption;
+
+typedef struct {
+    Aids_Array entries;        /* Check_Exemption */
+    Aids_String_Slice content; // owns the bytes the slices above point into
+    boolean initialized;
+} Check_Exemptions;
+
+static void check_exemptions_init(Check_Exemptions *ex) {
+    aids_array_init(&ex->entries, sizeof(Check_Exemption));
+    ex->content = (Aids_String_Slice){0};
+    ex->initialized = true;
 }
 
-// Lints a task's DECISION.md (only called when the file exists): the STATUS
-// value must be exactly ACCEPTED or "SUPERSEDED by <ref>" (bad-decision-status),
-// and every supersede reference - the one in a SUPERSEDED-by STATUS and any
-// "- Supersedes: <ref>" header line - must resolve to an existing DECISION.md
-// (dangling-supersede). Fires by presence only, so tasks without a DECISION.md
-// are never touched. Returns findings printed.
-static size_t check_decision(const Aids_String_Slice *tasks_dir,
-                             const Aids_String_Slice *huid,
-                             const Aids_String_Slice *decision) {
-    size_t findings = 0;
-    Aids_String_Slice supersedes_format = aids_string_slice_from_cstr("- Supersedes: ");
-    Aids_String_Slice line = {0};
-
-    // bad-decision-status: validate the first "- STATUS: " value. A missing
-    // STATUS line is itself a finding (a decision record needs a lifecycle).
-    Aids_String_Slice value = {0};
-    Aids_String_Slice ref = {0};
-    switch (artifact_decision_status(*decision, &value, &ref)) {
-    case Decision_Status_ACCEPTED:
-        break;
-    case Decision_Status_SUPERSEDED:
-        if (!check_supersede_ref_resolves(tasks_dir, ref)) {
-            printf(SS_Fmt ": dangling-supersede: STATUS supersedes '" SS_Fmt "' which has no DECISION.md\n",
-                   SS_Arg(*huid), SS_Arg(ref));
-            findings++;
-        }
-        break;
-    case Decision_Status_INVALID:
-        printf(SS_Fmt ": bad-decision-status: invalid STATUS '" SS_Fmt "' in DECISION.md (use ACCEPTED or 'SUPERSEDED by <ref>')\n",
-               SS_Arg(*huid), SS_Arg(value));
-        findings++;
-        break;
-    case Decision_Status_MISSING:
-        printf(SS_Fmt ": bad-decision-status: DECISION.md has no STATUS line\n", SS_Arg(*huid));
-        findings++;
-        break;
+static void check_exemptions_free(Check_Exemptions *ex) {
+    if (!ex->initialized) {
+        return;
     }
+    aids_array_free(&ex->entries);
+    if (ex->content.str != NULL) {
+        AIDS_FREE(ex->content.str);
+        ex->content = (Aids_String_Slice){0};
+    }
+    ex->initialized = false;
+}
 
-    // dangling-supersede: every "- Supersedes: <ref>" header must resolve.
-    Aids_String_Slice scan = *decision;
+// Reads "<tasks_dir>/EXEMPTIONS.md" if it exists. A missing file is not an
+// error: a repository with no history to classify carries no such file.
+static void check_exemptions_load(Check_Exemptions *ex,
+                                  const Aids_String_Slice *tasks_dir) {
+    if (ex->content.str != NULL) {
+        return; // already loaded; the slices below borrow those bytes
+    }
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/%s",
+                 SS_Arg(*tasks_dir), EXEMPTIONS_FILE_NAME_CSTR) < 0) {
+        return;
+    }
+    if (access(path_buffer, F_OK) != 0) {
+        return;
+    }
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    Aids_String_Slice content = {0};
+    if (aids_io_read(&path, &content, "r") != AIDS_OK) {
+        aids_log(AIDS_WARNING, "'%s' exists but could not be read: %s",
+                 path_buffer, aids_failure_reason());
+        return;
+    }
+    ex->content = content;
+
+    Aids_String_Slice scan = content;
+    Aids_String_Slice line = {0};
+    Aids_String_Slice bullet = aids_string_slice_from_cstr("- ");
     while (aids_string_slice_tokenize(&scan, '\n', &line)) {
         Aids_String_Slice l = line;
-        if (!aids_string_slice_starts_with(&l, supersedes_format)) {
+        aids_string_slice_trim(&l);
+        if (!aids_string_slice_starts_with(&l, bullet)) {
             continue;
         }
-        aids_string_slice_skip(&l, supersedes_format.len);
-        Aids_String_Slice header_ref = artifact_strip_inline_comment(l);
-        aids_string_slice_trim(&header_ref);
-        if (header_ref.len == 0) {
-            continue; // an empty header is treated as absent, not dangling
+        aids_string_slice_skip(&l, bullet.len);
+        Aids_String_Slice huid = {0};
+        if (!aids_string_slice_tokenize(&l, ' ', &huid)) {
+            continue;
         }
-        if (!check_supersede_ref_resolves(tasks_dir, header_ref)) {
-            printf(SS_Fmt ": dangling-supersede: Supersedes '" SS_Fmt "' which has no DECISION.md\n",
-                   SS_Arg(*huid), SS_Arg(header_ref));
-            findings++;
+        aids_string_slice_trim(&huid);
+        if (!ishuid(&huid)) {
+            continue; // prose in the file's preamble, not an exemption line
         }
+        Aids_String_Slice rule = {0};
+        if (!aids_string_slice_tokenize(&l, ':', &rule)) {
+            continue;
+        }
+        aids_string_slice_trim(&rule);
+        if (rule.len == 0) {
+            continue;
+        }
+        Check_Exemption entry = { .huid = huid, .rule = rule, .used = false };
+        if (aids_array_append(&ex->entries, &entry) != AIDS_OK) {
+            aids_log(AIDS_WARNING, "Failed to record exemption: %s", aids_failure_reason());
+            return;
+        }
+    }
+}
+
+// Prints one finding as "<id>: <rule>: <detail>" and returns 1, unless the
+// (task, rule) pair is exempted - then it marks the exemption used and returns
+// 0. Every check rule reports through here. The format attribute is what makes
+// that funnel safe: a detail string built with SS_Fmt but missing its SS_Arg
+// is a compile error rather than a garbage finding.
+static size_t check_finding(Check_Exemptions *ex, const Aids_String_Slice *huid,
+                            const char *rule, const char *fmt, ...) TATR_PRINTF_FORMAT(4, 5);
+
+static size_t check_finding(Check_Exemptions *ex, const Aids_String_Slice *huid,
+                            const char *rule, const char *fmt, ...) {
+    if (ex != NULL && ex->initialized) {
+        Aids_String_Slice rule_slice = aids_string_slice_from_cstr((char *)rule);
+        for (size_t i = 0; i < ex->entries.count; ++i) {
+            Check_Exemption *entry = NULL;
+            if (aids_array_get(&ex->entries, i, (void **)&entry) != AIDS_OK) {
+                continue;
+            }
+            if (aids_string_slice_compare(&entry->huid, huid) == 0 &&
+                aids_string_slice_compare(&entry->rule, &rule_slice) == 0) {
+                entry->used = true;
+                return 0;
+            }
+        }
+    }
+    printf(SS_Fmt ": %s: ", SS_Arg(*huid), rule);
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\n");
+    return 1;
+}
+
+// Reports every exemption that never fired. Only meaningful after a full scan:
+// with `check --id <ID>` the other tasks' rules were never evaluated.
+static size_t check_exemptions_report_unused(Check_Exemptions *ex) {
+    size_t findings = 0;
+    for (size_t i = 0; i < ex->entries.count; ++i) {
+        Check_Exemption *entry = NULL;
+        if (aids_array_get(&ex->entries, i, (void **)&entry) != AIDS_OK || entry->used) {
+            continue;
+        }
+        printf(SS_Fmt ": unused-exemption: '" SS_Fmt "' is exempted in %s but did not fire\n",
+               SS_Arg(entry->huid), SS_Arg(entry->rule), EXEMPTIONS_FILE_NAME_CSTR);
+        findings++;
     }
     return findings;
 }
 
+// Prints a collected Record_Problems set as findings, each under its own rule
+// so it can be exempted individually. This is the ONLY place `check` turns a
+// record problem into output: the problems themselves come from the shared
+// collectors above, which `flow` reads too, so neither side owns a copy of a
+// rule and a transition cannot produce a state the lint would then flag.
+static size_t check_report_problems(Check_Exemptions *ex,
+                                    const Aids_String_Slice *huid,
+                                    const Record_Problems *problems) {
+    size_t findings = 0;
+    for (size_t i = 0; i < problems->count; ++i) {
+        findings += check_finding(ex, huid, problems->items[i].rule, "%s",
+                                  problems->items[i].message);
+    }
+    return findings;
+}
+
+// Collects a record's problems and reports them in one call - the shape every
+// per-record check below uses.
+static size_t check_record(Check_Exemptions *ex, const Aids_String_Slice *huid,
+                           Record_Kind kind, Aids_String_Slice doc,
+                           const char *const *sections_override) {
+    Record_Problems problems = {0};
+    record_schema_problems(kind, doc, sections_override, &problems);
+    return check_report_problems(ex, huid, &problems);
+}
+
+// Lints a task's DECISION.md (only called when the file exists). One line, so
+// the collector below stays the single home of every DECISION.md rule and the
+// close gate reads exactly what the lint reads.
+static size_t check_decision(Check_Exemptions *ex,
+                             const Aids_String_Slice *tasks_dir,
+                             const Aids_String_Slice *huid,
+                             const Aids_String_Slice *decision) {
+    Record_Problems problems = {0};
+    decision_record_problems(tasks_dir, huid, *decision, &problems);
+    return check_report_problems(ex, huid, &problems);
+}
+
 // Lints one task directory. Returns the number of findings printed.
-static size_t check_task(const Aids_String_Slice *tasks_dir,
+static size_t check_task(Check_Exemptions *ex,
+                         const Aids_String_Slice *tasks_dir,
                          const Aids_String_Slice *huid) {
     size_t findings = 0;
     Aids_String_Slice raw = {0};
@@ -4013,15 +5124,14 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
     boolean task_loaded = false;
 
     if (!task_sibling_read(tasks_dir, huid, TASK_FILE_NAME_CSTR, &raw)) {
-        printf(SS_Fmt ": malformed-header: TASK.md missing or unreadable\n", SS_Arg(*huid));
-        findings++;
+        findings += check_finding(ex, huid, "malformed-header", "TASK.md missing or unreadable");
         goto review_checks;
     }
 
     task_init_empty(&task);
     if (task_deserialize(raw, &task) != AIDS_OK) {
-        printf(SS_Fmt ": malformed-header: TASK.md failed to parse (title and v2 metadata block)\n", SS_Arg(*huid));
-        findings++;
+        findings += check_finding(ex, huid, "malformed-header",
+                                  "TASK.md failed to parse (title and v2 metadata block)");
         AIDS_FREE(raw.str);
         raw = (Aids_String_Slice){0};
         goto review_checks;
@@ -4032,21 +5142,53 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
     // Metadata values no longer need a re-scan here: the v2 parser validates
     // the exact token it consumes (trailing spaces and CRLF tails included),
     // so an invalid STATUS, KIND, FLOW STEP or PLAN STATUS has already been
-    // reported above as a parse failure.
+    // reported above as a parse failure. What the parser does NOT police is the
+    // body, so the kind's required sections are checked from the schema table.
+    //
+    // Only from PLANNED on, though: `## Steps` and `## Definition of Done` ARE
+    // the plan gate's output, so demanding them of a BACKLOG record would make
+    // every task `tatr new` creates a finding the moment it exists. The same
+    // reasoning covers a SPIKE task's SPIKE.md - the research doc is written
+    // during the spike, not at the instant the task is filed.
+    {
+        Record_Problems problems = {0};
+        task_record_problems(task.meta.kind, task.meta.flow_step, raw, &problems);
+        findings += check_report_problems(ex, huid, &problems);
+    }
+
+    // A SPIKE task's research lives in its SPIKE.md sibling; without one the
+    // task records a question and no answer. Its ABSENCE is what depends on
+    // the task's KIND; the contents of any SPIKE.md that does exist are
+    // checked on presence alone, whatever the task's kind, because
+    // `tatr scaffold <id> SPIKE` will write one for any task.
+    {
+        Aids_String_Slice spike = {0};
+        if (!task_sibling_read(tasks_dir, huid, "SPIKE.md", &spike)) {
+            if (task.meta.kind == Task_Kind_SPIKE &&
+                task.meta.flow_step >= Flow_Step_PLANNED) {
+                findings += check_finding(ex, huid, "missing-spike-record",
+                                          "KIND: SPIKE task has no SPIKE.md");
+            }
+        } else {
+            Record_Problems problems = {0};
+            spike_record_problems(tasks_dir, spike, &problems);
+            findings += check_report_problems(ex, huid, &problems);
+            AIDS_FREE(spike.str);
+        }
+    }
+
     if (task.meta.status == Task_Status_IN_PROGRESS &&
         task.meta.plan_status != Plan_Status_APPROVED &&
         !check_task_is_container(&task)) {
-        printf(SS_Fmt ": unplanned-in-progress: IN_PROGRESS task lacks PLAN STATUS: APPROVED\n",
-               SS_Arg(*huid));
-        findings++;
+        findings += check_finding(ex, huid, "unplanned-in-progress",
+                                  "IN_PROGRESS task lacks PLAN STATUS: APPROVED");
     }
 
     if (task.meta.status == Task_Status_CLOSED && !check_task_is_container(&task)) {
         size_t unchecked = artifact_count_unchecked_steps(raw);
         if (unchecked > 0) {
-            printf(SS_Fmt ": closed-unchecked: %zu unchecked Steps item(s) on a CLOSED task\n",
-                   SS_Arg(*huid), unchecked);
-            findings++;
+            findings += check_finding(ex, huid, "closed-unchecked",
+                                      "%zu unchecked Steps item(s) on a CLOSED task", unchecked);
         }
     }
 
@@ -4059,52 +5201,48 @@ review_checks:
         boolean has_verdict = artifact_latest_verdict(review, &last_verdict);
         if (task_loaded && task.meta.status == Task_Status_CLOSED) {
             if (!has_verdict) {
-                printf(SS_Fmt ": closed-not-approved: REVIEW.md has no VERDICT line\n", SS_Arg(*huid));
-                findings++;
+                findings += check_finding(ex, huid, "closed-not-approved",
+                                          "REVIEW.md has no VERDICT line");
             } else if (aids_string_slice_compare(&last_verdict, &approve) != 0) {
-                printf(SS_Fmt ": closed-not-approved: latest REVIEW.md verdict is '" SS_Fmt "'\n",
-                       SS_Arg(*huid), SS_Arg(last_verdict));
-                findings++;
+                findings += check_finding(ex, huid, "closed-not-approved",
+                                          "latest REVIEW.md verdict is '" SS_Fmt "'",
+                                          SS_Arg(last_verdict));
             }
         }
 
-        // bad-severity: "- [ ] R1.2 (LOW) ..." with a severity outside the
-        // vocabulary.
-        Aids_String_Slice scan = review;
-        Aids_String_Slice line = {0};
-        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-            Aids_String_Slice severity = {0};
-            boolean resolved = false;
-            if (!artifact_parse_finding_line(line, &severity, &resolved)) {
-                continue;
-            }
-            if (!artifact_severity_is_known(severity)) {
-                printf(SS_Fmt ": bad-severity: unknown severity '" SS_Fmt "' in REVIEW.md (use BLOCKER|MAJOR|MINOR|NIT)\n",
-                       SS_Arg(*huid), SS_Arg(severity));
-                findings++;
-            }
+        Record_Problems problems = {0};
+        record_schema_problems(Record_Kind_REVIEW, review, NULL, &problems);
+        review_round_problems(review, &problems);
+        findings += check_report_problems(ex, huid, &problems);
+    }
+
+    {
+        Aids_String_Slice retro = {0};
+        if (task_sibling_read(tasks_dir, huid, "RETRO.md", &retro)) {
+            findings += check_record(ex, huid, Record_Kind_RETRO, retro, NULL);
+            AIDS_FREE(retro.str);
         }
     }
 
     if (task_loaded && task.meta.status == Task_Status_CLOSED &&
         !check_task_is_container(&task)) {
         if (!has_review) {
-            printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md\n", SS_Arg(*huid));
-            findings++;
+            findings += check_finding(ex, huid, "closed-missing-review",
+                                      "CLOSED task has no REVIEW.md");
         }
         if (!task_sibling_exists(tasks_dir, huid, "RETRO.md")) {
-            printf(SS_Fmt ": closed-missing-retro: CLOSED task has no RETRO.md\n", SS_Arg(*huid));
-            findings++;
+            findings += check_finding(ex, huid, "closed-missing-retro",
+                                      "CLOSED task has no RETRO.md");
         }
     }
 
-    // DECISION.md checks (bad-decision-status / dangling-supersede) are
-    // presence-gated and independent of TASK.md validity: they only fire when
-    // the sibling exists, so a task without one is never touched.
+    // DECISION.md checks are presence-gated and independent of TASK.md
+    // validity: they only fire when the sibling exists, so a task without one
+    // is never touched.
     {
         Aids_String_Slice decision = {0};
         if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
-            findings += check_decision(tasks_dir, huid, &decision);
+            findings += check_decision(ex, tasks_dir, huid, &decision);
             AIDS_FREE(decision.str);
         }
     }
@@ -4210,6 +5348,8 @@ static int main_check(const Tatr_Context *ctx) {
     Aids_Array project_dirs = {0}; /* Aids_String_Slice */
     boolean project_dirs_initialized = false;
     size_t findings = 0;
+    Check_Exemptions exemptions = {0};
+    boolean full_scan = false;
 
     argparse_parser_init(&parser, "tatr check", "Lint task artifacts for process drift", TATR_VERSION);
 
@@ -4236,13 +5376,17 @@ static int main_check(const Tatr_Context *ctx) {
     char *ledger_arg = argparse_get_value(&parser, "ledger");
     char *id_str = argparse_get_value(&parser, "id");
 
+    check_exemptions_init(&exemptions);
+
     if (id_str != NULL) {
         Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
         if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
             return_defer(1);
         }
-        findings += check_task(&tasks_dir, &id);
+        check_exemptions_load(&exemptions, &tasks_dir);
+        findings += check_task(&exemptions, &tasks_dir, &id);
     } else {
+        full_scan = true;
         aids_array_init(&project_dirs, sizeof(Aids_String_Slice));
         project_dirs_initialized = true;
         if (find_current_tasks_dir(&ctx->cwd, &project_dirs) != AIDS_OK) {
@@ -4261,6 +5405,7 @@ static int main_check(const Tatr_Context *ctx) {
                 continue;
             }
             Aids_String_Slice tasks_path = aids_string_slice_from_cstr(tasks_path_buffer);
+            check_exemptions_load(&exemptions, &tasks_path);
             Aids_Array entries = {0};
             aids_array_init(&entries, sizeof(Aids_String_Slice));
             if (aids_io_listdir(&tasks_path, &entries) != AIDS_OK) {
@@ -4277,10 +5422,17 @@ static int main_check(const Tatr_Context *ctx) {
                 if (!ishuid(huid_entry)) {
                     continue;
                 }
-                findings += check_task(&tasks_path, huid_entry);
+                findings += check_task(&exemptions, &tasks_path, huid_entry);
             }
             cleanup_string_slice_array(&entries);
         }
+    }
+
+    // Only a full scan evaluated every task's rules, so only a full scan can
+    // tell an exemption that no longer applies from one whose task was simply
+    // not looked at.
+    if (full_scan) {
+        findings += check_exemptions_report_unused(&exemptions);
     }
 
     if (ledger_arg != NULL) {
@@ -4292,6 +5444,7 @@ static int main_check(const Tatr_Context *ctx) {
     }
 
 defer:
+    check_exemptions_free(&exemptions);
     if (tasks_dir.str != NULL) {
         AIDS_FREE(tasks_dir.str);
     }
@@ -4300,6 +5453,401 @@ defer:
     }
     if (project_dirs_initialized) {
         cleanup_string_slice_array(&project_dirs);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// scaffold: create a missing sibling record from RECORD_SCHEMAS. The same table
+// `check` validates against, so a freshly scaffolded record passes the lint
+// with its placeholders still in place - the author fills them in, they do not
+// have to guess the shape first. There is no --force: an existing record is
+// edited by hand, in the diff, where a reviewer sees the change.
+// ---------------------------------------------------------------------------
+
+// The default value a scaffolded header field carries. TASK and DATE resolve to
+// real data and STATUS to a value its own rule accepts - a scaffolded record
+// must pass `tatr check` with its placeholders still in place, or the author
+// has to guess the shape before they can write anything. Everything else gets
+// a TODO the author replaces.
+static Aids_Result scaffold_field_value(Record_Kind kind,
+                                        const char *field,
+                                        Aids_String_Slice task_huid,
+                                        Aids_String_Builder *out) {
+    if (strcmp(field, "- TASK: ") == 0) {
+        return aids_string_builder_append(out, SS_Fmt, SS_Arg(task_huid));
+    }
+    if (strcmp(field, "- DATE: ") == 0) {
+        char now[HUID_LENGTH] = {0};
+        if (huid(now) != AIDS_OK) {
+            return AIDS_ERR;
+        }
+        return aids_string_builder_append(out, "%s", now);
+    }
+    if (strcmp(field, "- STATUS: ") == 0) {
+        // The first value of the kind's vocabulary: a decision record is
+        // written when the decision is made, a spike doc when it has a
+        // recommendation.
+        if (kind == Record_Kind_SPIKE) {
+            return aids_string_builder_append(out, SS_Fmt, SS_Arg(Spike_Status_Strings[0]));
+        }
+        return aids_string_builder_append(out, "ACCEPTED");
+    }
+    if (strcmp(field, "- REVIEW ROUNDS: ") == 0) {
+        return aids_string_builder_append(out, "0");
+    }
+    return aids_string_builder_append(out, "TODO");
+}
+
+// Renders a record from its schema: the title line, the required header fields,
+// then either the literal body template or one stub per required section.
+static Aids_Result scaffold_render(Record_Kind kind,
+                                   Aids_String_Slice task_huid,
+                                   Aids_String_Slice title,
+                                   Aids_String_Slice *out) {
+    const Record_Schema *schema = &RECORD_SCHEMAS[kind];
+    Aids_String_Builder sb = {0};
+    Aids_Result result = AIDS_OK;
+
+    aids_string_builder_init(&sb);
+
+    if (aids_string_builder_append(&sb, "%s" SS_Fmt "\n\n",
+                                   schema->title_prefix, SS_Arg(title)) != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
+    for (size_t i = 0; i < RECORD_MAX_FIELDS && schema->fields[i] != NULL; ++i) {
+        if (aids_string_builder_append(&sb, "%s", schema->fields[i]) != AIDS_OK) {
+            return_defer(AIDS_ERR);
+        }
+        if (scaffold_field_value(kind, schema->fields[i], task_huid, &sb) != AIDS_OK) {
+            return_defer(AIDS_ERR);
+        }
+        if (aids_string_builder_append(&sb, "\n") != AIDS_OK) {
+            return_defer(AIDS_ERR);
+        }
+    }
+    if (aids_string_builder_append(&sb, "\n") != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
+    if (schema->body_template != NULL) {
+        if (aids_string_builder_append(&sb, "%s", schema->body_template) != AIDS_OK) {
+            return_defer(AIDS_ERR);
+        }
+    } else {
+        for (size_t i = 0; schema->sections[i] != NULL; ++i) {
+            // The stub is derived from the heading, so a new section needs no
+            // second table entry - and it is non-blank, so the scaffolded
+            // record is already schema-clean.
+            const char *heading = schema->sections[i];
+            if (aids_string_builder_append(&sb, "%s\n\nTODO: %s\n", heading, heading + 3) != AIDS_OK) {
+                return_defer(AIDS_ERR);
+            }
+            if (schema->sections[i + 1] != NULL &&
+                aids_string_builder_append(&sb, "\n") != AIDS_OK) {
+                return_defer(AIDS_ERR);
+            }
+        }
+    }
+
+    aids_string_builder_to_slice(&sb, out);
+
+defer:
+    if (result != AIDS_OK) {
+        aids_string_builder_free(&sb);
+    }
+    return result;
+}
+
+static int main_scaffold(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_String_Slice content = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+
+    argparse_parser_init(&parser, "tatr scaffold",
+                         "Create a missing sibling record from the schema", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'K',
+        .long_name = "record",
+        .description = "Record kind (" RECORD_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'l',
+        .long_name = "list",
+        .description = "List every record kind for the task with its path and presence",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'n',
+        .long_name = "dry-run",
+        .description = "Print the path and record kind that would be written, and write nothing",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    boolean list = argparse_get_flag(&parser, "list");
+    boolean dry_run = argparse_get_flag(&parser, "dry-run");
+    char *record_str = argparse_get_value(&parser, "record");
+
+    if (list) {
+        for (size_t i = 0; i < RECORD_KIND_COUNT; ++i) {
+            const Record_Schema *schema = &RECORD_SCHEMAS[i];
+            printf("%s\t" SS_Fmt "/" SS_Fmt "/%s\t%s\n",
+                   schema->name, SS_Arg(tasks_dir), SS_Arg(id), schema->file_name,
+                   task_sibling_exists(&tasks_dir, &id, schema->file_name) ? "present" : "missing");
+        }
+        return_defer(0);
+    }
+
+    if (record_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing record kind: expected " RECORD_VALUES_CSTR " (or --list)");
+        return_defer(1);
+    }
+    Aids_String_Slice record_slice = aids_string_slice_from_cstr(record_str);
+    Record_Kind kind = Record_Kind_TASK;
+    if (!record_kind_from_string(&record_slice, &kind)) {
+        aids_log(AIDS_ERROR, "Invalid record kind '%s': expected " RECORD_VALUES_CSTR, record_str);
+        return_defer(1);
+    }
+    const Record_Schema *schema = &RECORD_SCHEMAS[kind];
+
+    if (kind == Record_Kind_TASK) {
+        aids_log(AIDS_ERROR, "TASK.md is created by `tatr new`, not scaffolded: it is typed "
+                 "metadata rather than a prose record");
+        return_defer(1);
+    }
+
+    char path_buffer[PATH_MAX];
+    int written = snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
+                           SS_Arg(tasks_dir), SS_Arg(id), schema->file_name);
+    if (written < 0 || (size_t)written >= sizeof(path_buffer)) {
+        aids_log(AIDS_ERROR, "Failed to build record path: path too long");
+        return_defer(1);
+    }
+
+    // Refuse before rendering anything: a scaffold that would clobber an
+    // existing record must not do half of the work first.
+    if (access(path_buffer, F_OK) == 0) {
+        aids_log(AIDS_ERROR, "Refusing to overwrite '%s': edit the existing record by hand", path_buffer);
+        return_defer(1);
+    }
+
+    if (dry_run) {
+        printf("%s\t%s\n", path_buffer, schema->name);
+        return_defer(0);
+    }
+
+    // The record's title carries the task's own title, so a reviewer reading
+    // REVIEW.md alone knows what was reviewed.
+    task_init_empty(&task);
+    task_initialized = true;
+    if (task_load(&task_file_path, &task) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    if (scaffold_render(kind, id, task.title, &content) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to render %s: %s", schema->file_name, aids_failure_reason());
+        return_defer(1);
+    }
+
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    if (aids_io_write(&path, &content, "w") != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to write '%s': %s", path_buffer, aids_failure_reason());
+        return_defer(1);
+    }
+
+    printf("%s\t%s\n", path_buffer, schema->name);
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (content.str != NULL) {
+        AIDS_FREE(content.str);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// proofs: print each Definition of Done proof as one
+// "<n><TAB><kind><TAB><text>" line. tatr does not execute anything - a `cmd:`
+// proof's shell text round-trips verbatim, and running it is the caller's
+// decision, made in the caller's shell where the user can see the command.
+// ---------------------------------------------------------------------------
+
+// Prints a proof's text on one line. A whitespace run collapses to a single
+// space only when it contains a byte that would break the record format - a
+// newline (the line wrap of a continued bullet) or a tab (the field separator
+// of the output itself). Everything else is passed through byte for byte, so a
+// `cmd:` proof whose shell text depends on its spacing (`grep -q "a  b"`)
+// round-trips verbatim rather than coming back subtly different from what the
+// author wrote.
+static void proof_print_text(Aids_String_Slice text) {
+    size_t i = 0;
+    while (i < text.len) {
+        if (!isspace(text.str[i])) {
+            putchar(text.str[i]);
+            i++;
+            continue;
+        }
+        size_t run = i;
+        boolean collapse = false;
+        while (run < text.len && isspace(text.str[run])) {
+            char c = text.str[run];
+            // Exactly the two bytes that would break the record format, and no
+            // others: a newline ends the line, a tab starts a fourth field.
+            // A vertical tab or form feed breaks neither, so it survives like
+            // any other byte the author wrote.
+            if (c == '\n' || c == '\r' || c == '\t') {
+                collapse = true;
+            }
+            run++;
+        }
+        if (collapse) {
+            putchar(' ');
+        } else {
+            for (size_t j = i; j < run; ++j) {
+                putchar(text.str[j]);
+            }
+        }
+        i = run;
+    }
+}
+
+static int main_proofs(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_String_Slice raw = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+
+    argparse_parser_init(&parser, "tatr proofs",
+                         "List the Definition of Done proofs of a task", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'k',
+        .long_name = "kind",
+        .description = "Only list proofs of this kind (test, cmd or manual)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    char *kind_str = argparse_get_value(&parser, "kind");
+    int wanted = -1;
+    if (kind_str != NULL) {
+        for (size_t i = 0; i < ENUM_COUNT(PROOF_KIND_NAMES); ++i) {
+            if (strcmp(kind_str, PROOF_KIND_NAMES[i]) == 0) {
+                wanted = (int)i;
+                break;
+            }
+        }
+        if (wanted < 0) {
+            aids_log(AIDS_ERROR, "Invalid proof kind '%s': expected " PROOF_MARKERS_CSTR
+                     " without the colon", kind_str);
+            return_defer(1);
+        }
+    }
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+    if (task_load_raw(&task_file_path, &task, &raw) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    size_t n = 0;
+    size_t cursor = 0;
+    Aids_String_Slice item = {0};
+    while (artifact_next_dod_item(raw, &cursor, &item)) {
+        size_t proof_cursor = 0;
+        Proof_Kind kind = Proof_Kind_TEST;
+        Aids_String_Slice text = {0};
+        while (artifact_next_proof(item, &proof_cursor, &kind, &text)) {
+            if (wanted >= 0 && (int)kind != wanted) {
+                continue;
+            }
+            n++;
+            printf("%zu\t%s\t", n, PROOF_KIND_NAMES[kind]);
+            proof_print_text(text);
+            printf("\n");
+        }
+    }
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
     }
     argparse_parser_free(&parser);
     return result;
@@ -4320,6 +5868,8 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  edit         Update fields of an existing task\n");
     fprintf(stderr, "  flow         Move a task to its next flow step\n");
     fprintf(stderr, "  rm           Remove a task by ID\n");
+    fprintf(stderr, "  scaffold     Create a missing sibling record from the schema\n");
+    fprintf(stderr, "  proofs       List the Definition of Done proofs of a task\n");
     fprintf(stderr, "  check        Lint task artifacts for process drift\n");
     fprintf(stderr, "\n");
 }
@@ -4406,6 +5956,12 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "rm") == 0) {
         result = main_rm(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "scaffold") == 0) {
+        result = main_scaffold(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "proofs") == 0) {
+        result = main_proofs(&ctx);
         return_defer(result);
     } else if (strcmp(subcommand, "check") == 0) {
         result = main_check(&ctx);

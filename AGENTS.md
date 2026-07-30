@@ -125,10 +125,20 @@ tatr flow <ID> --to PLANNED  # the plan gate: the only writer of PLAN STATUS
 tatr ls -f ':kind eq EPIC'   # the containers
 tatr ls -f ':depends contains <ID>'  # everything blocked on a task
 tatr check                   # lint the backlog for process drift (exit 1 on findings)
+tatr scaffold <ID> REVIEW    # write a sibling record from the schema table
+tatr scaffold <ID> --list    # every record kind for a task, path and presence
+tatr proofs <ID>             # the task's DoD proofs as data (nothing is executed)
 ```
 
 Per-task records live in the task's own folder: `RETRO.md` (and `REVIEW.md`)
-next to its `TASK.md`, per the flow skills. The pre-flow `docs/retros/` were
+next to its `TASK.md`, per the flow skills. Their format is not prose to be
+copied: `RECORD_SCHEMAS[]` in `tatr.c` is the one source for the title prefix,
+required `- KEY:` header fields and required `## ` sections of every kind, and
+`tatr scaffold <ID> <RECORD>` writes from that table while `tatr check`
+validates against it. Write a new record with `scaffold` rather than by hand;
+it is schema-clean from the first byte. Scaffolding refuses to overwrite an
+existing record - there is no `--force`, for the same reason `tatr flow` has
+none. The pre-flow `docs/retros/` were
 distilled into the ledger and removed (git history keeps them). Durable
 lessons go to `LESSONS.md` at the root; there is no scratch drawer.
 
@@ -170,9 +180,46 @@ ordinary IN_PROGRESS task lacks `- PLAN STATUS: APPROVED`; OPEN backlog and
 CLOSED tasks are never asked for one, and `NOT_REQUIRED` is how a record says
 its cycle predated plan state.
 
-The `DECISION.md` rules (`bad-decision-status`, `dangling-supersede`) need no
-such exemption: they are presence-gated, firing only when a task carries a
-`DECISION.md`.
+The `DECISION.md` and `SPIKE.md` content rules are presence-gated, firing only
+when a task carries that sibling, so they need no such exemption. Only
+`missing-spike-record` keys on `KIND: SPIKE`: any SPIKE.md that exists is
+validated whatever the task's kind, because `tatr scaffold <id> SPIKE` will
+write one for any task. `## Steps` and
+`## Definition of Done` are the plan gate's output, so `bad-record-schema` asks
+for them only from `- FLOW STEP: PLANNED` on - a task `tatr new` just created
+must not be a finding the moment it exists.
+
+`tatr flow` gates transitions on these same rules, through the same collector
+functions (`record_schema_problems`, `review_round_problems`,
+`spike_record_problems`, `decision_record_problems`, `task_record_problems`):
+`PLANNING -> PLANNED` owes the plan sections and their proofs,
+`REVIEWING -> COMPOUNDING` a schema-clean REVIEW.md, `COMPOUNDING -> DONE`
+additionally a schema-clean RETRO.md and DECISION.md. A refusal prints the rule
+slug the lint would print.
+
+Every record rule lives in a collector and nowhere else. The collectors return
+problems as data; `check_report_problems` is the only place `check` prints one
+and `flow_unmet_add_problems` the only place `flow` collects one. A rule added
+to `check_task` directly - as `bad-severity` and the supersede rules once were -
+is a rule the lifecycle does not enforce, and that is exactly how a transition
+comes to mint a record the lint then flags.
+
+Records written before a rule existed are classified in `tasks/EXEMPTIONS.md`,
+one `- <task-id> <rule>: <reason>` line each, rather than rewritten: the flow
+trail is append-only history. Every finding routes through `check_finding`, so
+any rule can be exempted the same way, and an exemption that never fires is
+itself a finding (`unused-exemption`) on a full scan. Do not add exemptions for
+new work - scaffold the record instead. Adding an entry shows up in the diff,
+which is the whole mechanism: it is visible and attributable, unlike the drift
+it replaces.
+
+tatr never executes a Definition of Done proof. `tatr proofs <ID>` prints each
+one as `<n><TAB><kind><TAB><text>`; the shell text of a `cmd:` proof
+round-trips verbatim and running it is the caller's decision, made in the
+caller's shell. A whitespace run collapses to one space only when it
+contains a byte that would break the record format - a newline (a continued
+bullet's wrap) or a tab (the field separator) - so intra-line spacing a command
+may depend on survives byte for byte and every line stays three fields.
 
 ## Development flow
 

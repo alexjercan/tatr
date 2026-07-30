@@ -547,33 +547,68 @@ flow_step_of() {
 # suite exercises the guards on the way to every fixture.
 #
 # EPIC containers are exempt from the review, retro and Steps requirements, so
-# nothing is scaffolded for them. Dependencies are NOT handled here: a blocker
-# must already be CLOSED before its dependant can reach WORKING, so drive the
-# blocker first. Returns non-zero when the walk is refused.
+# those are not scaffolded for them - but NOT from the record gate, so their own
+# container sections are. Dependencies are NOT handled here: a blocker must
+# already be CLOSED before its dependant can reach WORKING, so drive the blocker
+# first. Returns non-zero when the walk is refused.
+#
+# The sibling records go through `tatr scaffold`, so every fixture that walks
+# the lifecycle also exercises the scaffolder against the schema the gates read.
 drive_task_to() {
     local id=$1
     local target=$2
     local dir="tasks/$id"
     local step
+    local is_epic=0
+    grep -q '^- KIND: EPIC' "$dir/TASK.md" && is_epic=1
 
     while true; do
         step=$(flow_step_of "$id")
         if [ "$step" = "$target" ]; then
             return 0
         fi
-        if ! grep -q '^- KIND: EPIC' "$dir/TASK.md"; then
-            case "$step" in
-                REVIEWING)
-                    [ -f "$dir/REVIEW.md" ] || printf -- '- VERDICT: APPROVE\n' > "$dir/REVIEW.md"
-                    ;;
-                COMPOUNDING)
-                    [ -f "$dir/RETRO.md" ] || printf '# Retro\n' > "$dir/RETRO.md"
+        case "$step" in
+            PLANNING)
+                # The record gate: `## Steps` and `## Definition of Done` (or
+                # the container sections) are what PLANNED means, so they have
+                # to exist before the plan gate will mint that step.
+                if [ $is_epic -eq 1 ]; then
+                    grep -q '^## Done Means' "$dir/TASK.md" \
+                        || printf '\n## Done Means\n\n1. The children land (manual: the user confirms).\n' >> "$dir/TASK.md"
+                    grep -q '^## Child Tasks' "$dir/TASK.md" \
+                        || printf '\n## Child Tasks\n\n- [ ] a child\n' >> "$dir/TASK.md"
+                else
+                    grep -q '^## Steps' "$dir/TASK.md" \
+                        || printf '\n## Steps\n\n- [ ] the work itself\n' >> "$dir/TASK.md"
+                    grep -q '^## Definition of Done' "$dir/TASK.md" \
+                        || printf '\n## Definition of Done\n\n- The work is done (test: `test_the_work`).\n' >> "$dir/TASK.md"
+                fi
+                ;;
+            REVIEWING)
+                if [ $is_epic -eq 0 ] && [ ! -f "$dir/REVIEW.md" ]; then
+                    run_tatr scaffold "$id" REVIEW > /dev/null 2>&1
+                    # The scaffold opens a round at REQUEST_CHANGES with one
+                    # open MAJOR, which is what a fresh review looks like;
+                    # resolve it so the gate lets the walk continue.
+                    sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/;
+                            s/^- REVIEWER: TODO$/- REVIEWER: out-of-context/;
+                            s/^- VERDICT: REQUEST_CHANGES$/- VERDICT: APPROVE/;
+                            s/^- \[ \] R1\.1 (MAJOR) file:line - TODO$/- [x] R1.1 (MAJOR) file:line - fixed/' \
+                        "$dir/REVIEW.md"
+                fi
+                ;;
+            COMPOUNDING)
+                if [ $is_epic -eq 0 ]; then
+                    if [ ! -f "$dir/RETRO.md" ]; then
+                        run_tatr scaffold "$id" RETRO > /dev/null 2>&1
+                        sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/' "$dir/RETRO.md"
+                    fi
                     # Ticks every "- [ ]": the close gate counts the ones under
                     # "## Steps", and a fixture body carries no others.
                     sed -i 's/^- \[ \]/- [x]/' "$dir/TASK.md"
-                    ;;
-            esac
-        fi
+                fi
+                ;;
+        esac
         if ! run_tatr flow "$id" > /dev/null 2>&1; then
             return 1
         fi
@@ -825,7 +860,7 @@ test_v2_task_round_trip() {
     # both are ordinary prose, and the whole body must survive byte for byte.
     # (A body whose first line is metadata-shaped used to be written by `new`
     # and then rejected by every later read.)
-    printf -- '- NOTE: a bullet may open the body\n\n## Story\n\nMentions "- KIND: EPIC" in prose.\n\n## Steps\n\n- [ ] one\n' > body.md
+    printf -- '- NOTE: a bullet may open the body\n\n## Story\n\nMentions "- KIND: EPIC" in prose.\n\n## Steps\n\n- [ ] one\n\n## Definition of Done\n\n- One is done (test: `test_one`).\n' > body.md
 
     # The dependencies are real records driven to DONE: a task cannot reach
     # WORKING over an open blocker, so the round-trip fixture earns its state.
@@ -1202,6 +1237,11 @@ test_transition_state_machine() {
     local ok=1
     local seen=""
 
+    # This test drives the edges with a bare `tatr flow`, so it owes the record
+    # gate its plan sections up front; the gates themselves are pinned by
+    # test_transition_start_guards and test_transition_close_is_atomic.
+    printf '\n## Steps\n\n- [ ] the work itself\n\n## Definition of Done\n\n- It works (test: `test_it`).\n' >> "$task_file"
+
     # A bare `tatr flow` takes the single successor of the current step, so
     # the chain walks itself from BACKLOG up to REVIEWING.
     local want
@@ -1242,8 +1282,17 @@ test_transition_state_machine() {
     cmp -s before.md "$task_file" || ok=0
 
     # DONE is terminal: a bare walk off the end says so instead of looping.
-    printf -- '- VERDICT: APPROVE\n' > "tasks/$id/REVIEW.md"
-    printf '# Retro\n' > "tasks/$id/RETRO.md"
+    # The records go through the scaffolder, because the review and close gates
+    # hold them to the same schema `tatr check` does.
+    run_tatr scaffold "$id" REVIEW > /dev/null 2>&1 || ok=0
+    sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/;
+            s/^- REVIEWER: TODO$/- REVIEWER: out-of-context/;
+            s/^- VERDICT: REQUEST_CHANGES$/- VERDICT: APPROVE/;
+            s/^- \[ \] R1\.1 (MAJOR) file:line - TODO$/- [x] R1.1 (MAJOR) file:line - fixed/' \
+        "tasks/$id/REVIEW.md"
+    run_tatr scaffold "$id" RETRO > /dev/null 2>&1 || ok=0
+    sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/' "tasks/$id/RETRO.md"
+    sed -i 's/^- \[ \] the work itself$/- [x] the work itself/' "$task_file"
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0
     [ "$(flow_step_of "$id")" = "DONE" ] || ok=0
@@ -1336,12 +1385,19 @@ test_transition_close_is_atomic() {
     local dir="tasks/$id"
     local ok=1
 
-    printf '\n## Steps\n\n- [ ] the work itself\n' >> "$task_file"
+    printf '\n## Steps\n\n- [ ] the work itself\n\n## Definition of Done\n\n- The work is done (test: `test_the_work`).\n' >> "$task_file"
     drive_task_to "$id" REVIEWING || ok=0
 
     # The review gate: an APPROVE verdict is not enough while a BLOCKER or
     # MAJOR finding is still open.
-    printf -- '- VERDICT: APPROVE\n\n- [ ] R1.1 (MAJOR) tatr.c:1 - unresolved\n' > "$dir/REVIEW.md"
+    write_review "." "$id" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE
+
+- [ ] R1.1 (MAJOR) tatr.c:1 - unresolved
+ROUNDS
     set +e
     local open_out
     open_out=$(run_tatr flow "$id" 2>&1); local open_code=$?
@@ -1349,13 +1405,32 @@ test_transition_close_is_atomic() {
     [ $open_code -ne 0 ] || ok=0
     echo "$open_out" | grep -q "1 open BLOCKER/MAJOR finding" || ok=0
 
-    printf -- '- VERDICT: APPROVE\n\n- [x] R1.1 (MAJOR) tatr.c:1 - fixed\n' > "$dir/REVIEW.md"
+    write_review "." "$id" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE
+
+- [x] R1.1 (MAJOR) tatr.c:1 - fixed
+ROUNDS
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0
     [ "$(flow_step_of "$id")" = "COMPOUNDING" ] || ok=0
 
     # The close gate: an unchecked step, a missing retro and an invalid
     # DECISION.md status are all reported in one run, and nothing is written.
-    printf -- '- STATUS: MAYBE\n' > "$dir/DECISION.md"
+    {
+        echo "# Decision: the close gate fixture"
+        echo
+        echo "- DATE: 20260101-000000"
+        echo "- STATUS: MAYBE"
+        echo "- TASK: $id"
+        echo "- TAGS: decision"
+        echo
+        echo "## Context"; echo; echo "the forces"; echo
+        echo "## Decision"; echo; echo "the choice"; echo
+        echo "## Alternatives considered"; echo; echo "- the runner-up"; echo
+        echo "## Consequences"; echo; echo "- the downside"
+    } > "$dir/DECISION.md"
     cp "$task_file" before.md
     set +e
     local close_out
@@ -1371,8 +1446,11 @@ test_transition_close_is_atomic() {
     # Satisfied, the close writes DONE and CLOSED in the same record, and the
     # state it produces is one the lint calls clean.
     sed -i 's/^- \[ \] the work itself$/- [x] the work itself/' "$task_file"
-    printf '# Retro\n' > "$dir/RETRO.md"
-    printf -- '- STATUS: ACCEPTED\n' > "$dir/DECISION.md"
+    write_retro "." "$id"
+    # The scaffolder writes the accepted decision record, so the close gate and
+    # the lint see exactly the shape the schema table defines.
+    rm -f "$dir/DECISION.md"
+    run_tatr scaffold "$id" DECISION > /dev/null 2>&1 || ok=0
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0
     grep -q "^- FLOW STEP: DONE$" "$task_file" || ok=0
     grep -q "^- STATUS: CLOSED$" "$task_file" || ok=0
@@ -1408,7 +1486,7 @@ test_transition_epic_exemptions() {
 
     # A frozen container's step boxes stay verbatim: a dropped child is honest
     # history, not something to tick to satisfy a gate.
-    printf '\n## Steps\n\n- [ ] a child that was dropped\n' >> "$epic_file"
+    printf '\n## Done Means\n\n1. The children land (manual: the user confirms at Finish).\n\n## Child Tasks\n\n- [ ] 20260101-000000 dropped as superseded\n\n## Steps\n\n- [ ] a child that was dropped\n' >> "$epic_file"
 
     # It walks the whole chain with no REVIEW.md, no RETRO.md and an unchecked
     # step, exactly as `tatr check` exempts it afterwards.
@@ -2041,6 +2119,64 @@ write_check_task() {
     } > "$dir/tasks/$id/TASK.md"
 }
 
+# Writes a schema-clean REVIEW.md: the title and the TASK/BRANCH pointers the
+# schema requires, then the caller's rounds from stdin. Tests that exercise a
+# review RULE supply the rounds; tests that only need a review to exist get a
+# record that trips nothing else.
+write_review() {
+    local dir=$1 id=$2
+    mkdir -p "$dir/tasks/$id"
+    {
+        echo "# Review: Task $id"
+        echo
+        echo "- TASK: $id"
+        echo "- BRANCH: test/$id"
+        echo
+        cat
+    } > "$dir/tasks/$id/REVIEW.md"
+}
+
+# A schema-clean, one-round APPROVE review. The common case in fixtures that
+# only need a CLOSED task to have been reviewed.
+write_approved_review() {
+    write_review "$1" "$2" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE
+ROUNDS
+}
+
+# Writes a schema-clean RETRO.md. No fixture exercises a retro rule, so this
+# takes no body: every required header and section is filled in.
+write_retro() {
+    local dir=$1 id=$2
+    mkdir -p "$dir/tasks/$id"
+    {
+        echo "# Retro: Task $id"
+        echo
+        echo "- TASK: $id"
+        echo "- BRANCH: test/$id"
+        echo "- REVIEW ROUNDS: 1"
+        echo
+        echo "## What went well"
+        echo
+        echo "- it shipped"
+        echo
+        echo "## What went wrong"
+        echo
+        echo "- nothing worth a line"
+        echo
+        echo "## What to improve next time"
+        echo
+        echo "- nothing"
+        echo
+        echo "## Action items"
+        echo
+        echo "- none"
+    } > "$dir/tasks/$id/RETRO.md"
+}
+
 test_check_clean() {
     log_test "check (clean tasks: exit 0, no output)"
     local test_dir=$(create_test_dir)
@@ -2058,8 +2194,15 @@ BODY
 
 - [ ] unchecked outside Steps must not fire
 BODY
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n\n- [x] R1.1 (MINOR) f:1 - fine\n' > "$test_dir/tasks/20260101-100001/REVIEW.md"
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-100001/RETRO.md"
+    write_review "$test_dir" "20260101-100001" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE
+
+- [x] R1.1 (MINOR) f:1 - fine
+ROUNDS
+    write_retro "$test_dir" "20260101-100001"
 
     set +e
     local output
@@ -2106,7 +2249,12 @@ test_check_closed_not_approved() {
 
 - [x] done
 BODY
-    printf '# R\n\n## Round 1\n\n- VERDICT: REQUEST_CHANGES\n' > "$test_dir/tasks/20260101-120000/REVIEW.md"
+    write_review "$test_dir" "20260101-120000" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: REQUEST_CHANGES
+ROUNDS
 
     set +e
     local output
@@ -2119,8 +2267,8 @@ BODY
         first_ok=1
     fi
 
-    printf '\n## Round 2\n\n- VERDICT: APPROVE\n' >> "$test_dir/tasks/20260101-120000/REVIEW.md"
-    printf '\n## Round 2\n\n- VERDICT: APPROVE\n' >> "$test_dir/tasks/20260101-120000/RETRO.md"
+    printf '\n## Round 2\n\n- REVIEWER: out-of-context\n- VERDICT: APPROVE\n' >> "$test_dir/tasks/20260101-120000/REVIEW.md"
+    write_retro "$test_dir" "20260101-120000"
 
     set +e
     output=$(run_tatr -r "$test_dir" check 2>&1)
@@ -2246,8 +2394,8 @@ BODY
 - [x] clean
 BODY
 
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-160001/REVIEW.md"
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE\n' > "$test_dir/tasks/20260101-160001/RETRO.md"
+    write_approved_review "$test_dir" "20260101-160001"
+    write_retro "$test_dir" "20260101-160001"
 
     set +e
     local dirty_output
@@ -2312,8 +2460,15 @@ test_check_scanner_edges() {
 
 - [x] done
 BODY
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE (1 round)\n\n- [ ] Rebase onto master (before merging)\n' > "$test_dir/tasks/20260101-180001/REVIEW.md"
-    printf '# R\n\n## Round 1\n\n- VERDICT: APPROVE (1 round)\n' > "$test_dir/tasks/20260101-180001/RETRO.md"
+    write_review "$test_dir" "20260101-180001" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE (1 round)
+
+- [ ] Rebase onto master (before merging)
+ROUNDS
+    write_retro "$test_dir" "20260101-180001"
 
     set +e
     local output
@@ -2367,6 +2522,10 @@ test_check_unplanned_in_progress() {
 ## Steps
 
 - [ ] planned work may be in progress
+
+## Definition of Done
+
+- The work is done (test: `test_something`).
 BODY
     write_check_task "$test_dir" "20260101-195001" "IN_PROGRESS" <<'BODY'
 ## Steps
@@ -2402,6 +2561,10 @@ test_check_epic_exemptions() {
     # An EPIC container: its aggregate record lives in its own TASK.md, its
     # child tasks carry review/retro, and its frozen step boxes stay verbatim.
     write_check_task "$test_dir" "20260101-196000" "CLOSED" EPIC DONE APPROVED <<'BODY'
+## Done Means
+
+1. The children land (manual: the user confirms at Finish).
+
 ## Child Tasks
 
 - [x] 20260101-196001 shipped
@@ -2409,6 +2572,10 @@ test_check_epic_exemptions() {
 BODY
     # An EPIC may also sit IN_PROGRESS without an approved plan of its own.
     write_check_task "$test_dir" "20260101-196003" "IN_PROGRESS" EPIC WORKING DRAFT <<'BODY'
+## Done Means
+
+1. The children land (manual: the user confirms at Finish).
+
 ## Child Tasks
 
 - [ ] 20260101-196004 in flight
@@ -2454,6 +2621,9 @@ BODY
 # All presence-gated: they fire only when a task folder has a DECISION.md.
 # OPEN tasks are used so the only possible findings are the decision ones.
 
+# Writes a DECISION.md: the caller supplies the title and header block on
+# stdin (that is what the decision rules read), and the helper appends the
+# four sections the schema requires so those rules are tested in isolation.
 write_decision() {
     local dir=$1 id=$2
     write_check_task "$dir" "$id" "OPEN" <<'BODY'
@@ -2461,7 +2631,25 @@ write_decision() {
 
 - decision-bearing task
 BODY
-    cat > "$dir/tasks/$id/DECISION.md"
+    {
+        cat
+        echo
+        echo "## Context"
+        echo
+        echo "the forces"
+        echo
+        echo "## Decision"
+        echo
+        echo "the choice"
+        echo
+        echo "## Alternatives considered"
+        echo
+        echo "- the runner-up"
+        echo
+        echo "## Consequences"
+        echo
+        echo "- the downside"
+    } > "$dir/tasks/$id/DECISION.md"
 }
 
 test_check_bad_decision_status() {
@@ -2507,8 +2695,10 @@ test_check_good_decision_status() {
     write_decision "$test_dir" "20260101-200100" <<'BODY'
 # Decision: accepted with an enum-hint comment
 
+- DATE: 20260101-200100
 - STATUS: ACCEPTED   # ACCEPTED | SUPERSEDED by tasks/<id>/DECISION.md
 - TASK: 20260101-200100
+- TAGS: decision
 
 ## Decision
 
@@ -2569,15 +2759,19 @@ test_check_resolving_supersede() {
     write_decision "$test_dir" "20260101-210000" <<'BODY'
 # Decision: the old one
 
+- DATE: 20260101-210000
 - STATUS: SUPERSEDED by tasks/20260101-210001/DECISION.md
 - TASK: 20260101-210000
+- TAGS: decision
 BODY
     write_decision "$test_dir" "20260101-210001" <<'BODY'
 # Decision: the new one
 
+- DATE: 20260101-210001
 - STATUS: ACCEPTED
 - Supersedes: tasks/20260101-210000/DECISION.md
 - TASK: 20260101-210001
+- TAGS: decision
 BODY
 
     set +e
@@ -2590,6 +2784,777 @@ BODY
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_reciprocal_supersede() {
+    log_test "check (nonreciprocal-supersede: a supersede link must resolve both ways)"
+    local test_dir=$(create_test_dir)
+
+    # OLD points forward to NEW, but NEW never says it supersedes OLD: the
+    # forward half of the link resolves, so only the reciprocity rule fires.
+    write_decision "$test_dir" "20260101-230000" <<'BODY'
+# Decision: the abandoned one
+
+- DATE: 20260101-230000
+- STATUS: SUPERSEDED by tasks/20260101-230001/DECISION.md
+- TASK: 20260101-230000
+- TAGS: decision
+BODY
+    write_decision "$test_dir" "20260101-230001" <<'BODY'
+# Decision: the replacement that never claimed the replacement
+
+- DATE: 20260101-230001
+- STATUS: ACCEPTED
+- TASK: 20260101-230001
+- TAGS: decision
+BODY
+
+    # The mirror image: NEW claims to supersede OLD, but OLD's STATUS still
+    # says ACCEPTED, so the record it names does not agree it was replaced.
+    write_decision "$test_dir" "20260101-230100" <<'BODY'
+# Decision: the one that was never told
+
+- DATE: 20260101-230100
+- STATUS: ACCEPTED
+- TASK: 20260101-230100
+- TAGS: decision
+BODY
+    write_decision "$test_dir" "20260101-230101" <<'BODY'
+# Decision: the unilateral replacement
+
+- DATE: 20260101-230101
+- STATUS: ACCEPTED
+- Supersedes: tasks/20260101-230100/DECISION.md
+- TASK: 20260101-230101
+- TAGS: decision
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-230000: nonreciprocal-supersede: STATUS supersedes '20260101-230001' but its DECISION.md has no '- Supersedes: 20260101-230000' line" \
+        && echo "$output" | grep -q "20260101-230101: nonreciprocal-supersede: Supersedes '20260101-230100' but its DECISION.md STATUS does not say 'SUPERSEDED by 20260101-230101'" \
+        && ! echo "$output" | grep -q "20260101-230001: nonreciprocal" \
+        && ! echo "$output" | grep -q "20260101-230100: nonreciprocal"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_dangling_decision_task() {
+    log_test "check (dangling-decision-task: the TASK pointer must resolve)"
+    local test_dir=$(create_test_dir)
+    write_decision "$test_dir" "20260101-240000" <<'BODY'
+# Decision: points at nothing
+
+- DATE: 20260101-240000
+- STATUS: ACCEPTED
+- TASK: 20260101-999999
+- TAGS: decision
+BODY
+    write_decision "$test_dir" "20260101-240001" <<'BODY'
+# Decision: points at a sibling that exists
+
+- DATE: 20260101-240001
+- STATUS: ACCEPTED
+- TASK: 20260101-240000
+- TAGS: decision
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-240000: dangling-decision-task: DECISION.md TASK '20260101-999999' has no TASK.md" \
+        && ! echo "$output" | grep -q "20260101-240001: dangling-decision-task"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+# --- record schema checks (one table, five record kinds) ---
+
+test_record_scaffolds() {
+    log_test "scaffold (every kind renders schema-clean and refuses to clobber)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    local ok=1
+
+    local id
+    id=$(run_tatr -r "$test_dir" new "A scaffolded task" | sed 's/.*ID: //')
+    [ -n "$id" ] || ok=0
+
+    # --list names every record kind, its path and whether it is there yet.
+    local list_out
+    list_out=$(run_tatr -r "$test_dir" scaffold "$id" --list 2>&1)
+    echo "$list_out" | grep -q "^TASK	.*/tasks/$id/TASK.md	present$" || ok=0
+    echo "$list_out" | grep -q "^REVIEW	.*/tasks/$id/REVIEW.md	missing$" || ok=0
+    [ "$(echo "$list_out" | wc -l)" -eq 5 ] || ok=0
+
+    # --dry-run reports the path it WOULD write and writes nothing.
+    local dry_out
+    dry_out=$(run_tatr -r "$test_dir" scaffold "$id" RETRO --dry-run 2>&1)
+    echo "$dry_out" | grep -q "^.*/tasks/$id/RETRO.md	RETRO$" || ok=0
+    [ ! -f "$test_dir/tasks/$id/RETRO.md" ] || ok=0
+
+    # Each kind renders its own title, its own header fields and its own
+    # sections - all from the one table `check` validates against.
+    local kind
+    for kind in SPIKE DECISION REVIEW RETRO; do
+        run_tatr -r "$test_dir" scaffold "$id" "$kind" > /dev/null 2>&1 || ok=0
+    done
+    grep -q "^# Spike: A scaffolded task$" "$test_dir/tasks/$id/SPIKE.md" || ok=0
+    grep -q "^# Decision: A scaffolded task$" "$test_dir/tasks/$id/DECISION.md" || ok=0
+    grep -q "^# Review: A scaffolded task$" "$test_dir/tasks/$id/REVIEW.md" || ok=0
+    grep -q "^# Retro: A scaffolded task$" "$test_dir/tasks/$id/RETRO.md" || ok=0
+    grep -q "^- TASK: $id$" "$test_dir/tasks/$id/RETRO.md" || ok=0
+    grep -q "^## Round 1$" "$test_dir/tasks/$id/REVIEW.md" || ok=0
+    grep -q "^## Alternatives considered$" "$test_dir/tasks/$id/DECISION.md" || ok=0
+    grep -q "^## Next steps$" "$test_dir/tasks/$id/SPIKE.md" || ok=0
+
+    # The scaffolded records pass the lint with their placeholders still in
+    # place: an author fills them in, they do not have to guess the shape.
+    # (The bare TASK.md is still BACKLOG, which owes no Steps or DoD yet.)
+    set +e
+    local check_out
+    check_out=$(run_tatr -r "$test_dir" check 2>&1)
+    local check_code=$?
+    set -e
+    [ $check_code -eq 0 ] || ok=0
+    [ -z "$check_out" ] || ok=0
+
+    # An existing record is never clobbered, and the refusal changes nothing.
+    cp "$test_dir/tasks/$id/REVIEW.md" "$test_dir/before.md"
+    set +e
+    local clobber_out
+    clobber_out=$(run_tatr -r "$test_dir" scaffold "$id" REVIEW 2>&1)
+    local clobber_code=$?
+    set -e
+    [ $clobber_code -eq 1 ] || ok=0
+    echo "$clobber_out" | grep -q "Refusing to overwrite" || ok=0
+    cmp -s "$test_dir/before.md" "$test_dir/tasks/$id/REVIEW.md" || ok=0
+
+    # TASK.md is `tatr new`'s job, and an unknown kind is refused by name.
+    set +e
+    run_tatr -r "$test_dir" scaffold "$id" TASK > /dev/null 2>&1
+    [ $? -eq 1 ] || ok=0
+    run_tatr -r "$test_dir" scaffold "$id" NOTES > /dev/null 2>&1
+    [ $? -eq 1 ] || ok=0
+    set -e
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "list: $list_out | dry: $dry_out | check($check_code): $check_out | clobber: $clobber_out"
+    fi
+}
+
+test_check_record_schemas() {
+    log_test "check (bad-record-schema: title, header fields and sections per kind)"
+    local test_dir=$(create_test_dir)
+
+    # A planned task owes the plan gate's sections; this one has neither.
+    write_check_task "$test_dir" "20260101-250000" "OPEN" TASK PLANNED APPROVED <<'BODY'
+## Notes
+
+- planned, but nothing to build and nothing to prove
+BODY
+    # An Epic container owes the container sections instead.
+    write_check_task "$test_dir" "20260101-250001" "OPEN" EPIC PLANNED APPROVED <<'BODY'
+## Steps
+
+- [ ] an Epic's record is its done definition and its child queue
+BODY
+    # A REVIEW.md with the wrong title and no pointers; a RETRO.md missing one
+    # required section and carrying another one empty.
+    write_check_task "$test_dir" "20260101-250002" "OPEN" <<'BODY'
+## Notes
+
+- carries sibling records
+BODY
+    printf '# Findings\n\n## Round 1\n\n- REVIEWER: out-of-context\n- VERDICT: APPROVE\n' \
+        > "$test_dir/tasks/20260101-250002/REVIEW.md"
+    cat > "$test_dir/tasks/20260101-250002/RETRO.md" <<'RETRO'
+# Retro: Task 20260101-250002
+
+- TASK: 20260101-250002
+- BRANCH: test/250002
+- REVIEW ROUNDS: 1
+
+## What went well
+
+- it shipped
+
+## What went wrong
+
+## What to improve next time
+
+- nothing
+
+## Action items
+
+- none
+RETRO
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-250000: bad-record-schema: TASK.md has no '## Steps' section" \
+        && echo "$output" | grep -q "20260101-250000: bad-record-schema: TASK.md has no '## Definition of Done' section" \
+        && echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Done Means' section" \
+        && echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Child Tasks' section" \
+        && ! echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Steps'" \
+        && echo "$output" | grep -q "20260101-250002: bad-record-schema: REVIEW.md does not open with '# Review: <title>'" \
+        && echo "$output" | grep -q "20260101-250002: bad-record-schema: REVIEW.md has no '- TASK: ' line" \
+        && echo "$output" | grep -q "20260101-250002: bad-record-schema: REVIEW.md has no '- BRANCH: ' line" \
+        && echo "$output" | grep -q "20260101-250002: bad-record-schema: RETRO.md section '## What went wrong' is empty"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_backlog_owes_no_plan_sections() {
+    log_test "check (Steps and DoD are owed from PLANNED on, not at BACKLOG)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    local ok=1
+
+    # A task `tatr new` just created must not be a finding the moment it
+    # exists: the plan gate is what produces Steps and a Definition of Done.
+    local id
+    id=$(run_tatr -r "$test_dir" new "Fresh off the backlog" | sed 's/.*ID: //')
+    set +e
+    local fresh_out
+    fresh_out=$(run_tatr -r "$test_dir" check 2>&1)
+    local fresh_code=$?
+    set -e
+    [ $fresh_code -eq 0 ] || ok=0
+    [ -z "$fresh_out" ] || ok=0
+
+    # The same body at PLANNED is a finding.
+    write_check_task "$test_dir" "20260101-260000" "OPEN" TASK PLANNED APPROVED <<'BODY'
+Nothing but prose.
+BODY
+    set +e
+    local planned_out
+    planned_out=$(run_tatr -r "$test_dir" check 2>&1)
+    local planned_code=$?
+    set -e
+    [ $planned_code -eq 1 ] || ok=0
+    echo "$planned_out" | grep -q "20260101-260000: bad-record-schema: TASK.md has no '## Steps' section" || ok=0
+    echo "$planned_out" | grep -q "$id" && ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "fresh($fresh_code): $fresh_out | planned($planned_code): $planned_out"
+    fi
+}
+
+test_check_review_approval_consistency() {
+    log_test "check (rounds, reviewers, verdicts, finding IDs, APPROVE consistency)"
+    local test_dir=$(create_test_dir)
+
+    # APPROVE while a MAJOR finding is still unticked: the review approves work
+    # it has itself declared unfinished.
+    write_check_task "$test_dir" "20260101-270000" "OPEN" <<'BODY'
+## Notes
+
+- reviewed task
+BODY
+    write_review "$test_dir" "20260101-270000" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE
+
+- [ ] R1.1 (MAJOR) tatr.c:1 - still open
+- [x] R1.2 (MINOR) tatr.c:2 - a MINOR does not block
+ROUNDS
+
+    # A missing reviewer, a verdict outside the vocabulary, a round that skips
+    # a number, and finding IDs from the wrong round / out of sequence.
+    write_check_task "$test_dir" "20260101-270001" "OPEN" <<'BODY'
+## Notes
+
+- reviewed task
+BODY
+    write_review "$test_dir" "20260101-270001" <<'ROUNDS'
+## Round 1
+
+- VERDICT: LGTM
+
+- [x] R1.2 (MINOR) tatr.c:1 - the first finding of a round is R1.1
+
+## Round 3
+
+- REVIEWER: out-of-context
+- VERDICT: REQUEST_CHANGES
+
+- [ ] R1.1 (MAJOR) tatr.c:2 - a round-1 ID inside round 3
+ROUNDS
+
+    # A clean two-round review must stay silent.
+    write_check_task "$test_dir" "20260101-270002" "OPEN" <<'BODY'
+## Notes
+
+- reviewed task
+BODY
+    write_review "$test_dir" "20260101-270002" <<'ROUNDS'
+## Round 1
+
+- REVIEWER: out-of-context
+- VERDICT: REQUEST_CHANGES
+
+- [x] R1.1 (MAJOR) tatr.c:1 - fixed
+- [x] R1.2 (NIT) tatr.c:2 - fixed
+
+## Round 2
+
+- REVIEWER: out-of-context
+- VERDICT: APPROVE
+ROUNDS
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-270000: approve-with-open-findings: REVIEW.md verdict is APPROVE with 1 open BLOCKER/MAJOR finding(s)" \
+        && echo "$output" | grep -q "20260101-270001: bad-verdict: invalid VERDICT 'LGTM'" \
+        && echo "$output" | grep -q "20260101-270001: bad-finding-id: REVIEW.md finding R1.2 follows R1.0" \
+        && echo "$output" | grep -q "20260101-270001: missing-reviewer: REVIEW.md round 1 has no '- REVIEWER: ' line" \
+        && echo "$output" | grep -q "20260101-270001: bad-review-round: REVIEW.md round 3 follows round 1" \
+        && echo "$output" | grep -q "20260101-270001: bad-finding-id: REVIEW.md finding R1.1 sits in round 3" \
+        && ! echo "$output" | grep -q "20260101-270002"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_dod_proof_syntax() {
+    log_test "check (bad-proof-syntax: every DoD item names a proof)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-280000" "OPEN" TASK PLANNED APPROVED <<'BODY'
+## Steps
+
+- [ ] build it
+
+## Definition of Done
+
+- A criterion nothing can check is a wish.
+- The wrapped one still counts, because a bullet's continuation lines
+  belong to the item (test: `test_wrapped_proof`).
+- The suite is green
+  (cmd: `nix develop -c ./checker.sh`).
+- The user confirms it looks right (manual: click through the flow).
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-280000: bad-proof-syntax: Definition of Done item has no test:, cmd: or manual: proof: - A criterion nothing can check is a wish." \
+        && [ "$(echo "$output" | grep -c 'bad-proof-syntax')" -eq 1 ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_spike_records() {
+    log_test "check (SPIKE.md presence, status vocabulary and seeded pointers)"
+    local test_dir=$(create_test_dir)
+
+    # A planned SPIKE task with no research doc.
+    write_check_task "$test_dir" "20260101-290000" "OPEN" SPIKE PLANNED APPROVED <<'BODY'
+## Question
+
+- is it worth it?
+BODY
+    # One with a doc, but an invented status and a seeded pointer to nothing.
+    write_check_task "$test_dir" "20260101-290001" "OPEN" SPIKE PLANNED APPROVED <<'BODY'
+## Question
+
+- is the other thing worth it?
+BODY
+    cat > "$test_dir/tasks/20260101-290001/SPIKE.md" <<'SPIKE'
+# Spike: is the other thing worth it?
+
+- DATE: 20260101-290001
+- STATUS: EXPLORING
+- TAGS: spike
+
+## Question
+
+what we set out to reduce
+
+## Context
+
+what already exists
+
+## Options considered
+
+- one, and the other
+
+## Recommendation
+
+the one
+
+## Open questions
+
+- none
+
+## Next steps
+
+- tatr 20260101-999999: build the thing
+SPIKE
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    # A SPIKE.md on a KIND: TASK record is still validated: the CONTENT rules
+    # are presence-gated, and `tatr scaffold <id> SPIKE` will write one for any
+    # task. Only missing-spike-record keys on the task's kind.
+    write_check_task "$test_dir" "20260101-290002" "OPEN" TASK PLANNED APPROVED <<'BODY'
+## Steps
+
+- [ ] an ordinary task
+
+## Definition of Done
+
+- It works (test: `test_it`).
+BODY
+    printf '# Spike: a spike doc on an ordinary task\n\n- DATE: 20260101-290002\n- STATUS: MAYBE\n- TAGS: spike\n' \
+        > "$test_dir/tasks/20260101-290002/SPIKE.md"
+    # ... while a task with no SPIKE.md and no SPIKE kind is never asked for one.
+    write_check_task "$test_dir" "20260101-290003" "OPEN" TASK PLANNED APPROVED <<'BODY'
+## Steps
+
+- [ ] no spike here
+
+## Definition of Done
+
+- It works (test: `test_it`).
+BODY
+
+    set +e
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -q "20260101-290000: missing-spike-record: KIND: SPIKE task has no SPIKE.md" \
+        && echo "$output" | grep -q "20260101-290001: bad-spike-status: invalid SPIKE.md STATUS 'EXPLORING'" \
+        && echo "$output" | grep -q "20260101-290001: dangling-seeded-task: SPIKE.md seeds '20260101-999999' which has no TASK.md" \
+        && ! echo "$output" | grep -q "20260101-290001: bad-record-schema" \
+        && echo "$output" | grep -q "20260101-290002: bad-spike-status: invalid SPIKE.md STATUS 'MAYBE'" \
+        && echo "$output" | grep -q "20260101-290002: bad-record-schema: SPIKE.md has no '## Question' section" \
+        && ! echo "$output" | grep -q "20260101-290002: missing-spike-record" \
+        && ! echo "$output" | grep -q "20260101-290003"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_check_exemptions() {
+    log_test "check (EXEMPTIONS.md suppresses a rule; a stale entry is a finding)"
+    local test_dir=$(create_test_dir)
+    write_check_task "$test_dir" "20260101-300000" "CLOSED" <<'BODY'
+## Steps
+
+- [ ] a historical record, kept verbatim
+BODY
+    write_check_task "$test_dir" "20260101-300001" "CLOSED" <<'BODY'
+## Steps
+
+- [ ] not exempted
+BODY
+    write_approved_review "$test_dir" "20260101-300000"
+    write_retro "$test_dir" "20260101-300000"
+    write_approved_review "$test_dir" "20260101-300001"
+    write_retro "$test_dir" "20260101-300001"
+
+    cat > "$test_dir/tasks/EXEMPTIONS.md" <<'EX'
+# Historical schema exemptions
+
+Prose lines and headings are ignored; only the bullets below are exemptions.
+
+- 20260101-300000 closed-unchecked: pre-flow record, kept verbatim
+- 20260101-300002 bad-severity: this task does not even exist any more
+EX
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check 2>&1)
+    local exit_code=$?
+    set -e
+
+    local full_ok=0
+    if [ $exit_code -eq 1 ] \
+        && ! echo "$output" | grep -q "20260101-300000: closed-unchecked" \
+        && echo "$output" | grep -q "20260101-300001: closed-unchecked: 1 unchecked" \
+        && echo "$output" | grep -q "20260101-300002: unused-exemption: 'bad-severity' is exempted in EXEMPTIONS.md but did not fire"; then
+        full_ok=1
+    fi
+
+    # A per-ID run honours the exemptions but must NOT report unused ones: it
+    # never evaluated the other tasks' rules, so it cannot know.
+    set +e
+    local one_output
+    one_output=$(run_tatr -r "$test_dir" check 20260101-300000 2>&1)
+    local one_code=$?
+    set -e
+
+    if [ $full_ok -eq 1 ] && [ $one_code -eq 0 ] && [ -z "$one_output" ]; then
+        pass_test
+    else
+        fail_test "full($exit_code): $output | one($one_code): $one_output"
+    fi
+}
+
+test_proof_listing_does_not_execute() {
+    log_test "proofs (structured listing round-trips shell text without running it)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    local ok=1
+    local canary="$test_dir/canary"
+    local tab
+    tab=$(printf '\t')
+
+    # The cmd: proof holds live shell text - a command substitution, a
+    # redirection and a chained rm. Listing it must print it, not run it.
+    write_check_task "$test_dir" "20260101-310000" "OPEN" TASK PLANNED APPROVED <<BODY
+## Steps
+
+- [ ] build it
+
+## Definition of Done
+
+- The suite is green (cmd: \`touch $canary && echo \$(whoami) > $canary; rm -rf $canary\`).
+- The unit is pinned (test: \`test_the_unit\`).
+- The user clicks through it (manual: open the app and press the button).
+- Spacing is not rewritten (cmd: \`grep -q "a  b" f\`).
+- A tab cannot break the format (cmd: \`printf 'a${tab}b'\`).
+- The wrapped one is joined
+  (cmd: \`make clean &&
+  make\`).
+BODY
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" proofs 20260101-310000 2>&1)
+    local exit_code=$?
+    set -e
+
+    [ $exit_code -eq 0 ] || ok=0
+    # Nothing ran: the canary the shell text would have created is absent.
+    [ ! -e "$canary" ] || ok=0
+    # The shell text came back verbatim, in order, one proof per line.
+    echo "$output" | grep -qF "1	cmd	\`touch $canary && echo \$(whoami) > $canary; rm -rf $canary\`" || ok=0
+    echo "$output" | grep -qF '2	test	`test_the_unit`' || ok=0
+    echo "$output" | grep -qF '3	manual	open the app and press the button' || ok=0
+    # Only a whitespace run containing a newline collapses: the line wrap of a
+    # continuation becomes one space, while intra-line spacing a shell command
+    # may depend on is passed through byte for byte.
+    echo "$output" | grep -qF '4	cmd	`grep -q "a  b" f`' || ok=0
+    echo "$output" | grep -qF "5	cmd	\`printf 'a b'\`" || ok=0
+    echo "$output" | grep -qF '6	cmd	`make clean && make`' || ok=0
+    # Every line is exactly three tab-separated fields: a tab inside a proof
+    # collapses like a newline does, or a consumer splitting on tabs would see
+    # a fourth field appear out of the proof's own text.
+    [ "$(echo "$output" | wc -l)" -eq 6 ] || ok=0
+    [ "$(echo "$output" | awk -F'\t' '{print NF}' | sort -u)" = "3" ] || ok=0
+
+    # --kind filters without renumbering surprises: the index counts what is
+    # printed, so a filtered listing is still 1..n.
+    set +e
+    local test_only
+    test_only=$(run_tatr -r "$test_dir" proofs 20260101-310000 --kind test 2>&1)
+    set -e
+    [ "$test_only" = "$(printf '1\ttest\t`test_the_unit`')" ] || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output | filtered: $test_only"
+    fi
+}
+
+test_existing_artifacts_are_classified() {
+    log_test "check (this repo's own artifacts pass or are explicitly exempted)"
+    local ok=1
+
+    # The real backlog, under the real rules. Every record either conforms or
+    # is classified in tasks/EXEMPTIONS.md, and no exemption is stale.
+    set +e
+    local output
+    output=$(run_tatr -r "$PROJECT_DIR" check 2>&1)
+    local exit_code=$?
+    set -e
+    [ $exit_code -eq 0 ] || ok=0
+    [ -z "$output" ] || ok=0
+
+    # The classification is explicit, not a blanket switch: EXEMPTIONS.md
+    # exists and names the rule and the task on every line it exempts.
+    [ -f "$PROJECT_DIR/tasks/EXEMPTIONS.md" ] || ok=0
+    grep -q "^- 20260329-123700 bad-review-round: " "$PROJECT_DIR/tasks/EXEMPTIONS.md" || ok=0
+
+    # And it is not load-bearing for recent work: the tasks written under the
+    # flow suite carry no exemption at all.
+    ! grep -q "^- 20260730-154657 " "$PROJECT_DIR/tasks/EXEMPTIONS.md" || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_transition_cannot_mint_a_flagged_record() {
+    log_test "flow (no transition produces a state tatr check would flag)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+    local id=$(new_task_id "Tying invariant")
+    local dir="tasks/$id"
+    local ok=1
+
+    # The plan gate is where a record starts owing `## Steps` and
+    # `## Definition of Done`, so PLANNING -> PLANNED is where it must be
+    # refused - not later, when `check` would already be flagging a PLANNED
+    # record the tool itself minted.
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    [ "$(flow_step_of "$id")" = "PLANNING" ] || ok=0
+    set +e
+    local plan_out
+    plan_out=$(run_tatr flow "$id" --to PLANNED 2>&1); local plan_code=$?
+    set -e
+    [ $plan_code -ne 0 ] || ok=0
+    echo "$plan_out" | grep -q "bad-record-schema: TASK.md has no '## Steps' section" || ok=0
+    echo "$plan_out" | grep -q "bad-record-schema: TASK.md has no '## Definition of Done' section" || ok=0
+
+    # A proofless Definition of Done is refused by the same gate, under the
+    # same rule name the lint would print.
+    printf '\n## Steps\n\n- [ ] the work\n\n## Definition of Done\n\n- A wish nothing can check.\n' >> "$dir/TASK.md"
+    set +e
+    local proof_out
+    proof_out=$(run_tatr flow "$id" --to PLANNED 2>&1); local proof_code=$?
+    set -e
+    [ $proof_code -ne 0 ] || ok=0
+    echo "$proof_out" | grep -q "bad-proof-syntax: Definition of Done item has no" || ok=0
+
+    sed -i 's/^- A wish nothing can check\.$/- The work is done (test: `test_the_work`)./' "$dir/TASK.md"
+    run_tatr flow "$id" --to PLANNED > /dev/null 2>&1 || ok=0
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0   # WORKING
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0   # REVIEWING
+
+    # The review gate holds a REVIEW.md to the same schema. The pre-flow shape
+    # - a bare verdict line with no title, pointers or rounds - reaches DONE in
+    # a tool without this gate, and `tatr check` then reports it.
+    printf -- '- VERDICT: APPROVE\n' > "$dir/REVIEW.md"
+    set +e
+    local review_out
+    review_out=$(run_tatr flow "$id" 2>&1); local review_code=$?
+    set -e
+    [ $review_code -ne 0 ] || ok=0
+    echo "$review_out" | grep -q "bad-review-round: REVIEW.md has no '## Round 1' heading" || ok=0
+    echo "$review_out" | grep -q "bad-record-schema: REVIEW.md has no '- TASK: ' line" || ok=0
+
+    run_tatr scaffold "$id" REVIEW > /dev/null 2>&1 && ok=0   # refuses to clobber
+    rm -f "$dir/REVIEW.md"
+    run_tatr scaffold "$id" REVIEW > /dev/null 2>&1 || ok=0
+    sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/;
+            s/^- REVIEWER: TODO$/- REVIEWER: out-of-context/;
+            s/^- VERDICT: REQUEST_CHANGES$/- VERDICT: APPROVE/;
+            s/^- \[ \] R1\.1 (MAJOR) file:line - TODO$/- [x] R1.1 (LOW) file:line - fixed/' \
+        "$dir/REVIEW.md"
+
+    # Every REVIEW.md rule is in the gate, not just the structural ones: an
+    # invented severity is `bad-severity` to the lint, so it must be
+    # `bad-severity` to the transition too.
+    set +e
+    local severity_out
+    severity_out=$(run_tatr flow "$id" 2>&1); local severity_code=$?
+    set -e
+    [ $severity_code -ne 0 ] || ok=0
+    echo "$severity_out" | grep -q "bad-severity: unknown severity 'LOW' in REVIEW.md" || ok=0
+
+    sed -i 's/(LOW)/(MAJOR)/' "$dir/REVIEW.md"
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0   # COMPOUNDING
+
+    # ... and likewise every DECISION.md rule, not only its STATUS value: a
+    # supersede link that resolves nowhere is `dangling-supersede` on both sides.
+    run_tatr scaffold "$id" DECISION > /dev/null 2>&1 || ok=0
+    sed -i 's|^- STATUS: ACCEPTED$|- STATUS: SUPERSEDED by tasks/19990101-000000/DECISION.md|' \
+        "$dir/DECISION.md"
+
+    # And the close gate holds RETRO.md to its schema the same way.
+    printf '# Retro\n' > "$dir/RETRO.md"
+    sed -i 's/^- \[ \] the work$/- [x] the work/' "$dir/TASK.md"
+    set +e
+    local retro_out
+    retro_out=$(run_tatr flow "$id" 2>&1); local retro_code=$?
+    set -e
+    [ $retro_code -ne 0 ] || ok=0
+    echo "$retro_out" | grep -q "bad-record-schema: RETRO.md has no '## What went well' section" || ok=0
+
+    rm -f "$dir/RETRO.md"
+    run_tatr scaffold "$id" RETRO > /dev/null 2>&1 || ok=0
+    sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/' "$dir/RETRO.md"
+
+    set +e
+    local supersede_out
+    supersede_out=$(run_tatr flow "$id" 2>&1); local supersede_code=$?
+    set -e
+    [ $supersede_code -ne 0 ] || ok=0
+    echo "$supersede_out" | grep -q "dangling-supersede: STATUS supersedes" || ok=0
+
+    sed -i 's|^- STATUS: SUPERSEDED by tasks/19990101-000000/DECISION.md$|- STATUS: ACCEPTED|' \
+        "$dir/DECISION.md"
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0   # DONE
+    [ "$(flow_step_of "$id")" = "DONE" ] || ok=0
+
+    # The whole point: the state the lifecycle just produced is one the lint
+    # calls clean.
+    set +e
+    local check_out
+    check_out=$(run_tatr check 2>&1); local check_code=$?
+    set -e
+    [ $check_code -eq 0 ] || ok=0
+    [ -z "$check_out" ] || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "plan($plan_code): $plan_out | proof($proof_code): $proof_out | review($review_code): $review_out | severity($severity_code): $severity_out | retro($retro_code): $retro_out | supersede($supersede_code): $supersede_out | check($check_code): $check_out"
     fi
 }
 
@@ -2684,15 +3649,21 @@ test_windows_build_target() {
     local output
     output=$(
         make -C "$PROJECT_DIR" clean >/dev/null &&
-        make -C "$PROJECT_DIR" windows &&
+        make -C "$PROJECT_DIR" windows 2>&1 &&
         file "$PROJECT_DIR/dist/tatr.exe"
     2>&1)
     local exit_code=$?
     set -e
 
+    # Warning-clean under MinGW too, not just under clang. MinGW's default
+    # printf archetype is msvcrt's and rejects %zu, so a format attribute
+    # written for glibc turns every %zu in a checked reporter into a warning
+    # here while the native build stays silent. The release pipeline ships
+    # this binary, so the warnings have to fail the suite rather than scroll by.
     if [ $exit_code -eq 0 ] &&
         echo "$output" | grep -q "dist/tatr.exe" &&
-        echo "$output" | grep -Eq "PE32|PE32\\+"; then
+        echo "$output" | grep -Eq "PE32|PE32\\+" &&
+        ! echo "$output" | grep -q "warning:"; then
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
@@ -2790,6 +3761,18 @@ test_check_bad_decision_status
 test_check_good_decision_status
 test_check_dangling_supersede
 test_check_resolving_supersede
+test_check_reciprocal_supersede
+test_check_dangling_decision_task
+test_record_scaffolds
+test_check_record_schemas
+test_check_backlog_owes_no_plan_sections
+test_check_review_approval_consistency
+test_check_dod_proof_syntax
+test_check_spike_records
+test_check_exemptions
+test_proof_listing_does_not_execute
+test_existing_artifacts_are_classified
+test_transition_cannot_mint_a_flagged_record
 test_check_decision_absent_unaffected
 test_build_guard_bare_shell_fails
 test_build_guard_nix_shell_passes

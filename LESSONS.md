@@ -46,16 +46,30 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `target-compiler-first` (x1): for cross-platform work, run the target compiler
   before designing portability shims so the first fix set follows real
   diagnostics. 20260728-095149
-- `guard-from-the-rule-not-its-summary` (x1): when a change must not violate
-  another component's rule, enumerate that component's ACTUAL rules in code -
-  a decision record's prose list drops distinctions (check exempts an EPIC from
-  closed-missing-review but not closed-not-approved). 20260730-154657
+- `guard-from-the-rule-not-its-summary` (x2): when two components must agree
+  (lint and lifecycle, parser and serializer), enumerate BOTH ACTUAL rule sets
+  in code and diff the lists - in whichever direction the change arrives.
+  Adding a rule to one side is the same failure as writing a guard from the
+  other side's prose summary. 20260730-154657, 20260730-154745
+- `fix-the-property-not-the-instance` (x1): a finding that names a broken
+  invariant is not resolved by making the reported path hold; move the rule to
+  one home so the invariant is structural, then write it down. Fixing the two
+  instances left two more holes and a second MAJOR round. 20260730-154745
+- `paste-transcripts-from-a-real-run` (x1): a command transcript in a doc is a
+  claim; paste it from a run in the same session rather than typing what you
+  expect. Three of one round's seven findings were invented output. 20260730-154745
+- `a-passing-suite-is-not-a-covered-property` (x1): before trusting N/N on a
+  cross-cutting property (warning-cleanliness, leaks, portability), read the
+  test that supposedly covers it - the Windows test asserted a PE artifact and
+  let four new compiler warnings through. 20260730-154745
 - `no-outcome-before-the-run` (x1): never write a verdict, count or "confirmed"
   into a record before the thing producing it has run, however certain the
   outcome looks. 20260730-154657
-- `mutation-test-the-new-guard` (x1): delete each new guard one at a time and
+- `mutation-test-the-new-guard` (x2): delete each new guard one at a time and
   watch its own test go red - cheap, and it turns "this test would fail without
-  the fix" from an assertion into a check. 20260730-154657
+  the fix" from an assertion into a check. The mutation must remove the SIDE
+  EFFECT, not just the return value: `0 * report(...)` still prints.
+  20260730-154657, 20260730-154745
 - `serialize-build-artifact-checks` (x1): do not parallelize verification
   commands that clean or rewrite the same build outputs in one worktree.
   20260728-095149

@@ -20,6 +20,8 @@ primarily a toy project inspired by Tsoding's streams.
 - **Human-readable IDs**: Each task gets a timestamp-based HUID (format: `YYYYMMDD-HHMMSS`)
 - **Metadata support**: Track status, priority, and tags for each task
 - **Guarded lifecycle**: `tatr flow` is the only writer of the workflow fields, and every transition is checked before it is written
+- **One record schema**: `tatr scaffold` writes the sibling records (SPIKE, DECISION, REVIEW, RETRO) from the same in-code table `tatr check` validates them against
+- **Structured DoD proofs**: `tatr proofs` prints each Definition of Done proof as data - tatr never executes any of it
 - **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
 - **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
 - **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
@@ -376,6 +378,34 @@ tatr check --ledger LESSONS.md   # also lint a lessons ledger
 ```
 
 **Default rules:**
+- `bad-record-schema`: a record does not match its schema - the wrong title
+  prefix, a missing or empty required `- KEY:` header field, or a missing or
+  empty required `## ` section. Applies to `TASK.md` (kind-specific sections,
+  see below), `SPIKE.md`, `DECISION.md`, `REVIEW.md` and `RETRO.md`.
+- `bad-review-round`: a `REVIEW.md` has no `## Round 1` heading, or its rounds
+  are not numbered from 1 without gaps.
+- `bad-verdict`: a review round has no `- VERDICT:` line, or one outside
+  APPROVE|REQUEST_CHANGES.
+- `missing-reviewer`: a review round has no `- REVIEWER:` line, or an empty one.
+- `bad-finding-id`: a finding's ID is not `R<round>.<index>`, sits in a
+  different round than its heading, or skips an index.
+- `approve-with-open-findings`: a `REVIEW.md` whose latest verdict is APPROVE
+  still has an unticked BLOCKER or MAJOR finding.
+- `bad-proof-syntax`: a `## Definition of Done` item names no `test:`, `cmd:`
+  or `manual:` proof. A wrapped bullet's continuation lines count as part of
+  the item.
+- `missing-spike-record`: a planned `KIND: SPIKE` task has no `SPIKE.md`.
+- `bad-spike-status`: a `SPIKE.md` `- STATUS:` value outside
+  RECOMMENDED|INCONCLUSIVE|DROPPED.
+- `dangling-seeded-task`: a task ID under a `SPIKE.md`'s `## Next steps`
+  section has no `TASK.md`.
+- `dangling-decision-task`: a `DECISION.md`'s `- TASK:` pointer is not a task
+  ID, or names a task that does not exist.
+- `nonreciprocal-supersede`: a supersede link resolves in only one direction -
+  A says `SUPERSEDED by B` but B carries no `- Supersedes: A` line, or the
+  reverse.
+- `unused-exemption`: an entry in `tasks/EXEMPTIONS.md` never fired on a full
+  scan (reported against the task it names).
 - `closed-unchecked`: a CLOSED task still has unchecked `- [ ]` items under
   its `## Steps` section (other sections may keep open boxes).
 - `closed-missing-review`: a CLOSED task has no `REVIEW.md`.
@@ -410,13 +440,113 @@ thing. Containers are exempt from the record-completeness rules
 children are honest history), and from `unplanned-in-progress` (the plan gate
 applies to the work tasks underneath it).
 
-The two `DECISION.md` rules are presence-gated: a task without a `DECISION.md`
-is never flagged, so they need no migration of existing tasks.
+The `DECISION.md` and `SPIKE.md` rules are presence-gated: a task without such
+a sibling is never flagged for its contents, so they need no migration of
+existing tasks.
+
+`## Steps` and `## Definition of Done` are the plan gate's output, so
+`bad-record-schema` asks for them only from `- FLOW STEP: PLANNED` on - a task
+`tatr new` just created is not a finding the moment it exists. The required
+sections are kind-specific: `TASK`/`STORY` owe `## Steps` and
+`## Definition of Done`, `EPIC` owes `## Done Means` and `## Child Tasks`, and
+`SPIKE` owes `## Question` plus a `SPIKE.md` sibling.
+
+The same rules gate the lifecycle. `tatr flow` reads them through the same
+functions `check` does, so a transition can never mint a record the lint would
+immediately flag: `PLANNING -> PLANNED` requires the plan sections and their
+proofs, `REVIEWING -> COMPOUNDING` requires a schema-clean REVIEW.md, and
+`COMPOUNDING -> DONE` requires all of that plus a schema-clean RETRO.md and
+DECISION.md. A refusal names the same rule slug the lint would print:
+
+```console
+$ tatr flow 20260101-100000 --to PLANNED
+ERROR: Refusing to move 20260101-100000 from PLANNING to PLANNED: 2 precondition(s) not met
+  - bad-record-schema: TASK.md has no '## Steps' section
+  - bad-record-schema: TASK.md has no '## Definition of Done' section
+```
+
+#### Historical exemptions
+
+Records written before a rule existed are classified in `tasks/EXEMPTIONS.md`
+rather than rewritten - the flow trail is append-only history. One line per
+suppressed finding:
+
+```markdown
+- 20260329-123700 bad-review-round: pre-flow REVIEW.md, single verdict, no rounds
+```
+
+An entry suppresses that rule for that task alone. Any rule can be exempted the
+same way, because every finding routes through the same reporter. An entry that
+never fires is itself a finding (`unused-exemption`) on a full scan, so the list
+cannot rot. New work does not get exemptions: scaffold the record and it is
+schema-clean from the first byte.
 
 **Options:**
 - `-L, --ledger <FILE>`: add `promotion-stalled` for a ledger lesson at three
   or more occurrences (`(x3)` and up) outside the `## Pending promotions`
   section (path relative to the root)
+
+### Scaffolding Sibling Records
+
+`tatr scaffold` writes a task's sibling records from the schema table `check`
+validates against, so a scaffolded record passes the lint with its placeholders
+still in place:
+
+```bash
+tatr scaffold 20260331-144635 REVIEW      # write REVIEW.md
+tatr scaffold 20260331-144635 --list      # every kind, its path and presence
+tatr scaffold 20260331-144635 RETRO -n    # print the path, write nothing
+```
+
+Kinds are `SPIKE`, `DECISION`, `REVIEW` and `RETRO`. `TASK.md` is created by
+`tatr new` instead - it is typed metadata rather than a prose record.
+
+There is no `--force`: scaffolding refuses to overwrite an existing record, and
+an existing record is edited by hand, in the diff, where a reviewer sees it.
+
+```console
+$ tatr scaffold 20260730-153325 --list
+TASK	/repo/tasks/20260730-153325/TASK.md	present
+SPIKE	/repo/tasks/20260730-153325/SPIKE.md	missing
+DECISION	/repo/tasks/20260730-153325/DECISION.md	present
+REVIEW	/repo/tasks/20260730-153325/REVIEW.md	present
+RETRO	/repo/tasks/20260730-153325/RETRO.md	present
+```
+
+**Options:**
+- `-l, --list`: list every record kind with its path and `present`/`missing`
+- `-n, --dry-run`: print the path and record kind that would be written
+
+### Listing Definition of Done Proofs
+
+`tatr proofs` prints each `## Definition of Done` proof as one
+`<n><TAB><kind><TAB><text>` line. **tatr never executes anything**: a `cmd:`
+proof's shell text round-trips verbatim, and running it is the caller's
+decision, made in the caller's shell where the user can see the command.
+
+```console
+$ tatr proofs 20260730-154745
+1	test	`test_record_scaffolds`
+2	test	`test_check_record_schemas`
+3	test	`test_check_review_approval_consistency`
+4	test	`test_check_reciprocal_supersede`
+5	test	`test_proof_listing_does_not_execute`
+6	test	`test_existing_artifacts_are_classified`
+7	cmd	`nix develop -c ./checker.sh && nix develop -c ./checker.sh --memcheck`
+
+$ tatr proofs 20260730-154745 --kind cmd
+1	cmd	`nix develop -c ./checker.sh && nix develop -c ./checker.sh --memcheck`
+```
+
+A proof may wrap across lines in the source bullet. A whitespace run collapses
+to a single space only when it contains a byte that would break the record
+format - a newline (the wrap) or a tab (the field separator). Everything else
+is passed through byte for byte, so intra-line spacing a shell command may
+depend on (`grep -q "a  b"`) survives, and every line is always exactly three
+tab-separated fields.
+
+**Options:**
+- `-k, --kind <KIND>`: only list proofs of one kind (`test`, `cmd` or `manual`)
 
 ### Global Options
 
@@ -492,8 +622,13 @@ the field it stopped at; correct such a record by hand.
 ```
 your-project/
 ├── tasks/
+│   ├── EXEMPTIONS.md          # optional: historical check exemptions
 │   ├── 20260331-144635/
-│   │   └── TASK.md
+│   │   ├── TASK.md
+│   │   ├── REVIEW.md          # optional sibling records, written by
+│   │   ├── RETRO.md           # `tatr scaffold` and validated by `tatr check`
+│   │   ├── DECISION.md
+│   │   └── SPIKE.md
 │   ├── 20260330-202358/
 │   │   └── TASK.md
 │   └── 20260329-123700/
@@ -502,6 +637,11 @@ your-project/
 ```
 
 The tool searches for a `tasks/` directory starting from your current directory and walking up the tree. This allows you to run `tatr` from any subdirectory of your project.
+
+Only `TASK.md` is required. The sibling records are optional per task; which ones
+a task owes depends on where it is in the flow (see [Checking Task
+Artifacts](#checking-task-artifacts)). `EXEMPTIONS.md` sits beside the task
+directories, not inside one, because it classifies records across the backlog.
 
 ## Architecture
 

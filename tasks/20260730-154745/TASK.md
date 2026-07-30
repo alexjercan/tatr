@@ -1,10 +1,10 @@
 # Scaffold and validate flow artifact schemas
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 85
-- TAGS: feature,flow,schema,testing
+- TAGS: feature, flow, schema, testing
 - KIND: TASK
-- FLOW STEP: PLANNED
+- FLOW STEP: DONE
 - PLAN STATUS: APPROVED
 - DEPENDS ON: 20260730-153325, 20260730-154657
 
@@ -17,30 +17,30 @@ being repeated in skill prose.
 
 ## Steps
 
-- [ ] Inspect the lifecycle commands and close guards from 20260730-154657,
+- [x] Inspect the lifecycle commands and close guards from 20260730-154657,
       then list every artifact field those commands depend on before changing
       schemas.
-- [ ] Define one in-code schema table for TASK, SPIKE, DECISION, REVIEW, and
+- [x] Define one in-code schema table for TASK, SPIKE, DECISION, REVIEW, and
       RETRO headings, required sections, allowed status/verdict values, and
       task-kind-specific record requirements.
-- [ ] Add scaffold commands that create missing sibling records from the
+- [x] Add scaffold commands that create missing sibling records from the
       schema table, refuse to overwrite existing files by default, and expose a
       dry-run/list mode for callers that only need paths and template names.
-- [ ] Extend `tatr check` to validate non-empty required sections, SPIKE
+- [x] Extend `tatr check` to validate non-empty required sections, SPIKE
       status/seeded pointers, DoD `test:`/`cmd:`/`manual:` proof syntax,
       sequential review rounds, finding IDs, reviewer fields, verdicts, and
       APPROVE with no open BLOCKER or MAJOR findings.
-- [ ] Strengthen DECISION checks so task pointers resolve and supersede links
+- [x] Strengthen DECISION checks so task pointers resolve and supersede links
       are reciprocal between the old and replacement records.
-- [ ] Add a structured proof-listing command that prints each DoD proof as data
+- [x] Add a structured proof-listing command that prints each DoD proof as data
       without executing shell text.
-- [ ] Revalidate tatr's existing task siblings under the stricter rules,
+- [x] Revalidate tatr's existing task siblings under the stricter rules,
       classify historical exceptions explicitly, and avoid rewriting history
       except for required lifecycle annotations.
-- [ ] Add integration tests that exercise scaffold, schema lint, proof listing,
+- [x] Add integration tests that exercise scaffold, schema lint, proof listing,
       review consistency, reciprocal supersede, and existing-artifact
       migration behavior.
-- [ ] Update README.md, AGENTS.md, CHANGELOG.md, and `skills/tatr/SKILL.md`
+- [x] Update README.md, AGENTS.md, CHANGELOG.md, and `skills/tatr/SKILL.md`
       from the implemented command names and output.
 
 ## Definition of Done

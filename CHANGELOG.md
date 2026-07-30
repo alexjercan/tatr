@@ -6,6 +6,40 @@ All notable changes to tatr are documented here.
 
 ### Added
 
+- `tatr scaffold <ID> <RECORD>`: creates a missing sibling record (`SPIKE`,
+  `DECISION`, `REVIEW` or `RETRO`) from `RECORD_SCHEMAS[]`, the single in-code
+  table `tatr check` now validates records against - so a scaffolded record
+  passes the lint with its `TODO` placeholders still in place, and a format
+  change is one edit rather than a scaffolder and a checker drifting apart.
+  `--list` prints every kind with its path and `present`/`missing`;
+  `--dry-run` prints the path it would write and writes nothing. It refuses to
+  overwrite an existing record, and there is no `--force`.
+- `tatr proofs <ID>`: prints each `## Definition of Done` proof as one
+  `<n><TAB><kind><TAB><text>` line, where kind is `test`, `cmd` or `manual`.
+  tatr never executes any of it: a `cmd:` proof's shell text round-trips
+  verbatim and running it is the caller's decision. `-k/--kind` filters to one
+  kind. A proof wrapped across a bullet's continuation lines is still one
+  proof, printed on one line.
+- Fourteen `tatr check` rules over the flow artifacts, all reading the same
+  schema table: `bad-record-schema` (title prefix, required `- KEY:` header
+  fields, required non-empty `## ` sections, per record kind and per task
+  kind); `bad-review-round`, `bad-verdict`, `missing-reviewer`,
+  `bad-finding-id` and `approve-with-open-findings` over a REVIEW.md's round
+  structure; `bad-proof-syntax` over Definition of Done items;
+  `missing-spike-record`, `bad-spike-status` and `dangling-seeded-task` over
+  SPIKE.md; `dangling-decision-task` and `nonreciprocal-supersede` over
+  DECISION.md; and `unused-exemption` over the exemption list below. `## Steps`
+  and `## Definition of Done` are the plan gate's output, so they are asked for
+  only from `- FLOW STEP: PLANNED` on.
+
+- `tasks/EXEMPTIONS.md`: the historical exemption list. Records written before
+  a rule existed are classified with one `- <task-id> <rule>: <reason>` line
+  rather than rewritten, because the flow trail is append-only history. Every
+  check finding routes through one reporter, so any rule can be exempted the
+  same way, and an exemption that never fires is itself a finding on a full
+  scan. This repository ships 37 such lines over 21 tasks: 14 pre-flow, 6
+  early-flow, and one flow-suite retro (20260730-153325) that predates the
+  fixed retro section vocabulary.
 - `tatr flow <ID> [--to <STEP>]`: the guarded lifecycle. It walks the eight
   legal edges (BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING ->
   REVIEWING -> COMPOUNDING -> DONE, plus the REVIEWING -> WORKING fix loop),
@@ -21,6 +55,16 @@ All notable changes to tatr are documented here.
 
 ### Changed
 
+- `tatr flow` gates every transition on the same record rules `tatr check`
+  applies, reading them through the same collector functions rather than a
+  second copy - including `bad-severity` and the `DECISION.md` supersede rules,
+  which now live in those collectors rather than in `check` alone.
+  `PLANNING -> PLANNED` requires the plan sections and their proofs,
+  `REVIEWING -> COMPOUNDING` a schema-clean `REVIEW.md`, and
+  `COMPOUNDING -> DONE` additionally a schema-clean `RETRO.md` and
+  `DECISION.md`. A refusal names the rule slug the lint would print. This is
+  what keeps the tying invariant true: no transition can produce a state the
+  lint would then flag.
 - **Breaking:** `STATUS`, `FLOW STEP` and `PLAN STATUS` are no longer settable
   through `new` or `edit`. `-s/--status` is gone from both, and
   `-f/--flow-step` and `-S/--plan-status` are gone from the shared metadata
