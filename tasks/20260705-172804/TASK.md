@@ -3,6 +3,9 @@
 - STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature
+- KIND: TASK
+- FLOW STEP: DONE
+- PLAN STATUS: NOT_REQUIRED
 
 The README lists "No built-in task editing command" as a limitation. Agents
 cannot open an interactive editor, so they need a non-interactive way to change

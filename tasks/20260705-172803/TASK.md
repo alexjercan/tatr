@@ -3,6 +3,9 @@
 - STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
+- KIND: TASK
+- FLOW STEP: DONE
+- PLAN STATUS: NOT_REQUIRED
 
 Agents driving the plan-work-review cycle need to read the full details of a
 single task by its HUID, not just the one-line `ls` summary. Add a `show`

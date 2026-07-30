@@ -15,18 +15,28 @@ against another directory.
 ```bash
 tatr [-r ROOT] <subcommand> [options]
 
-tatr new "Title" [-p <priority>] [-t tag1,tag2] [-s OPEN|IN_PROGRESS|CLOSED] [-b <file>]
+tatr new "Title" [-p <priority>] [-t tag1,tag2] [-s OPEN|IN_PROGRESS|CLOSED] [-b <file>] [<metadata options>]
 tatr ls [-s created|priority|title] [-R] [-f '<query>']
 tatr show <id>
-tatr edit <id> [-T "New title"] [-p <priority>] [-t tag1,tag2] [-s <status>]
+tatr edit <id> [-T "New title"] [-p <priority>] [-t tag1,tag2] [-s <status>] [<metadata options>]
 tatr rm <id>
 tatr check [<id>] [-L|--ledger <file>]
 ```
 
-- `tatr new` creates the task directory and TASK.md, then prints the task ID. Default status is OPEN, default priority 0. `-b/--body-file <file>` seeds the description body from a file (`-` reads stdin) - prefer it over creating an empty task and editing the file afterwards. If the generated ID already exists (two `new` calls in the same second), tatr fails instead of overwriting; retry after the second changes.
-- `tatr ls` prints one line per task: `<filepath>: [PRIORITY: N, TAGS: ...] Title`. `-s/--sort` orders by `created` (default), `priority` (descending), or `title`; `-R` recurses into nested `tasks/` dirs; `-f` filters with the query language below.
-- `tatr show <id>` prints one task's full details: title, status, priority, tags, and the whole description body, with a clickable file path.
-- `tatr edit <id>` updates fields in place without opening an editor. Only passed flags change; the description body is preserved. `-t` replaces the tag set, it does not merge. Invalid status values are rejected and the file is left untouched.
+`<metadata options>`, shared by `new` and `edit`:
+
+```bash
+-k|--kind TASK|EPIC|STORY|SPIKE
+-f|--flow-step BACKLOG|UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE
+-S|--plan-status DRAFT|APPROVED|NOT_REQUIRED
+-P|--parent <id>
+-d|--depends-on <id>
+```
+
+- `tatr new` creates the task directory and TASK.md, then prints the task ID. Defaults are `OPEN`, priority 0, `KIND: TASK`, `FLOW STEP: BACKLOG`, `PLAN STATUS: DRAFT`, and no relationships. `-b/--body-file <file>` seeds the description body from a file (`-` reads stdin) - prefer it over creating an empty task and editing the file afterwards. If the generated ID already exists (two `new` calls in the same second), tatr fails instead of overwriting; retry after the second changes.
+- `tatr ls` prints one line per task: `<filepath>: [PRIORITY: N, KIND: K, FLOW STEP: F, TAGS: ...] Title`. `-s/--sort` orders by `created` (default), `priority` (descending), or `title`; `-R` recurses into nested `tasks/` dirs; `-f` filters with the query language below.
+- `tatr show <id>` prints one task's full details: the whole record exactly as it would be written back, with a clickable file path.
+- `tatr edit <id>` updates fields in place without opening an editor. Only passed flags change; the description body is preserved. `-t` and `-d` replace their lists, they do not merge; an empty value (`-P ""`, `-d ""`) clears an optional relationship field. Invalid values are rejected and the file is left untouched.
 - `tatr rm <id>` deletes the task's directory after validating the ID and resolving the existing `tasks/<id>/` path.
 - `tatr check` lints task artifacts for process drift. Findings print as `<id>: <rule>: <detail>`, exit 1 on any finding, and exit 0 with no output when clean. There is no `--strict` flag: record-completeness checks are on by default. With `<id>`, it checks one task. With `-L/--ledger <file>`, it also checks the lessons ledger for stalled promotions.
 
@@ -39,22 +49,23 @@ Default `tatr check` rules:
 - `closed-missing-retro`: a CLOSED task has no `RETRO.md`.
 - `closed-not-approved`: a CLOSED task's latest `- VERDICT:` line in REVIEW.md is not APPROVE, or there is no verdict line.
 - `bad-severity`: a REVIEW.md finding uses a severity outside BLOCKER|MAJOR|MINOR|NIT.
-- `malformed-header`: TASK.md is missing, unreadable, does not parse, or has a STATUS token other than exactly OPEN, IN_PROGRESS, or CLOSED. Whitespace and line endings count.
-- `bad-flow-state`: a `## Flow State` marker has an invalid exact value.
-- `unplanned-in-progress`: an IN_PROGRESS task lacks `PLAN STATUS: APPROVED` under `## Flow State`.
+- `malformed-header`: TASK.md is missing, unreadable, or its title and metadata block do not parse. This covers every invalid metadata token - STATUS, KIND, FLOW STEP, PLAN STATUS, PARENT, DEPENDS ON - because the parser validates the exact bytes it consumes. Whitespace and line endings count.
+- `unplanned-in-progress`: an IN_PROGRESS task lacks `- PLAN STATUS: APPROVED`. `KIND: EPIC` containers are exempt.
 - `bad-decision-status`: a task's `DECISION.md`, when present, has a `- STATUS:` value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference, either in `SUPERSEDED by <ref>` or `- Supersedes: <ref>`, does not resolve to an existing `tasks/<id>/DECISION.md`.
 - `promotion-stalled`: with `--ledger <file>`, a lesson at `(x3)` or more appears outside the ledger's `## Pending promotions` section. Annotated counts such as `(x3, PROMOTED ...)`, `(x3, absorbed by ...)`, or `(x3, RETIRED ...)` are lifecycle markers and are exempt.
 
 The `DECISION.md` rules are presence-gated: a task with no `DECISION.md` is
-not flagged by those rules. The approved-plan marker is required only for
-IN_PROGRESS tasks, so CLOSED tasks and ordinary OPEN backlog items do not need
-it.
+not flagged by those rules. The approved plan is required only for IN_PROGRESS
+tasks, so CLOSED tasks and ordinary OPEN backlog items do not need it, and
+`KIND: EPIC` containers are exempt from the record-completeness rules,
+`closed-unchecked` and `unplanned-in-progress` alike.
 
 ## Filtering
 
 `tatr ls -f` takes a small query language over task fields (`:status`,
-`:priority`, `:tags`), with operators `eq`, `contains`, `in` (with `[...]`
+`:priority`, `:title`, `:tags`, `:kind`, `:flow_step`, `:plan_status`,
+`:parent`, `:depends`), with operators `eq`, `contains`, `in` (with `[...]`
 lists) and the connectives `and`, `or`, `not`, grouped with parentheses:
 
 ```bash
@@ -62,7 +73,14 @@ tatr ls -f '(:status eq OPEN)'
 tatr ls -f ':tags contains feature'
 tatr ls -f '(:status eq OPEN) and (:tags contains feature)'
 tatr ls -f ':tags contains v0.8.0' --sort priority
+tatr ls -f ':kind eq EPIC'
+tatr ls -f '(:plan_status eq APPROVED) and (:flow_step in [BACKLOG, PLANNED])'
+tatr ls -f ':parent eq 20260730-153122'
+tatr ls -f ':depends contains 20260730-153325'
 ```
+
+The enum-valued fields (`:status`, `:kind`, `:flow_step`, `:plan_status`) take
+`eq` and `in`; `:parent` takes `eq`; `:tags` and `:depends` take `contains`.
 
 Filtering composes with `-s/--sort` and `-R`. Prefer `-f` over piping
 `tatr ls` through `grep`.
@@ -77,15 +95,45 @@ Keep the metadata header exact; tatr owns it:
 - STATUS: OPEN
 - PRIORITY: 100
 - TAGS: feature, security
+- KIND: TASK
+- FLOW STEP: BACKLOG
+- PLAN STATUS: DRAFT
+- PARENT: 20260730-153122
+- DEPENDS ON: 20260730-153325, 20260730-154745
 
 <free-form description body>
 ```
 
-Status values are case-sensitive: `OPEN`, `IN_PROGRESS`, `CLOSED`. Priority is
-a non-negative integer, higher = more important. Slot priority relative to the
-existing backlog (`tatr ls --sort priority` first), not on an absolute scale.
-Projects may define scheduling-tag conventions in AGENTS.md; check before
-tagging.
+The first six fields are required and always written back, in exactly this
+order. `PARENT` and `DEPENDS ON` are optional and appear only when set. All
+values are case-sensitive and validated on the exact token: `STATUS` is
+`OPEN|IN_PROGRESS|CLOSED`, `KIND` is `TASK|EPIC|STORY|SPIKE`, `FLOW STEP` is
+`BACKLOG|UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`,
+and `PLAN STATUS` is `DRAFT|APPROVED|NOT_REQUIRED`. Priority is a non-negative
+integer, higher = more important. Slot priority relative to the existing
+backlog (`tatr ls --sort priority` first), not on an absolute scale. Projects
+may define scheduling-tag conventions in AGENTS.md; check before tagging.
+
+`PARENT` and `DEPENDS ON` hold task IDs from the same `tasks/` tree; a parent
+in another repository belongs in the body prose instead. tatr validates them as
+IDs only - existence and cycles are not checked.
+
+There is no migration path from the older format that had no `KIND` line and
+kept flow state under a `## Flow State` heading. Such a record is rejected with
+a diagnostic naming the file and the field; correct it by hand.
+
+Everything after the metadata block is body text: opaque, and preserved byte
+for byte. A bullet is a bullet, even an uppercase one. Blank lines and leading
+whitespace between fields are tolerated and normalized away on the next write,
+but a key written with no value (`- PARENT:`) is an error, not body text.
+
+tatr never writes a record it cannot read back: `new` and `edit` re-parse the
+serialized bytes before writing and fail without touching disk if the result
+would not parse (a newline in a title or tag is the usual cause).
+
+`tatr ls` skips a record that does not parse, names it on stderr, and exits
+non-zero - so one broken record cannot hide the rest of the backlog, and
+listing is a safe way to find what still needs correcting.
 
 For non-trivial tasks, structure the body as a story:
 
@@ -113,18 +161,11 @@ Trivial tasks may use a plain paragraph. Prefer `tatr edit` for metadata fields
 and `tatr new -b` for the initial body; hand-edit the file only for later body
 updates.
 
-Flow-managed work may also include:
-
-```markdown
-## Flow State
-
-- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE
-- PLAN STATUS: APPROVED
-```
-
 `PLAN STATUS: APPROVED` is durable proof that the user accepted the plan gate
-before work began. Do not treat `## Steps` checkboxes as proof that planning
-was approved.
+before work began; set it with `tatr edit <id> -S APPROVED`. Do not treat
+`## Steps` checkboxes as proof that planning was approved. `NOT_REQUIRED` is
+for a record whose cycle never carried plan state, such as pre-flow history -
+it says so honestly rather than back-dating an approval that never happened.
 
 Sibling records live next to TASK.md in the same task folder: `SPIKE.md`,
 `DECISION.md`, `REVIEW.md`, `RETRO.md`, and `NOTES.md`. Use the project's
@@ -137,7 +178,7 @@ Picking up work:
 
 1. Run `tatr ls --sort priority` or `tatr ls -f '(:status eq OPEN)' --sort priority`.
 2. Run `tatr show <id>` and read the full task plus sibling records.
-3. If the task is flow-managed, confirm it has `PLAN STATUS: APPROVED` before `tatr edit <id> -s IN_PROGRESS`; otherwise plan it first.
+3. If the task is flow-managed, confirm it has `PLAN STATUS: APPROVED` before `tatr edit <id> -s IN_PROGRESS -f WORKING`; otherwise plan it first.
 4. Append implementation notes to the task description as you go.
 
 Finishing work:

@@ -732,6 +732,356 @@ test_edit_missing_id() {
     fi
 }
 
+# Corrupts one metadata line of $task_file, then proves `edit` refuses it, says
+# why, and writes nothing. Sets bad_ok=0 and appends to bad_detail on failure.
+# Callers set task_file / pristine.md / bad_ok / bad_detail first.
+reject_bad_value() {
+    local field=$1 value=$2 expected=$3
+    cp pristine.md "$task_file"
+    sed -i "s/^- $field: .*/- $field: $value/" "$task_file"
+    cp "$task_file" tampered.md
+
+    set +e
+    local output
+    output=$(run_tatr edit "$id" -T "Renamed" 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ] \
+        || ! echo "$output" | grep -q "invalid $field '$value'" \
+        || ! echo "$output" | grep -q "$expected" \
+        || ! cmp -s tampered.md "$task_file"; then
+        bad_ok=0
+        bad_detail="$bad_detail; $field=$value (exit $exit_code): $output"
+    fi
+}
+
+# --- v2 schema tests ---
+# The v2 record is one flat metadata block: STATUS, PRIORITY, TAGS, KIND,
+# FLOW STEP, PLAN STATUS, then the optional PARENT and DEPENDS ON. There is no
+# migration path: a record that does not carry the required fields is rejected.
+
+test_v2_task_round_trip() {
+    log_test "v2 (round trip preserves every field and the body)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    # The body starts with an uppercase bullet and mentions a field inline:
+    # both are ordinary prose, and the whole body must survive byte for byte.
+    # (A body whose first line is metadata-shaped used to be written by `new`
+    # and then rejected by every later read.)
+    printf -- '- NOTE: a bullet may open the body\n\n## Story\n\nMentions "- KIND: EPIC" in prose.\n\n## Steps\n\n- [ ] one\n' > body.md
+
+    local full_id=$(new_task_id "Every field" -p 42 -t alpha -t beta -s IN_PROGRESS \
+        -k STORY -f WORKING -S APPROVED -P 20260101-000000 \
+        -d 20260102-000000 -d 20260103-000000 -b body.md)
+    sleep 1 # IDs have second resolution and `new` refuses a same-second collision
+    local bare_id=$(new_task_id "No relationships" -b body.md)
+
+    local full_file="tasks/$full_id/TASK.md"
+    local bare_file="tasks/$bare_id/TASK.md"
+    cp "$full_file" full_before.md
+    cp "$bare_file" bare_before.md
+
+    # A no-op edit reloads and rewrites through the same spine, so an identical
+    # file proves the parse/serialize pair is lossless.
+    run_tatr edit "$full_id" -T "Every field" > /dev/null 2>&1
+    run_tatr edit "$bare_id" -T "No relationships" > /dev/null 2>&1
+
+    if grep -q "^- STATUS: IN_PROGRESS$" "$full_file" \
+        && grep -q "^- PRIORITY: 42$" "$full_file" \
+        && grep -q "^- TAGS: alpha, beta$" "$full_file" \
+        && grep -q "^- KIND: STORY$" "$full_file" \
+        && grep -q "^- FLOW STEP: WORKING$" "$full_file" \
+        && grep -q "^- PLAN STATUS: APPROVED$" "$full_file" \
+        && grep -q "^- PARENT: 20260101-000000$" "$full_file" \
+        && grep -q "^- DEPENDS ON: 20260102-000000, 20260103-000000$" "$full_file" \
+        && cmp -s full_before.md "$full_file" \
+        && grep -q "^- KIND: TASK$" "$bare_file" \
+        && grep -q "^- FLOW STEP: BACKLOG$" "$bare_file" \
+        && grep -q "^- PLAN STATUS: DRAFT$" "$bare_file" \
+        && ! grep -q "^- PARENT:" "$bare_file" \
+        && ! grep -q "^- DEPENDS ON:" "$bare_file" \
+        && cmp -s bare_before.md "$bare_file" \
+        && grep -q '^Mentions "- KIND: EPIC" in prose\.$' "$bare_file" \
+        && grep -q '^- NOTE: a bullet may open the body$' "$bare_file" \
+        && sed -n '/^- NOTE: a bullet may open the body$/,$p' "$full_file" | diff -q - body.md > /dev/null; then
+        pass_test
+    else
+        fail_test "Round trip lost a field or rewrote the body: $(cat "$full_file")"
+    fi
+}
+
+test_v2_never_writes_an_unreadable_record() {
+    log_test "v2 (a record tatr writes always reads back)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    # A newline in the title would split the record across the metadata block.
+    # `new` must refuse it and leave nothing behind, rather than reporting
+    # success and stranding a file that no later command can read.
+    set +e
+    local output
+    output=$(run_tatr new "$(printf 'one\ntwo')" 2>&1)
+    local exit_code=$?
+    set -e
+
+    local dirs_after=$(ls tasks | wc -l)
+
+    # The same guard on the edit path: an existing task stays readable.
+    local id=$(new_task_id "Good title")
+    set +e
+    local edit_output
+    edit_output=$(run_tatr edit "$id" -T "$(printf 'three\nfour')" 2>&1)
+    local edit_code=$?
+    set -e
+
+    set +e
+    run_tatr show "$id" > /dev/null 2>&1
+    local show_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] \
+        && [ "$dirs_after" -eq 0 ] \
+        && echo "$output" | grep -q "would not parse back" \
+        && [ $edit_code -ne 0 ] \
+        && [ $show_code -eq 0 ] \
+        && grep -q "^# Good title$" "tasks/$id/TASK.md"; then
+        pass_test
+    else
+        fail_test "new($exit_code, $dirs_after dirs): $output | edit($edit_code): $edit_output | show($show_code)"
+    fi
+}
+
+test_v2_ls_skips_unreadable_records() {
+    log_test "v2 (ls lists the readable tasks, names the rest, exits non-zero)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Readable task")
+    # A pre-v2 record next to it: hand correction is the only migration path,
+    # so `ls` is how a user finds what still needs correcting. It must not
+    # swallow the rest of the backlog, nor report success.
+    mkdir -p tasks/20260101-090000
+    printf '# Legacy\n\n- STATUS: OPEN\n- PRIORITY: 1\n- TAGS: x\n\nbody\n' > tasks/20260101-090000/TASK.md
+
+    set +e
+    local output
+    output=$(run_tatr ls 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] \
+        && echo "$output" | grep -q "Readable task" \
+        && echo "$output" | grep -q "Skipping unreadable task '20260101-090000'" \
+        && echo "$output" | grep -q "1 task(s) could not be read"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_v2_rejects_legacy_record() {
+    log_test "v2 (legacy v1 record is rejected, naming file and field)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks/20260101-090000
+
+    # A pre-v2 record: title, STATUS, PRIORITY, TAGS, then straight to the body.
+    printf '# Legacy\n\n- STATUS: OPEN\n- PRIORITY: 10\n- TAGS: feature\n\n## Steps\n\n- [ ] one\n' \
+        > tasks/20260101-090000/TASK.md
+    cp tasks/20260101-090000/TASK.md legacy_before.md
+
+    set +e
+    local output
+    output=$(run_tatr show 20260101-090000 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -ne 0 ] \
+        && echo "$output" | grep -q "tasks/20260101-090000/TASK.md" \
+        && echo "$output" | grep -q "expected '- KIND: '" \
+        && echo "$output" | grep -q "correct the record by hand" \
+        && cmp -s legacy_before.md tasks/20260101-090000/TASK.md; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_v2_rejects_invalid_metadata_atomically() {
+    log_test "v2 (invalid metadata values leave the file untouched)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Valid" -k TASK -P 20260101-000000 -d 20260102-000000)
+    local task_file="tasks/$id/TASK.md"
+
+    cp "$task_file" pristine.md
+
+    bad_ok=1
+    bad_detail=""
+
+    reject_bad_value "STATUS" "DONE" "OPEN, IN_PROGRESS or CLOSED"
+    reject_bad_value "KIND" "EPICS" "TASK, EPIC, STORY or SPIKE"
+    reject_bad_value "FLOW STEP" "READY" "BACKLOG, UNDERSTANDING"
+    reject_bad_value "PLAN STATUS" "MAYBE" "DRAFT, APPROVED or NOT_REQUIRED"
+    reject_bad_value "PARENT" "not-an-id" "task ID"
+
+    # A trailing space is part of the token the parser consumes, not noise.
+    cp pristine.md "$task_file"
+    sed -i 's/^- KIND: TASK$/- KIND: TASK /' "$task_file"
+    cp "$task_file" tampered.md
+    set +e
+    local output
+    output=$(run_tatr edit "$id" -T "Renamed" 2>&1)
+    local exit_code=$?
+    set -e
+    if [ $exit_code -eq 0 ] || ! cmp -s tampered.md "$task_file"; then
+        bad_ok=0
+        bad_detail="$bad_detail; trailing space accepted (exit $exit_code): $output"
+    fi
+
+    # A CRLF record: the tail is part of every token, so it does not parse.
+    cp pristine.md "$task_file"
+    sed -i 's/$/\r/' "$task_file"
+    cp "$task_file" tampered.md
+    set +e
+    output=$(run_tatr show "$id" 2>&1)
+    exit_code=$?
+    set -e
+    if [ $exit_code -eq 0 ] \
+        || ! echo "$output" | grep -q "whitespace and line endings count" \
+        || ! cmp -s tampered.md "$task_file"; then
+        bad_ok=0
+        bad_detail="$bad_detail; CRLF accepted or unexplained (exit $exit_code): $output"
+    fi
+
+    # A key written with no value is a hand-editing slip, and says so rather
+    # than silently becoming the first line of the body.
+    # Both spellings, with and without the trailing space: two hand-edits that
+    # look identical must not behave differently on an invisible byte.
+    local field suffix
+    for field in "PARENT" "DEPENDS ON"; do
+        for suffix in "" " "; do
+            cp pristine.md "$task_file"
+            sed -i "s/^- $field: .*/- $field:$suffix/" "$task_file"
+            cp "$task_file" tampered.md
+            set +e
+            output=$(run_tatr show "$id" 2>&1)
+            exit_code=$?
+            set -e
+            if [ $exit_code -eq 0 ] \
+                || ! echo "$output" | grep -q "$field has no value" \
+                || ! cmp -s tampered.md "$task_file"; then
+                bad_ok=0
+                bad_detail="$bad_detail; empty '$field:$suffix' accepted (exit $exit_code): $output"
+            fi
+        done
+    done
+
+    cp pristine.md "$task_file"
+    if [ $bad_ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "$bad_detail"
+    fi
+}
+
+test_v2_new_and_edit_fields() {
+    log_test "v2 (new and edit set every field; edit clears the optional ones)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Wire me" -k EPIC -f PLANNING -S DRAFT \
+        -P 20260101-000000 -d 20260102-000000)
+    local task_file="tasks/$id/TASK.md"
+
+    run_tatr edit "$id" -k STORY -f REVIEWING -S NOT_REQUIRED \
+        -P 20260104-000000 -d 20260105-000000 -d 20260106-000000 > /dev/null 2>&1
+    local set_ok=0
+    if grep -q "^- KIND: STORY$" "$task_file" \
+        && grep -q "^- FLOW STEP: REVIEWING$" "$task_file" \
+        && grep -q "^- PLAN STATUS: NOT_REQUIRED$" "$task_file" \
+        && grep -q "^- PARENT: 20260104-000000$" "$task_file" \
+        && grep -q "^- DEPENDS ON: 20260105-000000, 20260106-000000$" "$task_file"; then
+        set_ok=1
+    fi
+
+    # An empty value clears an optional relationship field.
+    run_tatr edit "$id" -P "" -d "" > /dev/null 2>&1
+
+    if [ $set_ok -eq 1 ] \
+        && ! grep -q "^- PARENT:" "$task_file" \
+        && ! grep -q "^- DEPENDS ON:" "$task_file" \
+        && grep -q "^- KIND: STORY$" "$task_file"; then
+        pass_test
+    else
+        fail_test "set_ok=$set_ok, file: $(cat "$task_file")"
+    fi
+}
+
+test_v2_filter_fields() {
+    log_test "v2 (filter selects on kind, flow step, plan status, parent, depends)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local epic_id=$(new_task_id "Epic container" -k EPIC -f PLANNED -S APPROVED)
+    sleep 1
+    local blocker_id=$(new_task_id "Blocking task" -k TASK -f BACKLOG -S DRAFT)
+    sleep 1
+    # A real parent/child pair, so ":parent eq" is answered by the Epic's own
+    # generated ID rather than by an ID that happens to match nothing.
+    new_task_id "Child story" -k STORY -f WORKING -S APPROVED \
+        -P "$epic_id" -d "$blocker_id" > /dev/null
+
+    local by_kind=$(run_tatr ls -f ':kind eq EPIC' 2>&1)
+    local by_kind_list=$(run_tatr ls -f ':kind in [STORY, TASK]' 2>&1)
+    local by_step=$(run_tatr ls -f ':flow_step eq WORKING' 2>&1)
+    local by_plan=$(run_tatr ls -f ':plan_status eq DRAFT' 2>&1)
+    local by_parent=$(run_tatr ls -f ":parent eq $epic_id" 2>&1)
+    local by_depends=$(run_tatr ls -f ":depends contains $blocker_id" 2>&1)
+
+    set +e
+    local bad
+    bad=$(run_tatr ls -f ':kind eq NOPE' 2>&1)
+    local bad_code=$?
+    set -e
+
+    if [ "$(echo "$by_kind" | grep -c 'Epic container')" -eq 1 ] \
+        && [ "$(echo "$by_kind" | wc -l)" -eq 1 ] \
+        && [ "$(echo "$by_kind_list" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_kind_list" | grep -c 'Blocking task')" -eq 1 ] \
+        && [ "$(echo "$by_kind_list" | grep -c 'Epic container')" -eq 0 ] \
+        && [ "$(echo "$by_step" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_step" | wc -l)" -eq 1 ] \
+        && [ "$(echo "$by_plan" | grep -c 'Blocking task')" -eq 1 ] \
+        && [ "$(echo "$by_plan" | wc -l)" -eq 1 ] \
+        && [ "$(echo "$by_parent" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_parent" | wc -l)" -eq 1 ] \
+        && [ "$(echo "$by_depends" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_depends" | wc -l)" -eq 1 ] \
+        && [ $bad_code -ne 0 ] \
+        && echo "$bad" | grep -q "invalid kind value 'NOPE'"; then
+        pass_test
+    else
+        fail_test "kind: $by_kind | step: $by_step | plan: $by_plan | parent: $by_parent | depends: $by_depends | bad($bad_code): $bad"
+    fi
+}
+
 test_rm_existing() {
     log_test "rm existing task"
 
@@ -1294,9 +1644,11 @@ fi
 
 # --- check subcommand tests ---
 
-# Writes a TASK.md for check tests: dir, id, status; body from stdin.
+# Writes a v2 TASK.md for check tests: dir, id, status, then the optional
+# kind / flow step / plan status; body from stdin.
 write_check_task() {
     local dir=$1 id=$2 status=$3
+    local kind=${4:-TASK} flow_step=${5:-BACKLOG} plan_status=${6:-DRAFT}
     mkdir -p "$dir/tasks/$id"
     {
         echo "# Task $id"
@@ -1304,6 +1656,9 @@ write_check_task() {
         echo "- STATUS: $status"
         echo "- PRIORITY: 10"
         echo "- TAGS: feature"
+        echo "- KIND: $kind"
+        echo "- FLOW STEP: $flow_step"
+        echo "- PLAN STATUS: $plan_status"
         echo
         cat
     } > "$dir/tasks/$id/TASK.md"
@@ -1426,10 +1781,11 @@ BODY
 }
 
 test_check_malformed_header() {
-    log_test "check (malformed-header: unparseable and invalid STATUS)"
+    log_test "check (malformed-header: unparseable header and invalid STATUS)"
     local test_dir=$(create_test_dir)
     mkdir -p "$test_dir/tasks/20260101-140000"
     printf '# No priority line\n\n- STATUS: OPEN\n- TAGS: x\n' > "$test_dir/tasks/20260101-140000/TASK.md"
+    # An invalid enum value is a parse failure under v2, not a separate rule.
     write_check_task "$test_dir" "20260101-140001" "DONE" <<'BODY'
 Body text.
 BODY
@@ -1442,7 +1798,7 @@ BODY
 
     if [ $exit_code -eq 1 ] \
         && echo "$output" | grep -q "20260101-140000: malformed-header: TASK.md failed to parse" \
-        && echo "$output" | grep -q "20260101-140001: malformed-header: invalid STATUS 'DONE'"; then
+        && echo "$output" | grep -q "20260101-140001: malformed-header: TASK.md failed to parse"; then
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
@@ -1568,9 +1924,10 @@ BODY
 test_check_scanner_edges() {
     log_test "check (scanner edges: status whitespace, R-prose, verdict tail)"
     local test_dir=$(create_test_dir)
-    # Trailing space after CLOSED: deserializes to silent OPEN, must be a finding.
+    # Trailing space after CLOSED: part of the token the parser consumes, so
+    # the record does not parse at all.
     mkdir -p "$test_dir/tasks/20260101-180000"
-    printf '# Trailing space\n\n- STATUS: CLOSED \n- PRIORITY: 1\n- TAGS: x\n\n## Steps\n\n- [ ] never done\n' > "$test_dir/tasks/20260101-180000/TASK.md"
+    printf '# Trailing space\n\n- STATUS: CLOSED \n- PRIORITY: 1\n- TAGS: x\n- KIND: TASK\n- FLOW STEP: DONE\n- PLAN STATUS: APPROVED\n\n## Steps\n\n- [ ] never done\n' > "$test_dir/tasks/20260101-180000/TASK.md"
     # Prose checkbox starting with R must not be a severity finding; verdict
     # with a tail must still read APPROVE.
     write_check_task "$test_dir" "20260101-180001" "CLOSED" <<'BODY'
@@ -1588,7 +1945,7 @@ BODY
     set -e
 
     if [ $exit_code -eq 1 ] \
-        && echo "$output" | grep -q "20260101-180000: malformed-header: invalid STATUS 'CLOSED '" \
+        && echo "$output" | grep -q "20260101-180000: malformed-header: TASK.md failed to parse" \
         && ! echo "$output" | grep -q "bad-severity" \
         && ! echo "$output" | grep -q "180001"; then
         pass_test
@@ -1624,17 +1981,12 @@ BODY
     fi
 }
 
-# --- Flow State checks (bad-flow-state / unplanned-in-progress) ---
+# --- Flow-state checks (unplanned-in-progress / EPIC exemptions) ---
 
 test_check_unplanned_in_progress() {
     log_test "check (unplanned-in-progress requires approved plan marker)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-195000" "IN_PROGRESS" <<'BODY'
-## Flow State
-
-- FLOW STEP: WORKING
-- PLAN STATUS: APPROVED
-
+    write_check_task "$test_dir" "20260101-195000" "IN_PROGRESS" TASK WORKING APPROVED <<'BODY'
 ## Steps
 
 - [ ] planned work may be in progress
@@ -1666,24 +2018,40 @@ BODY
     fi
 }
 
-test_check_bad_flow_state() {
-    log_test "check (bad-flow-state validates exact marker tokens)"
+test_check_epic_exemptions() {
+    log_test "check (KIND: EPIC is exempt from the record-completeness rules)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-195100" "OPEN" <<'BODY'
-## Flow State
 
-- FLOW STEP: READY
-BODY
-    write_check_task "$test_dir" "20260101-195101" "OPEN" <<'BODY'
-## Flow State
+    # An EPIC container: its aggregate record lives in its own TASK.md, its
+    # child tasks carry review/retro, and its frozen step boxes stay verbatim.
+    write_check_task "$test_dir" "20260101-196000" "CLOSED" EPIC DONE APPROVED <<'BODY'
+## Child Tasks
 
-- PLAN STATUS: YES
+- [x] 20260101-196001 shipped
+- [ ] 20260101-196002 dropped as superseded
 BODY
-    write_check_task "$test_dir" "20260101-195102" "OPEN" <<'BODY'
-## Flow State
+    # An EPIC may also sit IN_PROGRESS without an approved plan of its own.
+    write_check_task "$test_dir" "20260101-196003" "IN_PROGRESS" EPIC WORKING DRAFT <<'BODY'
+## Child Tasks
 
+- [ ] 20260101-196004 in flight
 BODY
-    printf '%s \n' "- PLAN STATUS: APPROVED" >> "$test_dir/tasks/20260101-195102/TASK.md"
+    # The identical shape on an ordinary TASK is still a finding, three times
+    # over: no review, no retro, and an unchecked step on a CLOSED task.
+    write_check_task "$test_dir" "20260101-196005" "CLOSED" TASK DONE APPROVED <<'BODY'
+## Steps
+
+- [x] done
+- [ ] not done
+BODY
+    # The exemption keys on KIND alone. A `goal` tag used to grant it and must
+    # not any more, or a task could still exempt itself by editing a tag.
+    write_check_task "$test_dir" "20260101-196006" "CLOSED" TASK DONE APPROVED <<'BODY'
+## Steps
+
+- [ ] not done
+BODY
+    sed -i 's/^- TAGS: feature$/- TAGS: goal, historical/' "$test_dir/tasks/20260101-196006/TASK.md"
 
     set +e
     local output
@@ -1692,9 +2060,13 @@ BODY
     set -e
 
     if [ $exit_code -eq 1 ] \
-        && echo "$output" | grep -q "20260101-195100: bad-flow-state: invalid FLOW STEP 'READY'" \
-        && echo "$output" | grep -q "20260101-195101: bad-flow-state: invalid PLAN STATUS 'YES'" \
-        && echo "$output" | grep -q "20260101-195102: bad-flow-state: invalid PLAN STATUS 'APPROVED '"; then
+        && ! echo "$output" | grep -q "20260101-196000" \
+        && ! echo "$output" | grep -q "20260101-196003" \
+        && echo "$output" | grep -q "20260101-196005: closed-unchecked: 1 unchecked" \
+        && echo "$output" | grep -q "20260101-196005: closed-missing-review" \
+        && echo "$output" | grep -q "20260101-196005: closed-missing-retro" \
+        && echo "$output" | grep -q "20260101-196006: closed-unchecked: 1 unchecked" \
+        && echo "$output" | grep -q "20260101-196006: closed-missing-review"; then
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
@@ -1993,6 +2365,13 @@ test_edit_title
 test_edit_partial_preserves_fields
 test_edit_invalid_status
 test_edit_missing_id
+test_v2_task_round_trip
+test_v2_never_writes_an_unreadable_record
+test_v2_ls_skips_unreadable_records
+test_v2_rejects_legacy_record
+test_v2_rejects_invalid_metadata_atomically
+test_v2_new_and_edit_fields
+test_v2_filter_fields
 test_rm_existing
 test_rm_nonempty_dir
 test_rm_preserves_siblings
@@ -2025,7 +2404,7 @@ test_check_exit_codes
 test_check_scanner_edges
 test_check_missing_artifacts
 test_check_unplanned_in_progress
-test_check_bad_flow_state
+test_check_epic_exemptions
 test_check_bad_decision_status
 test_check_good_decision_status
 test_check_dangling_supersede

@@ -24,6 +24,29 @@ typedef struct {
     char **argv;
 } Tatr_Context;
 
+// The v2 metadata enums. Every one of them is looked up with
+// enum_from_string, which reports failure instead of falling back to a default:
+// a silent default turns a typo into a wrong-but-valid record, and the caller
+// can no longer tell "absent" from "misspelled".
+#define ENUM_COUNT(table) (sizeof(table) / sizeof((table)[0]))
+
+// Defined below with the other HUID helpers; the parser needs it to validate
+// the PARENT and DEPENDS ON references it reads.
+static boolean ishuid(const Aids_String_Slice *slice);
+
+static boolean enum_from_string(const Aids_String_Slice *slice,
+                                const Aids_String_Slice *table,
+                                size_t count,
+                                int *out) {
+    for (size_t i = 0; i < count; ++i) {
+        if (aids_string_slice_compare(slice, &table[i]) == 0) {
+            *out = (int)i;
+            return true;
+        }
+    }
+    return false;
+}
+
 typedef enum {
     Task_Status_OPEN,
     Task_Status_IN_PROGRESS,
@@ -36,35 +59,123 @@ static Aids_String_Slice Task_Status_Strings[] = {
     [Task_Status_CLOSED] = (Aids_String_Slice) { .str = (unsigned char *)"CLOSED", .len = 6 }
 };
 
-static Task_Status task_status_from_string(const Aids_String_Slice *slice) {
-    for (size_t i = 0; i < sizeof(Task_Status_Strings) / sizeof(Task_Status_Strings[0]); ++i) {
-        if (aids_string_slice_compare(slice, &Task_Status_Strings[i]) == 0) {
-            return (Task_Status)i;
-        }
-    }
+#define STATUS_VALUES_CSTR "OPEN, IN_PROGRESS or CLOSED"
 
-    return Task_Status_OPEN; // Default to OPEN if not found
+static boolean task_status_from_string(const Aids_String_Slice *slice, Task_Status *out) {
+    int value = 0;
+    if (!enum_from_string(slice, Task_Status_Strings, ENUM_COUNT(Task_Status_Strings), &value)) {
+        return false;
+    }
+    *out = (Task_Status)value;
+    return true;
 }
 
-static boolean task_status_is_valid(const Aids_String_Slice *slice) {
-    for (size_t i = 0; i < sizeof(Task_Status_Strings) / sizeof(Task_Status_Strings[0]); ++i) {
-        if (aids_string_slice_compare(slice, &Task_Status_Strings[i]) == 0) {
-            return true;
-        }
-    }
+// KIND is what makes a record an Epic container: it replaces the old `goal`
+// tag, so a container cannot be conjured (or revoked) by editing a tag list.
+typedef enum {
+    Task_Kind_TASK,
+    Task_Kind_EPIC,
+    Task_Kind_STORY,
+    Task_Kind_SPIKE
+} Task_Kind;
 
-    return false;
+static Aids_String_Slice Task_Kind_Strings[] = {
+    [Task_Kind_TASK] = (Aids_String_Slice) { .str = (unsigned char *)"TASK", .len = 4 },
+    [Task_Kind_EPIC] = (Aids_String_Slice) { .str = (unsigned char *)"EPIC", .len = 4 },
+    [Task_Kind_STORY] = (Aids_String_Slice) { .str = (unsigned char *)"STORY", .len = 5 },
+    [Task_Kind_SPIKE] = (Aids_String_Slice) { .str = (unsigned char *)"SPIKE", .len = 5 }
+};
+
+#define KIND_VALUES_CSTR "TASK, EPIC, STORY or SPIKE"
+
+static boolean task_kind_from_string(const Aids_String_Slice *slice, Task_Kind *out) {
+    int value = 0;
+    if (!enum_from_string(slice, Task_Kind_Strings, ENUM_COUNT(Task_Kind_Strings), &value)) {
+        return false;
+    }
+    *out = (Task_Kind)value;
+    return true;
+}
+
+typedef enum {
+    Flow_Step_BACKLOG,
+    Flow_Step_UNDERSTANDING,
+    Flow_Step_PLANNING,
+    Flow_Step_PLANNED,
+    Flow_Step_WORKING,
+    Flow_Step_REVIEWING,
+    Flow_Step_COMPOUNDING,
+    Flow_Step_DONE
+} Flow_Step;
+
+static Aids_String_Slice Flow_Step_Strings[] = {
+    [Flow_Step_BACKLOG] = (Aids_String_Slice) { .str = (unsigned char *)"BACKLOG", .len = 7 },
+    [Flow_Step_UNDERSTANDING] = (Aids_String_Slice) { .str = (unsigned char *)"UNDERSTANDING", .len = 13 },
+    [Flow_Step_PLANNING] = (Aids_String_Slice) { .str = (unsigned char *)"PLANNING", .len = 8 },
+    [Flow_Step_PLANNED] = (Aids_String_Slice) { .str = (unsigned char *)"PLANNED", .len = 7 },
+    [Flow_Step_WORKING] = (Aids_String_Slice) { .str = (unsigned char *)"WORKING", .len = 7 },
+    [Flow_Step_REVIEWING] = (Aids_String_Slice) { .str = (unsigned char *)"REVIEWING", .len = 9 },
+    [Flow_Step_COMPOUNDING] = (Aids_String_Slice) { .str = (unsigned char *)"COMPOUNDING", .len = 11 },
+    [Flow_Step_DONE] = (Aids_String_Slice) { .str = (unsigned char *)"DONE", .len = 4 }
+};
+
+#define FLOW_STEP_VALUES_CSTR \
+    "BACKLOG, UNDERSTANDING, PLANNING, PLANNED, WORKING, REVIEWING, COMPOUNDING or DONE"
+
+static boolean flow_step_from_string(const Aids_String_Slice *slice, Flow_Step *out) {
+    int value = 0;
+    if (!enum_from_string(slice, Flow_Step_Strings, ENUM_COUNT(Flow_Step_Strings), &value)) {
+        return false;
+    }
+    *out = (Flow_Step)value;
+    return true;
+}
+
+// NOT_REQUIRED is a real answer, not a missing one: it records that a record's
+// cycle never carried plan approval, rather than back-dating an approval that
+// never happened.
+typedef enum {
+    Plan_Status_DRAFT,
+    Plan_Status_APPROVED,
+    Plan_Status_NOT_REQUIRED
+} Plan_Status;
+
+static Aids_String_Slice Plan_Status_Strings[] = {
+    [Plan_Status_DRAFT] = (Aids_String_Slice) { .str = (unsigned char *)"DRAFT", .len = 5 },
+    [Plan_Status_APPROVED] = (Aids_String_Slice) { .str = (unsigned char *)"APPROVED", .len = 8 },
+    [Plan_Status_NOT_REQUIRED] = (Aids_String_Slice) { .str = (unsigned char *)"NOT_REQUIRED", .len = 12 }
+};
+
+#define PLAN_STATUS_VALUES_CSTR "DRAFT, APPROVED or NOT_REQUIRED"
+
+static boolean plan_status_from_string(const Aids_String_Slice *slice, Plan_Status *out) {
+    int value = 0;
+    if (!enum_from_string(slice, Plan_Status_Strings, ENUM_COUNT(Plan_Status_Strings), &value)) {
+        return false;
+    }
+    *out = (Plan_Status)value;
+    return true;
 }
 
 typedef struct {
     Task_Status status;
     unsigned int priority;
     Aids_Array tags; /* Aids_String_Slice */
+    Task_Kind kind;
+    Flow_Step flow_step;
+    Plan_Status plan_status;
+    Aids_String_Slice parent;    /* len 0 when unset */
+    Aids_Array depends_on;       /* Aids_String_Slice */
 } Task_Meta;
 
 Aids_String_Slice STATUS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- STATUS: ", .len = 10 };
 Aids_String_Slice PRIORITY_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PRIORITY: ", .len = 12 };
 Aids_String_Slice TAGS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- TAGS: ", .len = 8 };
+Aids_String_Slice KIND_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- KIND: ", .len = 8 };
+Aids_String_Slice FLOW_STEP_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- FLOW STEP: ", .len = 13 };
+Aids_String_Slice PLAN_STATUS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PLAN STATUS: ", .len = 15 };
+Aids_String_Slice PARENT_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PARENT: ", .len = 10 };
+Aids_String_Slice DEPENDS_ON_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- DEPENDS ON: ", .len = 14 };
 
 typedef struct {
     Aids_String_Slice title;
@@ -83,8 +194,13 @@ static void task_init_empty(Task *task) {
     task->description = (Aids_String_Slice) {0};
     task->meta.status = Task_Status_OPEN;
     task->meta.priority = 0;
+    task->meta.kind = Task_Kind_TASK;
+    task->meta.flow_step = Flow_Step_BACKLOG;
+    task->meta.plan_status = Plan_Status_DRAFT;
+    task->meta.parent = (Aids_String_Slice) {0};
     task->_buffer = NULL;
     aids_array_init(&task->meta.tags, sizeof(Aids_String_Slice));
+    aids_array_init(&task->meta.depends_on, sizeof(Aids_String_Slice));
 }
 
 static void task_cleanup(Task *task) {
@@ -94,8 +210,76 @@ static void task_cleanup(Task *task) {
 
     if (task->_buffer != NULL) {
         AIDS_FREE(task->_buffer);
+        task->_buffer = NULL;
     }
     aids_array_free(&task->meta.tags);
+    aids_array_free(&task->meta.depends_on);
+}
+
+// Serializes a "- KEY: " line whose value is a comma-separated list of slices.
+// TAGS and DEPENDS ON share the exact same shape on disk.
+static Aids_Result task_append_list_field(Aids_String_Builder *builder,
+                                          Aids_String_Slice format,
+                                          const Aids_Array *items) {
+    if (aids_string_builder_append(builder, SS_Fmt, SS_Arg(format)) != AIDS_OK) {
+        return AIDS_ERR;
+    }
+    for (size_t i = 0; i < items->count; ++i) {
+        Aids_String_Slice *item = NULL;
+        if (aids_array_get((Aids_Array *)items, i, (void **)&item) != AIDS_OK) {
+            return AIDS_ERR;
+        }
+        if (aids_string_builder_append_slice(builder, *item) != AIDS_OK) {
+            return AIDS_ERR;
+        }
+        if (i + 1 < items->count) {
+            if (aids_string_builder_append(builder, ", ") != AIDS_OK) {
+                return AIDS_ERR;
+            }
+        }
+    }
+    return AIDS_OK;
+}
+
+// True when the buffer starts with a valueless form of an optional field:
+// "- PARENT:" or "- PARENT: " with nothing after it. Worth its own
+// diagnostic: hand correction is the only path from a pre-v2 record, and an
+// author who writes the key but no value would otherwise see the line
+// silently become body text. Both spellings are treated alike, so an
+// invisible trailing space cannot flip the behavior.
+static boolean starts_with_empty_field(Aids_String_Slice buffer, Aids_String_Slice format) {
+    Aids_String_Slice key = format;
+    key.len -= 1; // drop the trailing space the format requires after the colon
+    if (!aids_string_slice_starts_with(&buffer, key)) {
+        return false;
+    }
+    Aids_String_Slice rest = buffer;
+    aids_string_slice_skip(&rest, key.len);
+    aids_string_slice_trim_right(&rest);
+    Aids_String_Slice line = {0};
+    if (!aids_string_slice_tokenize(&rest, '\n', &line)) {
+        line = rest;
+    }
+    aids_string_slice_trim(&line);
+    return line.len == 0;
+}
+
+// Splits a comma-separated field value into trimmed, non-empty slices.
+static Aids_Result task_parse_list_field(Aids_String_Slice value, Aids_Array *out) {
+    while (value.len > 0) {
+        Aids_String_Slice item;
+        if (!aids_string_slice_tokenize(&value, ',', &item)) {
+            item = value;
+            value.len = 0;
+        }
+        aids_string_slice_trim(&item);
+        if (item.len > 0) {
+            if (aids_array_append(out, &item) != AIDS_OK) {
+                return AIDS_ERR;
+            }
+        }
+    }
+    return AIDS_OK;
 }
 
 static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
@@ -150,30 +334,58 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
     // - TAGS: tag1, tag2, tag3
-    if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(TAGS_FORMAT)) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append tags format: %s", aids_failure_reason());
+    if (task_append_list_field(&builder, TAGS_FORMAT, &task.meta.tags) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append tags: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
-    for (size_t i = 0; i < task.meta.tags.count; ++i) {
-        Aids_String_Slice *tag = NULL;
-        if (aids_array_get(&task.meta.tags, i, (void **)&tag) != AIDS_OK) {
-            aids_log(AIDS_ERROR, "task_serialize: Failed to get tag at index %zu: %s", i, aids_failure_reason());
-            return_defer(AIDS_ERR);
-        }
+    if (aids_string_builder_append(&builder, "\n") != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append tags newline: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
 
-        if (aids_string_builder_append_slice(&builder, *tag) != AIDS_OK) {
-            aids_log(AIDS_ERROR, "task_serialize: Failed to append tag at index %zu: %s", i, aids_failure_reason());
+    // - KIND / FLOW STEP / PLAN STATUS: always written, in this order.
+    if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
+                                   SS_Arg(KIND_FORMAT),
+                                   SS_Arg(Task_Kind_Strings[task.meta.kind])) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append kind: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
+                                   SS_Arg(FLOW_STEP_FORMAT),
+                                   SS_Arg(Flow_Step_Strings[task.meta.flow_step])) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append flow step: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
+                                   SS_Arg(PLAN_STATUS_FORMAT),
+                                   SS_Arg(Plan_Status_Strings[task.meta.plan_status])) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append plan status: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+
+    // - PARENT / DEPENDS ON: optional, so an unrelated task carries no empty
+    // relationship lines at all.
+    if (task.meta.parent.len > 0) {
+        if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
+                                       SS_Arg(PARENT_FORMAT),
+                                       SS_Arg(task.meta.parent)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "task_serialize: Failed to append parent: %s", aids_failure_reason());
             return_defer(AIDS_ERR);
-        }
-        if (i < task.meta.tags.count - 1) {
-            if (aids_string_builder_append(&builder, ", ") != AIDS_OK) {
-                aids_log(AIDS_ERROR, "task_serialize: Failed to append tag separator: %s", aids_failure_reason());
-                return_defer(AIDS_ERR);
-            }
         }
     }
-    if (aids_string_builder_append(&builder, "\n\n") != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append tags suffix: %s", aids_failure_reason());
+    if (task.meta.depends_on.count > 0) {
+        if (task_append_list_field(&builder, DEPENDS_ON_FORMAT, &task.meta.depends_on) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "task_serialize: Failed to append dependencies: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+        if (aids_string_builder_append(&builder, "\n") != AIDS_OK) {
+            aids_log(AIDS_ERROR, "task_serialize: Failed to append dependencies newline: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+    }
+
+    if (aids_string_builder_append(&builder, "\n") != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append metadata suffix: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
 
@@ -224,7 +436,11 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
         aids_log(AIDS_ERROR, "task_deserialize: Failed to parse status from buffer");
         return_defer(AIDS_ERR);
     }
-    task->meta.status = task_status_from_string(&status_slice);
+    if (!task_status_from_string(&status_slice, &task->meta.status)) {
+        aids_log(AIDS_ERROR, "task_deserialize: invalid STATUS '" SS_Fmt "' (use " STATUS_VALUES_CSTR "; whitespace and line endings count)",
+                 SS_Arg(status_slice));
+        return_defer(AIDS_ERR);
+    }
     aids_string_slice_skip_while(&buffer, isspace);
 
     // - PRIORITY: 100
@@ -256,21 +472,142 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
         return_defer(AIDS_ERR);
     }
 
-    while (tags_slice.len > 0) {
-        Aids_String_Slice tag;
-        if (!aids_string_slice_tokenize(&tags_slice, ',', &tag)) {
-            tag = tags_slice;
-            tags_slice.len = 0;
+    if (task_parse_list_field(tags_slice, &task->meta.tags) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to append tag to array: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    // - KIND: TASK | EPIC | STORY | SPIKE
+    // This is where a pre-v2 record stops looking like a v2 one, so it is the
+    // right place to say so: there is no compatibility path to fall back to.
+    if (!aids_string_slice_starts_with(&buffer, KIND_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the TAGS line "
+                 "(v2 field order: STATUS, PRIORITY, TAGS, KIND, FLOW STEP, PLAN STATUS, "
+                 "[PARENT], [DEPENDS ON]); correct the record by hand", SS_Arg(KIND_FORMAT));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip(&buffer, KIND_FORMAT.len);
+    Aids_String_Slice kind_slice;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &kind_slice)) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse kind from buffer");
+        return_defer(AIDS_ERR);
+    }
+    if (!task_kind_from_string(&kind_slice, &task->meta.kind)) {
+        aids_log(AIDS_ERROR, "task_deserialize: invalid KIND '" SS_Fmt "' (use " KIND_VALUES_CSTR "; whitespace and line endings count)",
+                 SS_Arg(kind_slice));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    // - FLOW STEP: BACKLOG | ... | DONE
+    if (!aids_string_slice_starts_with(&buffer, FLOW_STEP_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the KIND line", SS_Arg(FLOW_STEP_FORMAT));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip(&buffer, FLOW_STEP_FORMAT.len);
+    Aids_String_Slice flow_step_slice;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &flow_step_slice)) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse flow step from buffer");
+        return_defer(AIDS_ERR);
+    }
+    if (!flow_step_from_string(&flow_step_slice, &task->meta.flow_step)) {
+        aids_log(AIDS_ERROR, "task_deserialize: invalid FLOW STEP '" SS_Fmt "' (use " FLOW_STEP_VALUES_CSTR "; whitespace and line endings count)",
+                 SS_Arg(flow_step_slice));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    // - PLAN STATUS: DRAFT | APPROVED | NOT_REQUIRED
+    if (!aids_string_slice_starts_with(&buffer, PLAN_STATUS_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the FLOW STEP line", SS_Arg(PLAN_STATUS_FORMAT));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip(&buffer, PLAN_STATUS_FORMAT.len);
+    Aids_String_Slice plan_status_slice;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &plan_status_slice)) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse plan status from buffer");
+        return_defer(AIDS_ERR);
+    }
+    if (!plan_status_from_string(&plan_status_slice, &task->meta.plan_status)) {
+        aids_log(AIDS_ERROR, "task_deserialize: invalid PLAN STATUS '" SS_Fmt "' (use " PLAN_STATUS_VALUES_CSTR "; whitespace and line endings count)",
+                 SS_Arg(plan_status_slice));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    // - PARENT: <huid>   (optional)
+    if (aids_string_slice_starts_with(&buffer, PARENT_FORMAT)) {
+        aids_string_slice_skip(&buffer, PARENT_FORMAT.len);
+        Aids_String_Slice parent_slice;
+        if (!aids_string_slice_tokenize(&buffer, '\n', &parent_slice)) {
+            aids_log(AIDS_ERROR, "task_deserialize: Failed to parse parent from buffer");
+            return_defer(AIDS_ERR);
         }
-        aids_string_slice_trim(&tag);
-        if (tag.len > 0) {
-            if (aids_array_append(&task->meta.tags, &tag) != AIDS_OK) {
-                aids_log(AIDS_ERROR, "task_deserialize: Failed to append tag to array: %s", aids_failure_reason());
+        if (parent_slice.len == 0) {
+            aids_log(AIDS_ERROR, "task_deserialize: PARENT has no value; omit the line entirely, or write '"
+                     SS_Fmt "20240630-235959'", SS_Arg(PARENT_FORMAT));
+            return_defer(AIDS_ERR);
+        }
+        if (!ishuid(&parent_slice)) {
+            aids_log(AIDS_ERROR, "task_deserialize: invalid PARENT '" SS_Fmt "' (expected a task ID like 20240630-235959)",
+                     SS_Arg(parent_slice));
+            return_defer(AIDS_ERR);
+        }
+        task->meta.parent = parent_slice;
+        aids_string_slice_skip_while(&buffer, isspace);
+    }
+
+    // - DEPENDS ON: <huid>, <huid>   (optional)
+    if (aids_string_slice_starts_with(&buffer, DEPENDS_ON_FORMAT)) {
+        aids_string_slice_skip(&buffer, DEPENDS_ON_FORMAT.len);
+        Aids_String_Slice depends_slice;
+        if (!aids_string_slice_tokenize(&buffer, '\n', &depends_slice)) {
+            aids_log(AIDS_ERROR, "task_deserialize: Failed to parse dependencies from buffer");
+            return_defer(AIDS_ERR);
+        }
+        if (task_parse_list_field(depends_slice, &task->meta.depends_on) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "task_deserialize: Failed to append dependency to array: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+        // "- DEPENDS ON: " with nothing after it reads the same to a human as
+        // "- DEPENDS ON:", so it must not behave differently on that one
+        // invisible byte.
+        if (task->meta.depends_on.count == 0) {
+            aids_log(AIDS_ERROR, "task_deserialize: DEPENDS ON has no value; omit the line entirely, or write '"
+                     SS_Fmt "20240630-235959'", SS_Arg(DEPENDS_ON_FORMAT));
+            return_defer(AIDS_ERR);
+        }
+        // Syntax only. Whether the referenced tasks exist, and whether the
+        // graph they form is acyclic, is not this layer's question.
+        for (size_t i = 0; i < task->meta.depends_on.count; ++i) {
+            Aids_String_Slice *dep = NULL;
+            if (aids_array_get(&task->meta.depends_on, i, (void **)&dep) != AIDS_OK) {
+                return_defer(AIDS_ERR);
+            }
+            if (!ishuid(dep)) {
+                aids_log(AIDS_ERROR, "task_deserialize: invalid DEPENDS ON entry '" SS_Fmt "' (expected a task ID like 20240630-235959)",
+                         SS_Arg(*dep));
                 return_defer(AIDS_ERR);
             }
         }
+        aids_string_slice_skip_while(&buffer, isspace);
     }
-    aids_string_slice_skip_while(&buffer, isspace);
+
+    // Everything left is body text, kept byte for byte. The parser does not
+    // police it: a bullet is a bullet, even an uppercase one. The single
+    // exception is a valueless optional field, which is a hand-editing slip
+    // rather than prose.
+    if (starts_with_empty_field(buffer, PARENT_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: PARENT has no value; omit the line entirely, or write '"
+                 SS_Fmt "20240630-235959'", SS_Arg(PARENT_FORMAT));
+        return_defer(AIDS_ERR);
+    }
+    if (starts_with_empty_field(buffer, DEPENDS_ON_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: DEPENDS ON has no value; omit the line entirely, or write '"
+                 SS_Fmt "20240630-235959'", SS_Arg(DEPENDS_ON_FORMAT));
+        return_defer(AIDS_ERR);
+    }
 
     task->description = buffer;
 
@@ -424,19 +761,36 @@ defer:
 static Aids_Result task_save(const Aids_String_Slice *task_file_path, Task *task) {
     Aids_Result result = AIDS_OK;
     Aids_String_Slice serialized_task = {0};
+    Task verify = {0};
+    boolean verify_initialized = false;
 
     if (task_serialize(*task, &serialized_task) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to serialize task: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
 
+    // tatr must never write a record it cannot read back. A title or tag
+    // carrying a newline, or any future serializer change that drifts from the
+    // parser, would otherwise land on disk and only surface later as a
+    // malformed-header finding. Validate before writing, never half-apply.
+    if (task_deserialize(serialized_task, &verify) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Refusing to write '" SS_Fmt "': the record would not parse back "
+                 "(a newline in the title or a tag is the usual cause)", SS_Arg(*task_file_path));
+        return_defer(AIDS_ERR);
+    }
+    verify_initialized = true;
+
     if (aids_io_write(task_file_path, &serialized_task, "w") != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to write task to file: %s", aids_failure_reason());
-        AIDS_FREE(serialized_task.str);
         return_defer(AIDS_ERR);
     }
 
 defer:
+    if (verify_initialized) {
+        // The verify task borrows serialized_task; it never owns the buffer.
+        verify._buffer = NULL;
+        task_cleanup(&verify);
+    }
     if (serialized_task.str != NULL) {
         AIDS_FREE(serialized_task.str);
     }
@@ -469,16 +823,28 @@ static Aids_Result task_create(const Aids_String_Slice *cwd, Aids_String_Slice h
         return_defer(AIDS_ERR);
     }
 
+    // Build the file path BEFORE creating anything: a failure here would
+    // otherwise strand the empty directory it had already made.
+    if (task_file_path_build(&tasks_dir, &huid, &task_file_path) != AIDS_OK) {
+        return_defer(AIDS_ERR);
+    }
+
     if (aids_io_mkdir(&task_dir, true) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to create task directory: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
 
-    if (task_file_path_build(&tasks_dir, &huid, &task_file_path) != AIDS_OK) {
-        return_defer(AIDS_ERR);
-    }
-
     if (task_save(&task_file_path, task) != AIDS_OK) {
+        // The directory was created a moment ago and the file was never
+        // written, so leaving it behind would strand an empty task the tools
+        // then have to explain. Undo it; a failed create creates nothing.
+        // rmdir only succeeds on an empty directory, which is exactly the
+        // state we are undoing.
+        char task_dir_buffer[PATH_MAX];
+        int written = snprintf(task_dir_buffer, sizeof(task_dir_buffer), SS_Fmt, SS_Arg(task_dir));
+        if (written > 0 && (size_t)written < sizeof(task_dir_buffer)) {
+            rmdir(task_dir_buffer);
+        }
         return_defer(AIDS_ERR);
     }
 
@@ -493,6 +859,121 @@ defer:
         AIDS_FREE(task_file_path.str);
     }
     return result;
+}
+
+// Registers the v2 metadata options shared by `new` and `edit`, so the two
+// subcommands cannot drift apart in flag names or descriptions.
+static void argparse_add_v2_meta_arguments(Argparse_Parser *parser) {
+    argparse_add_argument(parser, (Argparse_Options){
+        .short_name = 'k',
+        .long_name = "kind",
+        .description = "Task kind (" KIND_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(parser, (Argparse_Options){
+        .short_name = 'f',
+        .long_name = "flow-step",
+        .description = "Flow step (" FLOW_STEP_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(parser, (Argparse_Options){
+        .short_name = 'S',
+        .long_name = "plan-status",
+        .description = "Plan status (" PLAN_STATUS_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(parser, (Argparse_Options){
+        .short_name = 'P',
+        .long_name = "parent",
+        .description = "Parent task ID (empty value clears it)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(parser, (Argparse_Options){
+        .short_name = 'd',
+        .long_name = "depends-on",
+        .description = "Dependency task IDs (replaces existing; empty value clears them)",
+        .type = ARGUMENT_TYPE_VALUE_ARRAY,
+        .required = 0
+    });
+}
+
+// Applies whichever v2 metadata options were given to an initialized task.
+// Validates before mutating anything the caller will write, so a bad value
+// leaves the record on disk untouched. Returns false after logging.
+static boolean task_apply_v2_meta_arguments(Argparse_Parser *parser, Task *task) {
+    char *kind_str = argparse_get_value(parser, "kind");
+    if (kind_str != NULL) {
+        Aids_String_Slice slice = aids_string_slice_from_cstr(kind_str);
+        if (!task_kind_from_string(&slice, &task->meta.kind)) {
+            aids_log(AIDS_ERROR, "Invalid kind '%s': expected " KIND_VALUES_CSTR, kind_str);
+            return false;
+        }
+    }
+
+    char *flow_step_str = argparse_get_value(parser, "flow-step");
+    if (flow_step_str != NULL) {
+        Aids_String_Slice slice = aids_string_slice_from_cstr(flow_step_str);
+        if (!flow_step_from_string(&slice, &task->meta.flow_step)) {
+            aids_log(AIDS_ERROR, "Invalid flow step '%s': expected " FLOW_STEP_VALUES_CSTR, flow_step_str);
+            return false;
+        }
+    }
+
+    char *plan_status_str = argparse_get_value(parser, "plan-status");
+    if (plan_status_str != NULL) {
+        Aids_String_Slice slice = aids_string_slice_from_cstr(plan_status_str);
+        if (!plan_status_from_string(&slice, &task->meta.plan_status)) {
+            aids_log(AIDS_ERROR, "Invalid plan status '%s': expected " PLAN_STATUS_VALUES_CSTR, plan_status_str);
+            return false;
+        }
+    }
+
+    // An empty value is how the optional relationship fields are cleared.
+    char *parent_str = argparse_get_value(parser, "parent");
+    if (parent_str != NULL) {
+        Aids_String_Slice slice = aids_string_slice_from_cstr(parent_str);
+        if (slice.len == 0) {
+            task->meta.parent = (Aids_String_Slice) {0};
+        } else if (!ishuid(&slice)) {
+            aids_log(AIDS_ERROR, "Invalid parent '%s': expected a task ID like 20240630-235959", parent_str);
+            return false;
+        } else {
+            task->meta.parent = slice;
+        }
+    }
+
+    char *depends[ARGPARSE_CAPACITY];
+    unsigned long depends_count = argparse_get_values(parser, "depends-on", depends);
+    if (depends_count > 0) {
+        for (unsigned long i = 0; i < depends_count; ++i) {
+            Aids_String_Slice slice = aids_string_slice_from_cstr(depends[i]);
+            if (slice.len > 0 && !ishuid(&slice)) {
+                aids_log(AIDS_ERROR, "Invalid dependency '%s': expected a task ID like 20240630-235959", depends[i]);
+                return false;
+            }
+        }
+        task->meta.depends_on.count = 0; // Replaces the existing list
+        for (unsigned long i = 0; i < depends_count; ++i) {
+            Aids_String_Slice slice = aids_string_slice_from_cstr(depends[i]);
+            if (slice.len == 0) {
+                continue;
+            }
+            if (aids_array_append(&task->meta.depends_on, &slice) != AIDS_OK) {
+                aids_log(AIDS_ERROR, "Failed to append dependency: %s", aids_failure_reason());
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 // Reads the whole of stdin into an owned slice. Used by `new --body-file -`.
@@ -573,6 +1054,8 @@ static int main_new(const Tatr_Context *ctx) {
         .required = 0
     });
 
+    argparse_add_v2_meta_arguments(&parser);
+
     if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
@@ -615,7 +1098,14 @@ static int main_new(const Tatr_Context *ctx) {
     char *status_str = argparse_get_value(&parser, "status");
     if (status_str != NULL) {
         Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
-        task.meta.status = task_status_from_string(&status_slice);
+        if (!task_status_from_string(&status_slice, &task.meta.status)) {
+            aids_log(AIDS_ERROR, "Invalid status '%s': expected " STATUS_VALUES_CSTR, status_str);
+            return_defer(1);
+        }
+    }
+
+    if (!task_apply_v2_meta_arguments(&parser, &task)) {
+        return_defer(1);
     }
 
     // Read the body before generating the ID so a bad path fails without
@@ -644,7 +1134,10 @@ static int main_new(const Tatr_Context *ctx) {
     Aids_String_Slice id = aids_string_slice_from_cstr(huid_str);
 
     if (task_create(&ctx->cwd, id, &task) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "Failed to create new task: %s", aids_failure_reason());
+        // No aids_failure_reason() here: it is whatever the last aids call
+        // left behind, including a successful one, and task_create has
+        // already logged the actionable cause.
+        aids_log(AIDS_ERROR, "Failed to create new task");
         return_defer(1);
     }
 
@@ -672,7 +1165,7 @@ static Aids_Result task_load(const Aids_String_Slice *task_file_path, Task *task
     }
 
     if (task_deserialize(serialized_task, task) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "Failed to deserialize task: %s", aids_failure_reason());
+        aids_log(AIDS_ERROR, "Failed to deserialize task file '" SS_Fmt "'", SS_Arg(*task_file_path));
         AIDS_FREE(serialized_task.str);
         return_defer(AIDS_ERR);
     }
@@ -754,7 +1247,10 @@ static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task
 
     print_file_path(path_buffer);
 
-    printf(": [PRIORITY: %u, TAGS: ", task.meta.priority);
+    printf(": [PRIORITY: %u, KIND: " SS_Fmt ", FLOW STEP: " SS_Fmt ", TAGS: ",
+           task.meta.priority,
+           SS_Arg(Task_Kind_Strings[task.meta.kind]),
+           SS_Arg(Flow_Step_Strings[task.meta.flow_step]));
     for (size_t i = 0; i < task.meta.tags.count; ++i) {
         Aids_String_Slice *tag = NULL;
         AIDS_ASSERT(aids_array_get(&task.meta.tags, i, (void **)&tag) == AIDS_OK,
@@ -769,34 +1265,29 @@ static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task
 
 // Prints the full task: a clickable path header followed by the task fields and
 // description body, mirroring the on-disk TASK.md layout.
-static void task_print_full(Aids_String_Slice task_file_path, Task task) {
+static Aids_Result task_print_full(Aids_String_Slice task_file_path, Task task) {
     char path_buffer[PATH_MAX];
     if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt, SS_Arg(task_file_path)) < 0) {
         aids_log(AIDS_ERROR, "Failed to build task file path for printing: %s", strerror(errno));
-        return;
+        return AIDS_ERR;
     }
 
     print_file_path(path_buffer);
     printf("\n\n");
 
-    printf("# " SS_Fmt "\n\n", SS_Arg(task.title));
-    printf(SS_Fmt SS_Fmt "\n", SS_Arg(STATUS_FORMAT), SS_Arg(Task_Status_Strings[task.meta.status]));
-    printf(SS_Fmt "%u\n", SS_Arg(PRIORITY_FORMAT), task.meta.priority);
-    printf(SS_Fmt, SS_Arg(TAGS_FORMAT));
-    for (size_t i = 0; i < task.meta.tags.count; ++i) {
-        Aids_String_Slice *tag = NULL;
-        AIDS_ASSERT(aids_array_get(&task.meta.tags, i, (void **)&tag) == AIDS_OK,
-                   "Failed to get tag at index %zu: %s", i, aids_failure_reason());
-        printf(SS_Fmt, SS_Arg(*tag));
-        if (i < task.meta.tags.count - 1) {
-            printf(", ");
-        }
+    // Print what would be written back, so `show` can never drift from the
+    // on-disk format the serializer defines.
+    Aids_String_Slice serialized = {0};
+    if (task_serialize(task, &serialized) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to render task: %s", aids_failure_reason());
+        return AIDS_ERR;
     }
-    printf("\n");
-
-    if (task.description.len > 0) {
-        printf("\n" SS_Fmt "\n", SS_Arg(task.description));
+    printf(SS_Fmt, SS_Arg(serialized));
+    if (serialized.len == 0 || serialized.str[serialized.len - 1] != '\n') {
+        printf("\n");
     }
+    AIDS_FREE(serialized.str);
+    return AIDS_OK;
 }
 
 static int main_show(const Tatr_Context *ctx) {
@@ -839,7 +1330,9 @@ static int main_show(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
-    task_print_full(task_file_path, task);
+    if (task_print_full(task_file_path, task) != AIDS_OK) {
+        return_defer(1);
+    }
 
 defer:
     if (task_initialized) {
@@ -905,6 +1398,8 @@ static int main_edit(const Tatr_Context *ctx) {
         .required = 0
     });
 
+    argparse_add_v2_meta_arguments(&parser);
+
     if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
@@ -954,11 +1449,14 @@ static int main_edit(const Tatr_Context *ctx) {
     char *status_str = argparse_get_value(&parser, "status");
     if (status_str != NULL) {
         Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
-        if (!task_status_is_valid(&status_slice)) {
-            aids_log(AIDS_ERROR, "Invalid status '%s': expected OPEN, IN_PROGRESS or CLOSED", status_str);
+        if (!task_status_from_string(&status_slice, &task.meta.status)) {
+            aids_log(AIDS_ERROR, "Invalid status '%s': expected " STATUS_VALUES_CSTR, status_str);
             return_defer(1);
         }
-        task.meta.status = task_status_from_string(&status_slice);
+    }
+
+    if (!task_apply_v2_meta_arguments(&parser, &task)) {
+        return_defer(1);
     }
 
     char *tags[ARGPARSE_CAPACITY];
@@ -975,7 +1473,7 @@ static int main_edit(const Tatr_Context *ctx) {
     }
 
     if (task_save(&task_file_path, &task) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "Failed to save task: %s", aids_failure_reason());
+        aids_log(AIDS_ERROR, "Failed to save task"); // task_save logged the cause
         return_defer(1);
     }
 
@@ -1070,8 +1568,11 @@ static int main_rm(const Tatr_Context *ctx) {
         }
 
         char entry_path[PATH_MAX];
-        if (snprintf(entry_path, sizeof(entry_path), SS_Fmt "/" SS_Fmt, SS_Arg(task_dir), SS_Arg(*name)) < 0) {
-            aids_log(AIDS_ERROR, "Failed to build entry path: %s", strerror(errno));
+        // Truncation matters here: this path is passed to unlink, so a
+        // silently shortened one would name a different file.
+        int entry_written = snprintf(entry_path, sizeof(entry_path), SS_Fmt "/" SS_Fmt, SS_Arg(task_dir), SS_Arg(*name));
+        if (entry_written < 0 || (size_t)entry_written >= sizeof(entry_path)) {
+            aids_log(AIDS_ERROR, "Failed to build entry path for '" SS_Fmt "': path too long", SS_Arg(*name));
             return_defer(1);
         }
 
@@ -1296,9 +1797,14 @@ defer:
     return result;
 }
 
+// Loads every well-formed task in a directory. A record that does not parse is
+// SKIPPED, not fatal: one bad file must not hide the rest of the backlog, and
+// listing is how a user finds the bad file in the first place. *skipped counts
+// them so the caller can still exit non-zero.
 static Aids_Result load_tasks_from_dir(const Aids_String_Slice *tasks_dir,
                                        Aids_Array *tasks,
-                                       Sort_By sort_by) {
+                                       Sort_By sort_by,
+                                       size_t *skipped) {
     Aids_Result result = AIDS_OK;
     Aids_Array tasks_files = {0};
 
@@ -1326,9 +1832,12 @@ static Aids_Result load_tasks_from_dir(const Aids_String_Slice *tasks_dir,
 
         Task task = {0};
         if (task_load(&task_file_path, &task) != AIDS_OK) {
+            aids_log(AIDS_WARNING, "Skipping unreadable task '" SS_Fmt "'", SS_Arg(*huid));
             AIDS_FREE(task_file_path.str);
-            cleanup_string_slice_array(&tasks_files);
-            return_defer(AIDS_ERR);
+            if (skipped != NULL) {
+                (*skipped)++;
+            }
+            continue;
         }
         AIDS_FREE(task_file_path.str);
 
@@ -2074,6 +2583,11 @@ typedef enum {
     TATR_FILTER_FIELD_TYPE_TAGS,
     TATR_FILTER_FIELD_TYPE_PRIORITY,
     TATR_FILTER_FIELD_TYPE_TITLE,
+    TATR_FILTER_FIELD_TYPE_KIND,
+    TATR_FILTER_FIELD_TYPE_FLOW_STEP,
+    TATR_FILTER_FIELD_TYPE_PLAN_STATUS,
+    TATR_FILTER_FIELD_TYPE_PARENT,
+    TATR_FILTER_FIELD_TYPE_DEPENDS,
     TATR_FILTER_FIELD_TYPE_UNKNOWN
 } Tatr_Filter_Field_Type;
 
@@ -2091,6 +2605,11 @@ static Aids_String_Slice FIELD_NAME_STATUS = (Aids_String_Slice) { .str = (unsig
 static Aids_String_Slice FIELD_NAME_TAGS = (Aids_String_Slice) { .str = (unsigned char *)"tags", .len = 4 };
 static Aids_String_Slice FIELD_NAME_PRIORITY = (Aids_String_Slice) { .str = (unsigned char *)"priority", .len = 8 };
 static Aids_String_Slice FIELD_NAME_TITLE = (Aids_String_Slice) { .str = (unsigned char *)"title", .len = 5 };
+static Aids_String_Slice FIELD_NAME_KIND = (Aids_String_Slice) { .str = (unsigned char *)"kind", .len = 4 };
+static Aids_String_Slice FIELD_NAME_FLOW_STEP = (Aids_String_Slice) { .str = (unsigned char *)"flow_step", .len = 9 };
+static Aids_String_Slice FIELD_NAME_PLAN_STATUS = (Aids_String_Slice) { .str = (unsigned char *)"plan_status", .len = 11 };
+static Aids_String_Slice FIELD_NAME_PARENT = (Aids_String_Slice) { .str = (unsigned char *)"parent", .len = 6 };
+static Aids_String_Slice FIELD_NAME_DEPENDS = (Aids_String_Slice) { .str = (unsigned char *)"depends", .len = 7 };
 
 // Get field type from field name
 static Tatr_Filter_Field_Type tatr_filter_get_field_type(Aids_String_Slice field_name) {
@@ -2106,7 +2625,66 @@ static Tatr_Filter_Field_Type tatr_filter_get_field_type(Aids_String_Slice field
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_TITLE) == 0) {
         return TATR_FILTER_FIELD_TYPE_TITLE;
     }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_KIND) == 0) {
+        return TATR_FILTER_FIELD_TYPE_KIND;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_FLOW_STEP) == 0) {
+        return TATR_FILTER_FIELD_TYPE_FLOW_STEP;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_PLAN_STATUS) == 0) {
+        return TATR_FILTER_FIELD_TYPE_PLAN_STATUS;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_PARENT) == 0) {
+        return TATR_FILTER_FIELD_TYPE_PARENT;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_DEPENDS) == 0) {
+        return TATR_FILTER_FIELD_TYPE_DEPENDS;
+    }
     return TATR_FILTER_FIELD_TYPE_UNKNOWN;
+}
+
+// The enum-valued filter fields all behave identically: an identifier operand
+// (or a list of them) that must name a value of the field's enum. Returns the
+// value table for such a field, or NULL for the rest.
+static const Aids_String_Slice *tatr_filter_enum_table(Tatr_Filter_Field_Type field_type,
+                                                       size_t *count,
+                                                       const char **field_label,
+                                                       const char **values_hint) {
+    switch (field_type) {
+        case TATR_FILTER_FIELD_TYPE_STATUS:
+            *count = ENUM_COUNT(Task_Status_Strings);
+            *field_label = "status";
+            *values_hint = STATUS_VALUES_CSTR;
+            return Task_Status_Strings;
+        case TATR_FILTER_FIELD_TYPE_KIND:
+            *count = ENUM_COUNT(Task_Kind_Strings);
+            *field_label = "kind";
+            *values_hint = KIND_VALUES_CSTR;
+            return Task_Kind_Strings;
+        case TATR_FILTER_FIELD_TYPE_FLOW_STEP:
+            *count = ENUM_COUNT(Flow_Step_Strings);
+            *field_label = "flow step";
+            *values_hint = FLOW_STEP_VALUES_CSTR;
+            return Flow_Step_Strings;
+        case TATR_FILTER_FIELD_TYPE_PLAN_STATUS:
+            *count = ENUM_COUNT(Plan_Status_Strings);
+            *field_label = "plan status";
+            *values_hint = PLAN_STATUS_VALUES_CSTR;
+            return Plan_Status_Strings;
+        default:
+            return NULL;
+    }
+}
+
+// The enum a task actually carries for such a field.
+static int tatr_filter_enum_value(Tatr_Filter_Field_Type field_type, const Task *task) {
+    switch (field_type) {
+        case TATR_FILTER_FIELD_TYPE_STATUS: return (int)task->meta.status;
+        case TATR_FILTER_FIELD_TYPE_KIND: return (int)task->meta.kind;
+        case TATR_FILTER_FIELD_TYPE_FLOW_STEP: return (int)task->meta.flow_step;
+        case TATR_FILTER_FIELD_TYPE_PLAN_STATUS: return (int)task->meta.plan_status;
+        default: return -1;
+    }
 }
 
 // Type check the AST
@@ -2136,24 +2714,37 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
     // Type check based on operator and field type
     Tatr_Filter_Comparison_Op op = node->data.comparison.op;
 
+    size_t enum_count = 0;
+    const char *enum_label = NULL;
+    const char *enum_hint = NULL;
+    const Aids_String_Slice *enum_table =
+        tatr_filter_enum_table(field_type, &enum_count, &enum_label, &enum_hint);
+
     if (op == TATR_FILTER_COMPARISON_OP_EQ) {
         // eq: field eq value
-        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
-            // Right side must be an identifier (status value like OPEN, CLOSED, IN_PROGRESS)
+        if (enum_table != NULL) {
+            // Right side must be an identifier naming a value of the enum.
             if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
-                snprintf(error_msg, error_msg_size, "line %lu, col %lu: status comparison requires an identifier (OPEN, IN_PROGRESS, or CLOSED)", line, column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: %s comparison requires an identifier (%s)",
+                         line, column, enum_label, enum_hint);
                 return false;
             }
-            // Validate status value
-            Task_Status status = task_status_from_string(&right->data.identifier.value);
-            Aids_String_Slice status_str = Task_Status_Strings[status];
-            if (aids_string_slice_compare(&right->data.identifier.value, &status_str) != 0) {
+            int value = 0;
+            if (!enum_from_string(&right->data.identifier.value, enum_table, enum_count, &value)) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
-                snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid status value '" SS_Fmt "' (must be OPEN, IN_PROGRESS, or CLOSED)",
-                         line, column, SS_Arg(right->data.identifier.value));
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid %s value '" SS_Fmt "' (must be %s)",
+                         line, column, enum_label, SS_Arg(right->data.identifier.value), enum_hint);
+                return false;
+            }
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_PARENT) {
+            // Right side must be an identifier (a task ID).
+            if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: parent comparison requires a task ID", line, column);
                 return false;
             }
         } else if (field_type == TATR_FILTER_FIELD_TYPE_PRIORITY) {
@@ -2181,27 +2772,25 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
         }
     } else if (op == TATR_FILTER_COMPARISON_OP_IN) {
         // in: field in [list]
-        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
-            // Right side must be a list of status identifiers
+        if (enum_table != NULL) {
+            // Right side must be a list of identifiers naming enum values.
             if (right->kind != TATR_FILTER_AST_NODE_KIND_LIST) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
                 snprintf(error_msg, error_msg_size, "line %lu, col %lu: 'in' operator requires a list", line, column);
                 return false;
             }
-            // Validate all list items are valid status values
             for (unsigned long i = 0; i < right->data.list.items.count; i++) {
                 Tatr_Filter_Ast_Node **item_ptr;
                 aids_array_get(&right->data.list.items, i, (void**)&item_ptr);
                 Tatr_Filter_Ast_Node *item = *item_ptr;
 
-                Task_Status status = task_status_from_string(&item->data.identifier.value);
-                Aids_String_Slice status_str = Task_Status_Strings[status];
-                if (aids_string_slice_compare(&item->data.identifier.value, &status_str) != 0) {
+                int value = 0;
+                if (!enum_from_string(&item->data.identifier.value, enum_table, enum_count, &value)) {
                     unsigned long line, column;
                     tatr_filter_lexer_position_info(lexer, item->info.index, &line, &column);
-                    snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid status value '" SS_Fmt "' in list",
-                             line, column, SS_Arg(item->data.identifier.value));
+                    snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid %s value '" SS_Fmt "' in list",
+                             line, column, enum_label, SS_Arg(item->data.identifier.value));
                     return false;
                 }
             }
@@ -2218,13 +2807,15 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
             return false;
         }
     } else if (op == TATR_FILTER_COMPARISON_OP_CONTAINS) {
-        // contains: tags contains value or title contains value
-        if (field_type == TATR_FILTER_FIELD_TYPE_TAGS) {
-            // Right side must be an identifier (tag name)
+        // contains: tags/depends contains value, or title contains substring
+        if (field_type == TATR_FILTER_FIELD_TYPE_TAGS ||
+            field_type == TATR_FILTER_FIELD_TYPE_DEPENDS) {
+            // Right side must be an identifier (a tag name or a task ID)
             if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
-                snprintf(error_msg, error_msg_size, "line %lu, col %lu: tags 'contains' requires an identifier", line, column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: " SS_Fmt " 'contains' requires an identifier",
+                         line, column, SS_Arg(left->data.field.name));
                 return false;
             }
         } else if (field_type == TATR_FILTER_FIELD_TYPE_TITLE) {
@@ -2287,10 +2878,22 @@ static boolean tatr_filter_eval_comparison(Tatr_Filter_Ast_Node *node, const Tas
     // Get field type
     Tatr_Filter_Field_Type field_type = tatr_filter_get_field_type(left->data.field.name);
 
+    size_t enum_count = 0;
+    const char *enum_label = NULL;
+    const char *enum_hint = NULL;
+    const Aids_String_Slice *enum_table =
+        tatr_filter_enum_table(field_type, &enum_count, &enum_label, &enum_hint);
+
     if (op == TATR_FILTER_COMPARISON_OP_EQ) {
-        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
-            Task_Status expected_status = task_status_from_string(&right->data.identifier.value);
-            return task->meta.status == expected_status;
+        if (enum_table != NULL) {
+            int expected = 0;
+            if (!enum_from_string(&right->data.identifier.value, enum_table, enum_count, &expected)) {
+                return false;
+            }
+            return tatr_filter_enum_value(field_type, task) == expected;
+        } else if (field_type == TATR_FILTER_FIELD_TYPE_PARENT) {
+            return task->meta.parent.len > 0 &&
+                   aids_string_slice_compare(&task->meta.parent, &right->data.identifier.value) == 0;
         } else if (field_type == TATR_FILTER_FIELD_TYPE_PRIORITY) {
             // Parse number from identifier
             unsigned int expected_priority = 0;
@@ -2307,27 +2910,32 @@ static boolean tatr_filter_eval_comparison(Tatr_Filter_Ast_Node *node, const Tas
             return aids_string_slice_compare(&task->title, &right->data.identifier.value) == 0;
         }
     } else if (op == TATR_FILTER_COMPARISON_OP_IN) {
-        if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
-            // Check if task status is in the list
+        if (enum_table != NULL) {
+            int actual = tatr_filter_enum_value(field_type, task);
             for (unsigned long i = 0; i < right->data.list.items.count; i++) {
                 Tatr_Filter_Ast_Node **item_ptr;
                 aids_array_get(&right->data.list.items, i, (void**)&item_ptr);
                 Tatr_Filter_Ast_Node *item = *item_ptr;
 
-                Task_Status status = task_status_from_string(&item->data.identifier.value);
-                if (task->meta.status == status) {
+                int expected = 0;
+                if (enum_from_string(&item->data.identifier.value, enum_table, enum_count, &expected) &&
+                    actual == expected) {
                     return true;
                 }
             }
             return false;
         }
     } else if (op == TATR_FILTER_COMPARISON_OP_CONTAINS) {
-        if (field_type == TATR_FILTER_FIELD_TYPE_TAGS) {
-            // Check if task has the tag
-            for (unsigned long i = 0; i < task->meta.tags.count; i++) {
-                Aids_String_Slice *tag;
-                aids_array_get(&task->meta.tags, i, (void**)&tag);
-                if (aids_string_slice_compare(tag, &right->data.identifier.value) == 0) {
+        if (field_type == TATR_FILTER_FIELD_TYPE_TAGS ||
+            field_type == TATR_FILTER_FIELD_TYPE_DEPENDS) {
+            // Check if the task carries the tag / dependency
+            const Aids_Array *items = field_type == TATR_FILTER_FIELD_TYPE_TAGS
+                                          ? &task->meta.tags
+                                          : &task->meta.depends_on;
+            for (unsigned long i = 0; i < items->count; i++) {
+                Aids_String_Slice *item;
+                aids_array_get((Aids_Array *)items, i, (void**)&item);
+                if (aids_string_slice_compare(item, &right->data.identifier.value) == 0) {
                     return true;
                 }
             }
@@ -2451,6 +3059,7 @@ static boolean tatr_filter_eval(Tatr_Filter_Ast_Node *ast, const Task *task) {
 
 static int main_ls(const Tatr_Context *ctx) {
     int result = 0;
+    size_t skipped_tasks = 0;
     Argparse_Parser parser = {0};
     Sort_By sort_by = Sort_By_CREATED;
     boolean recursive = false;
@@ -2544,11 +3153,11 @@ static int main_ls(const Tatr_Context *ctx) {
         pt.project_dir = *project_dir;
         aids_array_init(&pt.tasks, sizeof(Task_Entry));
 
-        if (load_tasks_from_dir(&full_tasks_dir, &pt.tasks, sort_by) != AIDS_OK) {
-            aids_log(AIDS_WARNING, "Failed to load tasks from '" SS_Fmt "': %s",
-                    SS_Arg(full_tasks_dir), aids_failure_reason());
+        if (load_tasks_from_dir(&full_tasks_dir, &pt.tasks, sort_by, &skipped_tasks) != AIDS_OK) {
+            aids_log(AIDS_WARNING, "Failed to list tasks in '" SS_Fmt "'", SS_Arg(full_tasks_dir));
             AIDS_FREE(full_tasks_dir.str);
             project_tasks_cleanup(&pt);
+            skipped_tasks++;
             continue;
         }
         AIDS_FREE(full_tasks_dir.str);
@@ -2617,6 +3226,14 @@ static int main_ls(const Tatr_Context *ctx) {
         }
 
         AIDS_FREE(full_tasks_dir.str);
+    }
+
+    // The readable tasks were listed above; unreadable ones were named as they
+    // were skipped. Still exit non-zero, so a broken record cannot hide behind
+    // a successful-looking listing.
+    if (skipped_tasks > 0) {
+        aids_log(AIDS_ERROR, "%zu task(s) could not be read; run 'tatr check' for details", skipped_tasks);
+        result = 1;
     }
 
 defer:
@@ -2701,77 +3318,15 @@ static boolean check_severity_is_known(Aids_String_Slice severity) {
     return false;
 }
 
-static boolean check_flow_step_is_known(Aids_String_Slice value) {
-    static const char *known[] = {
-        "UNDERSTANDING",
-        "PLANNING",
-        "PLANNED",
-        "WORKING",
-        "REVIEWING",
-        "COMPOUNDING",
-        "DONE",
-    };
-    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
-        Aids_String_Slice k = aids_string_slice_from_cstr((char *)known[i]);
-        if (aids_string_slice_compare(&value, &k) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Lints the optional "## Flow State" section inside TASK.md. Marker values are
-// validated exactly as written after the prefix: trailing spaces, CRLF tails
-// and inline comments are part of the token and therefore invalid.
-static size_t check_flow_state(const Aids_String_Slice *huid,
-                               const Aids_String_Slice *raw,
-                               boolean *has_approved_plan) {
-    size_t findings = 0;
-    Aids_String_Slice scan = *raw;
-    Aids_String_Slice line = {0};
-    Aids_String_Slice flow_heading = aids_string_slice_from_cstr("## Flow State");
-    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
-    Aids_String_Slice flow_step_format = aids_string_slice_from_cstr("- FLOW STEP: ");
-    Aids_String_Slice plan_status_format = aids_string_slice_from_cstr("- PLAN STATUS: ");
-    Aids_String_Slice approved = aids_string_slice_from_cstr("APPROVED");
-    boolean in_flow_state = false;
-
-    *has_approved_plan = false;
-
-    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-        Aids_String_Slice heading = line;
-        aids_string_slice_trim_right(&heading);
-        if (aids_string_slice_starts_with(&heading, any_heading)) {
-            in_flow_state = aids_string_slice_compare(&heading, &flow_heading) == 0;
-            continue;
-        }
-        if (!in_flow_state) {
-            continue;
-        }
-
-        Aids_String_Slice l = line;
-        if (aids_string_slice_starts_with(&l, flow_step_format)) {
-            aids_string_slice_skip(&l, flow_step_format.len);
-            if (!check_flow_step_is_known(l)) {
-                printf(SS_Fmt ": bad-flow-state: invalid FLOW STEP '" SS_Fmt "' (use UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE)\n",
-                       SS_Arg(*huid), SS_Arg(l));
-                findings++;
-            }
-            continue;
-        }
-        if (aids_string_slice_starts_with(&l, plan_status_format)) {
-            aids_string_slice_skip(&l, plan_status_format.len);
-            if (aids_string_slice_compare(&l, &approved) == 0) {
-                *has_approved_plan = true;
-            } else {
-                printf(SS_Fmt ": bad-flow-state: invalid PLAN STATUS '" SS_Fmt "' (use APPROVED)\n",
-                       SS_Arg(*huid), SS_Arg(l));
-                findings++;
-            }
-        }
-    }
-
-    return findings;
+// An EPIC container is exempt from the record-completeness rules: its
+// aggregate record lives in its own TASK.md while child tasks carry the review
+// and retro records, so demanding those files would force a fabricated one;
+// and its frozen step boxes stay verbatim (superseded or dropped children are
+// honest history) rather than being ticked to silence the lint. It may also
+// sit IN_PROGRESS without a plan approval of its own - the plan gate applies
+// to the work tasks underneath it.
+static boolean check_task_is_container(const Task *task) {
+    return task->meta.kind == Task_Kind_EPIC;
 }
 
 // Returns the slice up to (not including) an inline " #" comment, so a
@@ -2905,7 +3460,6 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
     Aids_String_Slice raw = {0};
     Aids_String_Slice review = {0};
     boolean has_review = false;
-    boolean has_approved_plan = false;
     Task task = {0};
     boolean task_loaded = false;
 
@@ -2917,7 +3471,7 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
 
     task_init_empty(&task);
     if (task_deserialize(raw, &task) != AIDS_OK) {
-        printf(SS_Fmt ": malformed-header: TASK.md failed to parse (title/STATUS/PRIORITY/TAGS header)\n", SS_Arg(*huid));
+        printf(SS_Fmt ": malformed-header: TASK.md failed to parse (title and v2 metadata block)\n", SS_Arg(*huid));
         findings++;
         AIDS_FREE(raw.str);
         raw = (Aids_String_Slice){0};
@@ -2926,36 +3480,19 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
     task._buffer = raw.str; // task now owns the buffer
     task_loaded = true;
 
-    // task_status_from_string silently maps an unknown status to OPEN, so
-    // re-validate the raw STATUS token - EXACTLY as the parser sees it (no
-    // trim): "- STATUS: DONE", "- STATUS: CLOSED " (trailing space) and a
-    // CRLF "CLOSED\r" all deserialize to a silent OPEN and must be findings.
-    {
-        Aids_String_Slice scan = raw;
-        Aids_String_Slice line = {0};
-        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-            if (!aids_string_slice_starts_with(&line, STATUS_FORMAT)) {
-                continue;
-            }
-            aids_string_slice_skip(&line, STATUS_FORMAT.len);
-            if (!task_status_is_valid(&line)) {
-                printf(SS_Fmt ": malformed-header: invalid STATUS '" SS_Fmt "' (whitespace and line endings count)\n",
-                       SS_Arg(*huid), SS_Arg(line));
-                findings++;
-            }
-            break;
-        }
-    }
-
-    findings += check_flow_state(huid, &raw, &has_approved_plan);
+    // Metadata values no longer need a re-scan here: the v2 parser validates
+    // the exact token it consumes (trailing spaces and CRLF tails included),
+    // so an invalid STATUS, KIND, FLOW STEP or PLAN STATUS has already been
+    // reported above as a parse failure.
     if (task.meta.status == Task_Status_IN_PROGRESS &&
-        !has_approved_plan) {
+        task.meta.plan_status != Plan_Status_APPROVED &&
+        !check_task_is_container(&task)) {
         printf(SS_Fmt ": unplanned-in-progress: IN_PROGRESS task lacks PLAN STATUS: APPROVED\n",
                SS_Arg(*huid));
         findings++;
     }
 
-    if (task.meta.status == Task_Status_CLOSED) {
+    if (task.meta.status == Task_Status_CLOSED && !check_task_is_container(&task)) {
         Aids_String_Slice scan = raw;
         Aids_String_Slice line = {0};
         boolean in_steps = false;
@@ -3065,7 +3602,8 @@ review_checks:
         }
     }
 
-    if (task_loaded && task.meta.status == Task_Status_CLOSED) {
+    if (task_loaded && task.meta.status == Task_Status_CLOSED &&
+        !check_task_is_container(&task)) {
         if (!has_review) {
             printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md\n", SS_Arg(*huid));
             findings++;

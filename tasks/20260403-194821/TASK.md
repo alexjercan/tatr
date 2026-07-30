@@ -3,6 +3,9 @@
 - STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature,historical
+- KIND: TASK
+- FLOW STEP: DONE
+- PLAN STATUS: NOT_REQUIRED
 
 I would like to have a flag like `-R, --recursive` for the `ls` command that
 will search in all subdirectories for `tasks` folder and list all of them,

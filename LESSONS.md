@@ -30,9 +30,16 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `re-enumerate-snapshot-counts` (x1): a task quoting "the N items to fix" is a
   snapshot of a moving backlog; re-derive the live set (git log, tatr check -S)
   before acting rather than trusting the number. 20260720-220114
-- `test-first-for-check-messages` (x2): for a check rule, write the test with
-  its exact expected message before the emitting code, so the format is designed
-  from the assertion not reverse-engineered into it. 20260722-152010, 20260725-111031
+- `guard-at-the-layer-that-holds-it` (x1): before adding a validation, name the
+  invariant and check this layer can enforce it - a detector the producer can
+  still route around adds false positives without closing the hole (a read-side
+  body heuristic became a write-side re-parse). 20260730-153325
+- `test-the-position-not-the-shape` (x1): when a rule depends on WHERE input
+  appears, the fixture must put it exactly there; the right bytes somewhere else
+  passes while the rule is broken. 20260730-153325
+- `read-the-history-of-a-doc-claim` (x1): when docs describe behavior, grep the
+  code before preserving OR deleting the claim, then `git log -S` the gap - the
+  commit that dropped it says which side was intended. 20260730-153325
 - `check-the-helper-signature` (x1): glance at one existing call site for a
   by-value-vs-by-pointer aids helper convention before writing a fresh call
   (aids_string_slice_starts_with takes the prefix by value). 20260722-152010
@@ -48,9 +55,11 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `one-resolve-spine` (x3, PROMOTED 2026-07-05 -> AGENTS.md Code conventions):
   new commands reuse task_resolve / task_load / task_save instead of
   reimplementing HUID or path logic. 20260705-172803, 20260705-172804, 20260705-172805
-- `checker-set-e-exit-codes` (x1, PROMOTED 2026-07-05 -> AGENTS.md checker.sh
+- `checker-set-e-exit-codes` (x2, PROMOTED 2026-07-05 -> AGENTS.md checker.sh
   gotcha): under set -e, `local out=$(cmd)` swallows the exit code; should-fail
-  tests use the set +e / split-declaration pattern. 20260705-172803
+  tests use the set +e / split-declaration pattern. The same trap wears a
+  second costume at the shell: `cmd 2>&1 | tail; echo $?` reports the tail's
+  status, not the command's. 20260705-172803, 20260730-153325
 - `huid-gates-destruction` (x1, PROMOTED 2026-07-05 -> AGENTS.md Code
   conventions): deletion only ever touches tasks/<id>/ behind a validated
   HUID; never build a destructive path from raw input. 20260705-172805
@@ -66,5 +75,7 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 ## Pending promotions (3+ occurrences, user decides)
 
-(none - build-through-nix-dev-shell was absorbed by the Makefile build guard on
-2026-07-20 and moved to Domain lessons.)
+- `test-first-for-check-messages` (x3): for a check rule, write the test with
+  its exact expected message before the emitting code, so the format is designed
+  from the assertion not reverse-engineered into it. 20260722-152010,
+  20260725-111031, 20260730-153325

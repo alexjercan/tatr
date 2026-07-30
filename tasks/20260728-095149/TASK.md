@@ -3,9 +3,7 @@
 - STATUS: CLOSED
 - PRIORITY: 85
 - TAGS: feature,build,windows
-
-## Flow State
-
+- KIND: TASK
 - FLOW STEP: DONE
 - PLAN STATUS: APPROVED
 

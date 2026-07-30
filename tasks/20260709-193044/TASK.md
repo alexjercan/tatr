@@ -3,6 +3,9 @@
 - STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: bug
+- KIND: TASK
+- FLOW STEP: DONE
+- PLAN STATUS: NOT_REQUIRED
 
 The filter query language cannot match version-style tags. Running
 `tatr ls -f ':tags contains v0.1.0'` fails to parse because the filter lexer

@@ -120,6 +120,10 @@ tatr edit <ID> -s IN_PROGRESS  # claim a task
 tatr edit <ID> -s CLOSED     # finish it
 tatr new "..." -p 80 -t feature  # add newly discovered work
 tatr new "..." -b body.md    # seed the description body from a file ('-' = stdin)
+tatr new "..." -k STORY -P <ID> -d <ID>  # a Story under an Epic, blocked on a task
+tatr edit <ID> -f WORKING -S APPROVED    # move flow state
+tatr ls -f ':kind eq EPIC'   # the containers
+tatr ls -f ':depends contains <ID>'  # everything blocked on a task
 tatr check                   # lint the backlog for process drift (exit 1 on findings)
 ```
 
@@ -129,22 +133,25 @@ distilled into the ledger and removed (git history keeps them). Durable
 lessons go to `LESSONS.md` at the root; there is no scratch drawer.
 
 `tatr check` is always strict: there is no `--strict` flag to opt in or out. It
-requires a `REVIEW.md` and `RETRO.md` on every CLOSED task, EXCEPT tasks tagged
-`goal`: a `goal` task is an explicit /flow epic, sprint, version, release, or
+requires a `REVIEW.md` and `RETRO.md` on every CLOSED task, EXCEPT records with
+`- KIND: EPIC`: an EPIC is an explicit /flow epic, sprint, version, release, or
 multi-feature container. The container's broader done definition, child-task
 list, decisions index, and manual acceptance live in the container's own
 `TASK.md`; child tasks carry the per-task review and retro records. Containers
 are also exempt from the `closed-unchecked` rule - a frozen container's step
 boxes stay verbatim (superseded / dropped / premise-falsified steps are honest
-history) rather than being ticked to silence the lint.
+history) rather than being ticked to silence the lint - and from
+`unplanned-in-progress`, since the plan gate applies to the work tasks under
+them.
 
-Flow-state rules protect planned work from checklist-shaped drift.
-`bad-flow-state` validates exact marker values under `## Flow State`:
-`- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
-and `- PLAN STATUS: APPROVED`. `unplanned-in-progress` fires when an ordinary
-IN_PROGRESS task lacks `PLAN STATUS: APPROVED`. Explicit containers tagged
-`goal` are exempt; OPEN backlog and CLOSED tasks do not need the approved-plan
-marker.
+Workflow state is typed metadata, not prose: `- KIND`, `- FLOW STEP` and
+`- PLAN STATUS` are required fields in the block under the title, and the
+parser rejects any value outside their enums. There is no `## Flow State`
+section and no `bad-flow-state` rule any more - an invalid marker is a
+`malformed-header` parse failure. `unplanned-in-progress` fires when an
+ordinary IN_PROGRESS task lacks `- PLAN STATUS: APPROVED`; OPEN backlog and
+CLOSED tasks are never asked for one, and `NOT_REQUIRED` is how a record says
+its cycle predated plan state.
 
 The `DECISION.md` rules (`bad-decision-status`, `dangling-supersede`) need no
 such exemption: they are presence-gated, firing only when a task carries a

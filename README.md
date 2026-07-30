@@ -101,6 +101,9 @@ tatr new "Fix memory leak in parser"
 # Create a task with metadata
 tatr new "Add unit tests" -p 80 -t testing,bug -s IN_PROGRESS
 
+# Create a Story under an Epic, blocked on another task
+tatr new "Add the frontier view" -k STORY -P 20260730-153122 -d 20260730-153325
+
 # Create a task with the description body from a file (or '-' for stdin)
 tatr new "Refactor the loader" -p 60 -t refactor -b body.md
 
@@ -113,6 +116,17 @@ tatr -r /path/to/project new "Task title"
 - `-t, --tags <value>...`: Comma-separated tags
 - `-s, --status <value>`: Set status (OPEN, IN_PROGRESS, CLOSED)
 - `-b, --body-file <path>`: Read the description body from a file; `-` reads stdin
+- `-k, --kind <value>`: Set kind (TASK, EPIC, STORY, SPIKE; default: TASK)
+- `-f, --flow-step <value>`: Set flow step (BACKLOG, UNDERSTANDING, PLANNING,
+  PLANNED, WORKING, REVIEWING, COMPOUNDING, DONE; default: BACKLOG)
+- `-S, --plan-status <value>`: Set plan status (DRAFT, APPROVED, NOT_REQUIRED;
+  default: DRAFT)
+- `-P, --parent <id>`: Set the parent task ID
+- `-d, --depends-on <id>...`: Set the dependency task IDs
+
+`edit` takes the same options and replaces the field it is given. On `edit`, an
+empty value clears an optional relationship field: `tatr edit <id> -P ""` drops
+the parent and `-d ""` drops every dependency.
 
 Task IDs have second resolution (`YYYYMMDD-HHMMSS`). If a task with the
 generated ID already exists (two `new` calls in the same second), `tatr new`
@@ -139,11 +153,17 @@ tatr ls -R
 - `-R, --recursive`: Recursively search for tasks directories in all subdirectories
 - `-f, --filter <value>`: Filter tasks with a query expression
 
+A record that does not parse is skipped and named on stderr rather than
+aborting the listing, and `ls` then exits non-zero - so one broken record
+cannot hide the rest of the backlog, and listing is a safe way to find what
+needs correcting. Scripts chaining `tatr ls && ...` should account for that.
+
 **Filtering:**
 
 The `-f` flag takes a small query language over task fields. Fields are written
-with a leading colon (`:status`, `:priority`, `:tags`), combined with operators
-and grouped with parentheses:
+with a leading colon, combined with operators and grouped with parentheses.
+The fields are `:status`, `:priority`, `:title`, `:tags`, `:kind`,
+`:flow_step`, `:plan_status`, `:parent` and `:depends`:
 
 ```bash
 # Only open tasks
@@ -154,7 +174,20 @@ tatr ls -f ':tags contains feature'
 
 # Open feature tasks, combining conditions
 tatr ls -f '(:status eq OPEN) and (:tags contains feature)'
+
+# Every Epic container
+tatr ls -f ':kind eq EPIC'
+
+# Approved work that has not been picked up yet
+tatr ls -f '(:plan_status eq APPROVED) and (:flow_step in [BACKLOG, PLANNED])'
+
+# The children of one Epic, and everything blocked on one task
+tatr ls -f ':parent eq 20260730-153122'
+tatr ls -f ':depends contains 20260730-153325'
 ```
+
+The enum-valued fields (`:status`, `:kind`, `:flow_step`, `:plan_status`) take
+`eq` and `in`; `:parent` takes `eq`; `:tags` and `:depends` take `contains`.
 
 Supported operators include `eq`, `contains`, `in` (with `[...]` lists), and the
 boolean connectives `and`, `or`, `not`. Literal values may contain `.` and `-`
@@ -164,9 +197,9 @@ recursive mode, and applies per section in recursive mode.
 
 **Output format:**
 ```
-tasks/20260331-144635/TASK.md: [PRIORITY: 100, TAGS: feature] Implement filter system
-tasks/20260330-202358/TASK.md: [PRIORITY: 80, TAGS: testing,bug] Add unit tests
-tasks/20260329-123700/TASK.md: [PRIORITY: 0, TAGS: ] Fix memory leak in parser
+tasks/20260331-144635/TASK.md: [PRIORITY: 100, KIND: TASK, FLOW STEP: DONE, TAGS: feature] Implement filter system
+tasks/20260330-202358/TASK.md: [PRIORITY: 80, KIND: STORY, FLOW STEP: WORKING, TAGS: testing, bug] Add unit tests
+tasks/20260329-123700/TASK.md: [PRIORITY: 0, KIND: TASK, FLOW STEP: BACKLOG, TAGS: ] Fix memory leak in parser
 ```
 
 ### Showing a Task
@@ -239,31 +272,31 @@ tatr check --ledger LESSONS.md   # also lint a lessons ledger
   `- VERDICT:` line is not APPROVE (or there is no verdict at all).
 - `bad-severity`: a REVIEW.md finding uses a severity outside
   BLOCKER|MAJOR|MINOR|NIT.
-- `malformed-header`: TASK.md is missing/unreadable, its header does not
-  parse, or its STATUS value is not OPEN/IN_PROGRESS/CLOSED.
-- `bad-flow-state`: a `## Flow State` marker has an invalid exact value. Valid
-  markers are `- FLOW STEP: UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
-  and `- PLAN STATUS: APPROVED`.
+- `malformed-header`: TASK.md is missing/unreadable, or its title and metadata
+  block do not parse. This covers every invalid metadata value: the parser
+  validates the exact token it consumes, so `- STATUS: DONE`,
+  `- KIND: EPICS`, a trailing space after a value or a CRLF tail all land
+  here rather than in a rule of their own.
 - `unplanned-in-progress`: an ordinary IN_PROGRESS task lacks
-  `PLAN STATUS: APPROVED` under `## Flow State`. Explicit containers tagged
-  `goal` are exempt.
+  `- PLAN STATUS: APPROVED`. `KIND: EPIC` containers are exempt.
 - `bad-decision-status`: a task's `DECISION.md` (when present) has a `- STATUS:`
   value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference - in a
   `SUPERSEDED by <ref>` status or a `- Supersedes: <ref>` line - does not
   resolve to an existing `tasks/<id>/DECISION.md`.
 
-The required flow marker applies only when an ordinary task is moved to
-IN_PROGRESS, so old CLOSED tasks and ordinary OPEN backlog items need no
-migration. A `goal` tag is reserved for an explicit /flow epic, sprint,
-version, release, or multi-feature container. The container's broader record
-lives in that task's own `TASK.md` sections, such as `## Epic`,
-`## Done Means`, `## Child Tasks`, `## Decisions`, and
-`## Manual Acceptance`; child tasks carry the per-task review and retro records.
-Do not create a container task for one requested thing. Containers are exempt
-from the record-completeness rules (`closed-missing-review`,
-`closed-missing-retro`) and from `closed-unchecked`, because their task files
-are aggregate container records rather than per-task ones.
+The approved-plan requirement applies only when an ordinary task is moved to
+IN_PROGRESS, so CLOSED tasks and OPEN backlog items are never asked for one.
+`KIND: EPIC` marks an explicit /flow epic, sprint, version, release, or
+multi-feature container. The container's broader record lives in that task's
+own `TASK.md` sections, such as `## Epic`, `## Done Means`, `## Child Tasks`,
+`## Decisions`, and `## Manual Acceptance`; child tasks carry the per-task
+review and retro records. Do not create a container task for one requested
+thing. Containers are exempt from the record-completeness rules
+(`closed-missing-review`, `closed-missing-retro`), from `closed-unchecked`
+(a frozen container's step boxes stay verbatim, since superseded or dropped
+children are honest history), and from `unplanned-in-progress` (the plan gate
+applies to the work tasks underneath it).
 
 The two `DECISION.md` rules are presence-gated: a task without a `DECISION.md`
 is never flagged, so they need no migration of existing tasks.
@@ -287,15 +320,59 @@ Tasks are stored as Markdown files with structured metadata. Each task file (`TA
 - STATUS: OPEN
 - PRIORITY: 100
 - TAGS: feature, enhancement
+- KIND: TASK
+- FLOW STEP: BACKLOG
+- PLAN STATUS: DRAFT
+- PARENT: 20260730-153122
+- DEPENDS ON: 20260730-153325, 20260730-154745
 
 Detailed description of the task goes here.
 Can span multiple lines and include any markdown formatting.
 ```
 
+The metadata is one flat block directly under the title, read in exactly this
+order. The first six fields are required and always written back. `PARENT` and
+`DEPENDS ON` are optional and appear only when set, so a task with no
+relationships carries no empty relationship lines.
+
+Blank lines and leading whitespace between fields are tolerated when reading
+and normalized away on the next write. Values are validated on the exact token
+the parser consumes, so a trailing space or a CRLF tail fails the load rather
+than silently defaulting, and a key written with no value (`- PARENT:`) is
+reported as such rather than becoming body text.
+
+Everything after the block is the description body: opaque, and preserved byte
+for byte through any `edit`. A bullet is a bullet, even an uppercase one.
+
+tatr never writes a record it cannot read back. `new` and `edit` re-parse the
+serialized bytes before touching disk and fail without writing if the result
+would not parse - a newline in a title or tag is the usual cause - and a failed
+`new` leaves no task directory behind.
+
 **Status values:**
 - `OPEN`: Task not yet started
 - `IN_PROGRESS`: Currently being worked on
 - `CLOSED`: Task completed
+
+**Kind values:** `TASK` (the default), `EPIC` (an explicit /flow container),
+`STORY` (a unit of work under an Epic), `SPIKE` (an exploration).
+
+**Flow step values:** `BACKLOG`, `UNDERSTANDING`, `PLANNING`, `PLANNED`,
+`WORKING`, `REVIEWING`, `COMPOUNDING`, `DONE`.
+
+**Plan status values:** `DRAFT`, `APPROVED` (the user accepted the plan at the
+/flow gate), `NOT_REQUIRED` (the record's cycle never carried plan state, as
+with pre-flow history).
+
+`PARENT` and `DEPENDS ON` hold task IDs from the same `tasks/` tree, and are
+validated as IDs only: whether the referenced tasks exist, whether the graph
+they form is acyclic, and whether a dependency is listed twice are not checked
+here. A parent in another repository is not expressible as a `PARENT` and
+belongs in the body prose.
+
+There is no migration path from the pre-v2 format and no compatibility mode.
+A record missing these fields is rejected with a diagnostic naming the file and
+the field it stopped at; correct such a record by hand.
 
 ## Project Structure
 
