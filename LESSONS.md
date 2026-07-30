@@ -46,6 +46,16 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `target-compiler-first` (x1): for cross-platform work, run the target compiler
   before designing portability shims so the first fix set follows real
   diagnostics. 20260728-095149
+- `guard-from-the-rule-not-its-summary` (x1): when a change must not violate
+  another component's rule, enumerate that component's ACTUAL rules in code -
+  a decision record's prose list drops distinctions (check exempts an EPIC from
+  closed-missing-review but not closed-not-approved). 20260730-154657
+- `no-outcome-before-the-run` (x1): never write a verdict, count or "confirmed"
+  into a record before the thing producing it has run, however certain the
+  outcome looks. 20260730-154657
+- `mutation-test-the-new-guard` (x1): delete each new guard one at a time and
+  watch its own test go red - cheap, and it turns "this test would fail without
+  the fix" from an assertion into a check. 20260730-154657
 - `serialize-build-artifact-checks` (x1): do not parallelize verification
   commands that clean or rewrite the same build outputs in one worktree.
   20260728-095149
@@ -55,11 +65,11 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `one-resolve-spine` (x3, PROMOTED 2026-07-05 -> AGENTS.md Code conventions):
   new commands reuse task_resolve / task_load / task_save instead of
   reimplementing HUID or path logic. 20260705-172803, 20260705-172804, 20260705-172805
-- `checker-set-e-exit-codes` (x2, PROMOTED 2026-07-05 -> AGENTS.md checker.sh
+- `checker-set-e-exit-codes` (x4, PROMOTED 2026-07-05 -> AGENTS.md checker.sh
   gotcha): under set -e, `local out=$(cmd)` swallows the exit code; should-fail
-  tests use the set +e / split-declaration pattern. The same trap wears a
-  second costume at the shell: `cmd 2>&1 | tail; echo $?` reports the tail's
-  status, not the command's. 20260705-172803, 20260730-153325
+  tests use the set +e / split-declaration pattern. Applies to YOUR OWN
+  verification commands too - `./checker.sh --memcheck | tail` reported exit 0
+  on a run that died mid-suite. 20260705-172803, 20260730-153325, 20260730-154657
 - `huid-gates-destruction` (x1, PROMOTED 2026-07-05 -> AGENTS.md Code
   conventions): deletion only ever touches tasks/<id>/ behind a validated
   HUID; never build a destructive path from raw input. 20260705-172805

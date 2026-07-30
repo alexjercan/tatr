@@ -4,8 +4,33 @@ All notable changes to tatr are documented here.
 
 ## Unreleased
 
+### Added
+
+- `tatr flow <ID> [--to <STEP>]`: the guarded lifecycle. It walks the eight
+  legal edges (BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING ->
+  REVIEWING -> COMPOUNDING -> DONE, plus the REVIEWING -> WORKING fix loop),
+  derives `STATUS` from the step, and writes `PLAN STATUS: APPROVED` at the
+  plan gate. Starting work requires an approved plan and CLOSED dependencies;
+  leaving review requires a `REVIEW.md` whose latest verdict is APPROVE with no
+  open BLOCKER/MAJOR finding; closing additionally requires ticked `## Steps`,
+  a `RETRO.md` and a valid `DECISION.md` status. `KIND: EPIC` is exempt from
+  exactly the four requirements `tatr check` exempts it from. Every
+  precondition is evaluated before anything is written and all unmet ones are
+  reported, so a refused transition leaves `TASK.md` byte-identical. There is
+  no `--force` and no repair command.
+
 ### Changed
 
+- **Breaking:** `STATUS`, `FLOW STEP` and `PLAN STATUS` are no longer settable
+  through `new` or `edit`. `-s/--status` is gone from both, and
+  `-f/--flow-step` and `-S/--plan-status` are gone from the shared metadata
+  options; the retired spellings fail with a pointer to `tatr flow` rather than
+  a generic unknown-argument error. A task is always born `OPEN` / `BACKLOG` /
+  `DRAFT`, and `PLAN STATUS: NOT_REQUIRED` is reachable only by hand.
+- The artifact scans `tatr check` lints with - the unchecked `## Steps` count,
+  the latest `- VERDICT:`, the open BLOCKER/MAJOR finding count, the
+  `DECISION.md` status - are shared with the lifecycle guards, so a transition
+  can never produce a state the lint would flag.
 - **Breaking:** task records carry typed workflow metadata. `KIND`
   (`TASK|EPIC|STORY|SPIKE`), `FLOW STEP`
   (`BACKLOG|UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`)

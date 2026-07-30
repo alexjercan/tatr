@@ -19,6 +19,7 @@ primarily a toy project inspired by Tsoding's streams.
 - **Filesystem-based storage**: Tasks stored as Markdown files in a `tasks/` directory
 - **Human-readable IDs**: Each task gets a timestamp-based HUID (format: `YYYYMMDD-HHMMSS`)
 - **Metadata support**: Track status, priority, and tags for each task
+- **Guarded lifecycle**: `tatr flow` is the only writer of the workflow fields, and every transition is checked before it is written
 - **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
 - **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
 - **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
@@ -99,7 +100,7 @@ clang -Wall -Wextra -O2 -g -o tatr tatr.c
 tatr new "Fix memory leak in parser"
 
 # Create a task with metadata
-tatr new "Add unit tests" -p 80 -t testing,bug -s IN_PROGRESS
+tatr new "Add unit tests" -p 80 -t testing,bug
 
 # Create a Story under an Epic, blocked on another task
 tatr new "Add the frontier view" -k STORY -P 20260730-153122 -d 20260730-153325
@@ -114,19 +115,19 @@ tatr -r /path/to/project new "Task title"
 **Options:**
 - `-p, --priority <value>`: Set task priority (default: 0, higher values = higher priority)
 - `-t, --tags <value>...`: Comma-separated tags
-- `-s, --status <value>`: Set status (OPEN, IN_PROGRESS, CLOSED)
 - `-b, --body-file <path>`: Read the description body from a file; `-` reads stdin
 - `-k, --kind <value>`: Set kind (TASK, EPIC, STORY, SPIKE; default: TASK)
-- `-f, --flow-step <value>`: Set flow step (BACKLOG, UNDERSTANDING, PLANNING,
-  PLANNED, WORKING, REVIEWING, COMPOUNDING, DONE; default: BACKLOG)
-- `-S, --plan-status <value>`: Set plan status (DRAFT, APPROVED, NOT_REQUIRED;
-  default: DRAFT)
 - `-P, --parent <id>`: Set the parent task ID
 - `-d, --depends-on <id>...`: Set the dependency task IDs
 
 `edit` takes the same options and replaces the field it is given. On `edit`, an
 empty value clears an optional relationship field: `tatr edit <id> -P ""` drops
 the parent and `-d ""` drops every dependency.
+
+A task is always born `- STATUS: OPEN`, `- FLOW STEP: BACKLOG`,
+`- PLAN STATUS: DRAFT`. Those three workflow fields cannot be set here: they
+belong to [`tatr flow`](#moving-a-task-through-the-flow), which is the only
+command that writes them.
 
 Task IDs have second resolution (`YYYYMMDD-HHMMSS`). If a task with the
 generated ID already exists (two `new` calls in the same second), `tatr new`
@@ -216,29 +217,140 @@ non-zero if the ID is malformed or the task does not exist.
 
 ### Editing a Task
 
-Update the metadata or title of an existing task without opening an editor. Only
-the fields you pass are changed; everything else, including the description body,
-is left untouched. This is the command automation and agents use to move a task
-through its lifecycle (for example OPEN -> IN_PROGRESS -> CLOSED):
+Update the descriptive metadata or title of an existing task without opening an
+editor. Only the fields you pass are changed; everything else, including the
+description body and every workflow field, is left untouched:
 
 ```bash
-# Move a task to IN_PROGRESS
-tatr edit 20260331-144635 -s IN_PROGRESS
-
 # Bump priority and retitle
 tatr edit 20260331-144635 -p 90 -T "Implement query filter language"
 
 # Replace the tag set (edit replaces tags, it does not merge them)
 tatr edit 20260331-144635 -t feature -t parser
+
+# Re-home a Story and replace its dependencies
+tatr edit 20260331-144635 -k STORY -P 20260730-153122 -d 20260730-153325
 ```
 
 **Options:**
 - `-T, --title <value>`: New task title
 - `-p, --priority <value>`: New priority (non-negative integer)
 - `-t, --tags <value>...`: New tags, replacing the existing set
-- `-s, --status <value>`: New status (OPEN, IN_PROGRESS, CLOSED)
+- `-k, --kind <value>`: New kind (TASK, EPIC, STORY, SPIKE)
+- `-P, --parent <id>`: New parent task ID (empty value clears it)
+- `-d, --depends-on <id>...`: New dependency task IDs (empty value clears them)
 
-An invalid status value is rejected and the task file is left unchanged.
+`edit` cannot set `STATUS`, `FLOW STEP` or `PLAN STATUS`. The flags for them
+were removed, and the retired spellings fail with a pointer to the lifecycle
+rather than a generic unknown-argument error:
+
+```console
+$ tatr edit 20260730-185007 --status CLOSED
+ERROR: '--status' was removed: STATUS is not settable through `new` or `edit`
+  STATUS is derived from FLOW STEP; move the task with `tatr flow <ID> [--to <STEP>]`
+```
+
+(The transcripts here elide the `tatr.c:<line>:` source location every
+`ERROR:` line carries, which moves with the code; everything after it is
+verbatim.)
+
+An invalid value for any option `edit` does accept is rejected before anything
+is written, so the task file is left unchanged.
+
+### Moving a Task Through the Flow
+
+`tatr flow` is the only writer of the three workflow fields. Without `--to` it
+advances one step along the chain; with `--to` it names the target explicitly:
+
+```bash
+tatr flow 20260331-144635              # advance one step
+tatr flow 20260331-144635 --to WORKING # name the target (the review fix loop)
+```
+
+**The transition table.** Eight edges, and nothing else:
+
+```
+BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
+                                          ^                      |
+                                          |                      v
+                                          +------- (fix) --- COMPOUNDING -> DONE
+```
+
+`REVIEWING` is the only step with two successors. Its default - what a bare
+`tatr flow` picks - is `COMPOUNDING`, so the fix loop back to `WORKING` must be
+asked for by name with `--to WORKING`. Every other step has exactly one
+successor, and `DONE` is terminal.
+
+**STATUS is derived, never chosen.** The flow step implies it, so a work task
+stays IN_PROGRESS through review and compound and closes atomically at DONE, in
+the same write that sets `- FLOW STEP: DONE`:
+
+| FLOW STEP                                 | STATUS      |
+| ----------------------------------------- | ----------- |
+| BACKLOG, UNDERSTANDING, PLANNING, PLANNED | OPEN        |
+| WORKING, REVIEWING, COMPOUNDING           | IN_PROGRESS |
+| DONE                                      | CLOSED      |
+
+**Preconditions.** Three edges are gates:
+
+- `PLANNING -> PLANNED` is the plan gate. It has no preconditions of its own;
+  its effect is to write `- PLAN STATUS: APPROVED`, and it is the only way that
+  value is ever written.
+- `PLANNED -> WORKING` requires `- PLAN STATUS: APPROVED` and every
+  `- DEPENDS ON` id to resolve to an existing task that is CLOSED.
+- `REVIEWING -> COMPOUNDING` requires a `REVIEW.md` whose latest `- VERDICT:`
+  is APPROVE, with no unticked BLOCKER or MAJOR finding left.
+- `COMPOUNDING -> DONE` requires all of the above, plus zero unchecked items
+  under `## Steps`, a `RETRO.md`, and a valid `- STATUS:` on a `DECISION.md`
+  when the task carries one.
+
+`REVIEWING -> WORKING` and the three pre-plan edges carry no preconditions:
+going back to fix something is never harder than going forward.
+
+`KIND: EPIC` containers are exempt from exactly what `tatr check` already
+exempts them from - the plan-approval, review, retro and unchecked-Steps
+requirements - because an Epic's record lives in its children. Their
+dependencies and their `DECISION.md` are checked like anyone else's.
+
+**Failure is atomic.** Every precondition is evaluated before anything is
+mutated, all unmet ones are reported rather than one per round trip, and a
+refused transition leaves `TASK.md` byte-identical:
+
+```console
+$ tatr flow 20260730-185007
+Task 20260730-185007 moved BACKLOG -> UNDERSTANDING (STATUS: OPEN)
+$ tatr flow 20260730-185007
+Task 20260730-185007 moved UNDERSTANDING -> PLANNING (STATUS: OPEN)
+$ tatr flow 20260730-185007
+Task 20260730-185007 moved PLANNING -> PLANNED (STATUS: OPEN)
+$ tatr flow 20260730-185007 --to DONE
+ERROR: Illegal transition for 20260730-185007: PLANNED -> DONE
+  the legal move from PLANNED is WORKING
+$ tatr flow 20260730-185007
+Task 20260730-185007 moved PLANNED -> WORKING (STATUS: IN_PROGRESS)
+$ tatr flow 20260730-185007
+Task 20260730-185007 moved WORKING -> REVIEWING (STATUS: IN_PROGRESS)
+$ tatr flow 20260730-185007
+ERROR: Refusing to move 20260730-185007 from REVIEWING to COMPOUNDING: 1 precondition(s) not met
+  - there is no REVIEW.md: the work has not been reviewed
+$ printf -- '- VERDICT: APPROVE\n' > tasks/20260730-185007/REVIEW.md
+$ tatr flow 20260730-185007
+Task 20260730-185007 moved REVIEWING -> COMPOUNDING (STATUS: IN_PROGRESS)
+$ tatr flow 20260730-185007
+ERROR: Refusing to move 20260730-185007 from COMPOUNDING to DONE: 2 precondition(s) not met
+  - 1 unchecked Steps item(s) remain
+  - there is no RETRO.md: the retro has not been written
+```
+
+**Options:**
+- `-o, --to <STEP>`: the target flow step (default: the current step's successor)
+
+There is no `--force` and no repair command. A transition may never produce a
+state `tatr check` would flag: both read the same artifacts through the same
+helpers. A record that is already in the wrong state is corrected by hand in
+`TASK.md`, where the fix shows up in the diff and a reviewer sees it.
+`- PLAN STATUS: NOT_REQUIRED` is likewise unreachable through the CLI - it is
+how a record says its cycle predated plan state, and it is written by hand.
 
 ### Removing a Task
 
@@ -365,9 +477,10 @@ would not parse - a newline in a title or tag is the usual cause - and a failed
 with pre-flow history).
 
 `PARENT` and `DEPENDS ON` hold task IDs from the same `tasks/` tree, and are
-validated as IDs only: whether the referenced tasks exist, whether the graph
-they form is acyclic, and whether a dependency is listed twice are not checked
-here. A parent in another repository is not expressible as a `PARENT` and
+validated as IDs only: whether the graph they form is acyclic and whether a
+dependency is listed twice are not checked. The one place a reference is
+resolved is the `PLANNED -> WORKING` gate, which requires every `DEPENDS ON` id
+to name an existing task that is CLOSED. A parent in another repository is not expressible as a `PARENT` and
 belongs in the body prose.
 
 There is no migration path from the pre-v2 format and no compatibility mode.
@@ -479,7 +592,6 @@ grep -r "TODO" tasks/
 
 ## Limitations
 
-- No task dependencies or relationships
 - No remote synchronization
 - Maximum 256 arguments for CLI parsing
 

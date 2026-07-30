@@ -861,29 +861,51 @@ defer:
     return result;
 }
 
+// The workflow fields STATUS, FLOW STEP and PLAN STATUS are written by
+// `tatr flow` alone, so their flags are gone from `new` and `edit`. argparse
+// rejects an unknown option with a generic message that says nothing about
+// where the field went, so both subcommands scan for the retired spellings
+// first and point at the lifecycle. The scan is a plain token match over the
+// subcommand's argv - the same exact-name match argparse itself does.
+// Returns true (after logging) when a retired flag was found.
+static boolean argparse_reject_retired_workflow_flags(const Tatr_Context *ctx) {
+    static const struct {
+        const char *short_name;
+        const char *long_name;
+        const char *field;
+        const char *pointer;
+    } retired[] = {
+        {"-s", "--status", "STATUS",
+         "STATUS is derived from FLOW STEP; move the task with `tatr flow <ID> [--to <STEP>]`"},
+        {"-f", "--flow-step", "FLOW STEP",
+         "move the task with `tatr flow <ID> [--to <STEP>]`"},
+        {"-S", "--plan-status", "PLAN STATUS",
+         "PLAN STATUS: APPROVED is written by the plan gate: `tatr flow <ID> --to PLANNED`"},
+    };
+
+    for (int i = 1; i < ctx->argc; ++i) {
+        for (size_t j = 0; j < sizeof(retired) / sizeof(retired[0]); ++j) {
+            if (strcmp(ctx->argv[i], retired[j].short_name) != 0 &&
+                strcmp(ctx->argv[i], retired[j].long_name) != 0) {
+                continue;
+            }
+            aids_log(AIDS_ERROR, "'%s' was removed: %s is not settable through `new` or `edit`",
+                     ctx->argv[i], retired[j].field);
+            fprintf(stderr, "  %s\n", retired[j].pointer);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Registers the v2 metadata options shared by `new` and `edit`, so the two
-// subcommands cannot drift apart in flag names or descriptions.
+// subcommands cannot drift apart in flag names or descriptions. Kind and
+// relationships only: the workflow fields belong to `tatr flow`.
 static void argparse_add_v2_meta_arguments(Argparse_Parser *parser) {
     argparse_add_argument(parser, (Argparse_Options){
         .short_name = 'k',
         .long_name = "kind",
         .description = "Task kind (" KIND_VALUES_CSTR ")",
-        .type = ARGUMENT_TYPE_VALUE,
-        .required = 0
-    });
-
-    argparse_add_argument(parser, (Argparse_Options){
-        .short_name = 'f',
-        .long_name = "flow-step",
-        .description = "Flow step (" FLOW_STEP_VALUES_CSTR ")",
-        .type = ARGUMENT_TYPE_VALUE,
-        .required = 0
-    });
-
-    argparse_add_argument(parser, (Argparse_Options){
-        .short_name = 'S',
-        .long_name = "plan-status",
-        .description = "Plan status (" PLAN_STATUS_VALUES_CSTR ")",
         .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
@@ -914,24 +936,6 @@ static boolean task_apply_v2_meta_arguments(Argparse_Parser *parser, Task *task)
         Aids_String_Slice slice = aids_string_slice_from_cstr(kind_str);
         if (!task_kind_from_string(&slice, &task->meta.kind)) {
             aids_log(AIDS_ERROR, "Invalid kind '%s': expected " KIND_VALUES_CSTR, kind_str);
-            return false;
-        }
-    }
-
-    char *flow_step_str = argparse_get_value(parser, "flow-step");
-    if (flow_step_str != NULL) {
-        Aids_String_Slice slice = aids_string_slice_from_cstr(flow_step_str);
-        if (!flow_step_from_string(&slice, &task->meta.flow_step)) {
-            aids_log(AIDS_ERROR, "Invalid flow step '%s': expected " FLOW_STEP_VALUES_CSTR, flow_step_str);
-            return false;
-        }
-    }
-
-    char *plan_status_str = argparse_get_value(parser, "plan-status");
-    if (plan_status_str != NULL) {
-        Aids_String_Slice slice = aids_string_slice_from_cstr(plan_status_str);
-        if (!plan_status_from_string(&slice, &task->meta.plan_status)) {
-            aids_log(AIDS_ERROR, "Invalid plan status '%s': expected " PLAN_STATUS_VALUES_CSTR, plan_status_str);
             return false;
         }
     }
@@ -1012,6 +1016,10 @@ static int main_new(const Tatr_Context *ctx) {
     boolean task_initialized = false;
     Aids_String_Slice body = {0};
 
+    if (argparse_reject_retired_workflow_flags(ctx)) {
+        return_defer(1);
+    }
+
     argparse_parser_init(&parser, "tatr new", "Create a new task", TATR_VERSION);
 
     argparse_add_argument(&parser, (Argparse_Options){
@@ -1035,14 +1043,6 @@ static int main_new(const Tatr_Context *ctx) {
         .long_name = "tags",
         .description = "Task tags (comma-separated)",
         .type = ARGUMENT_TYPE_VALUE_ARRAY,
-        .required = 0
-    });
-
-    argparse_add_argument(&parser, (Argparse_Options){
-        .short_name = 's',
-        .long_name = "status",
-        .description = "Task status (OPEN, IN_PROGRESS, CLOSED)",
-        .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
 
@@ -1091,15 +1091,6 @@ static int main_new(const Tatr_Context *ctx) {
         Aids_String_Slice tag = aids_string_slice_from_cstr(tags[i]);
         if (aids_array_append(&task.meta.tags, &tag) != AIDS_OK) {
             aids_log(AIDS_ERROR, "Failed to append tag: %s", aids_failure_reason());
-            return_defer(1);
-        }
-    }
-
-    char *status_str = argparse_get_value(&parser, "status");
-    if (status_str != NULL) {
-        Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
-        if (!task_status_from_string(&status_slice, &task.meta.status)) {
-            aids_log(AIDS_ERROR, "Invalid status '%s': expected " STATUS_VALUES_CSTR, status_str);
             return_defer(1);
         }
     }
@@ -1154,7 +1145,13 @@ defer:
     return result;
 }
 
-static Aids_Result task_load(const Aids_String_Slice *task_file_path, Task *task) {
+// Loads a task and hands back the raw bytes it was parsed from. The task owns
+// them through task->_buffer, so *raw stays valid until task_cleanup. Callers
+// that need the body verbatim - the close gate counts the unchecked Steps in
+// the very bytes the record was parsed from - use this rather than re-reading
+// the file behind the parser's back.
+static Aids_Result task_load_raw(const Aids_String_Slice *task_file_path, Task *task,
+                                 Aids_String_Slice *raw) {
     Aids_Result result = AIDS_OK;
     Aids_String_Slice serialized_task = {0};
 
@@ -1172,9 +1169,16 @@ static Aids_Result task_load(const Aids_String_Slice *task_file_path, Task *task
 
     // Store the buffer so it can be freed when the task is cleaned up
     task->_buffer = serialized_task.str;
+    if (raw != NULL) {
+        *raw = serialized_task;
+    }
 
 defer:
     return result;
+}
+
+static Aids_Result task_load(const Aids_String_Slice *task_file_path, Task *task) {
+    return task_load_raw(task_file_path, task, NULL);
 }
 
 // Resolves a task HUID argument to the located tasks directory and the task's
@@ -1356,6 +1360,10 @@ static int main_edit(const Tatr_Context *ctx) {
     Aids_String_Slice tasks_dir = {0};
     Aids_String_Slice task_file_path = {0};
 
+    if (argparse_reject_retired_workflow_flags(ctx)) {
+        return_defer(1);
+    }
+
     argparse_parser_init(&parser, "tatr edit", "Update fields of an existing task", TATR_VERSION);
 
     argparse_add_argument(&parser, (Argparse_Options){
@@ -1387,14 +1395,6 @@ static int main_edit(const Tatr_Context *ctx) {
         .long_name = "tags",
         .description = "New task tags (replaces existing, comma-separated)",
         .type = ARGUMENT_TYPE_VALUE_ARRAY,
-        .required = 0
-    });
-
-    argparse_add_argument(&parser, (Argparse_Options){
-        .short_name = 's',
-        .long_name = "status",
-        .description = "New task status (OPEN, IN_PROGRESS, CLOSED)",
-        .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
 
@@ -1442,15 +1442,6 @@ static int main_edit(const Tatr_Context *ctx) {
             }
         } else {
             aids_log(AIDS_ERROR, "Invalid priority value: %s", priority_str);
-            return_defer(1);
-        }
-    }
-
-    char *status_str = argparse_get_value(&parser, "status");
-    if (status_str != NULL) {
-        Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
-        if (!task_status_from_string(&status_slice, &task.meta.status)) {
-            aids_log(AIDS_ERROR, "Invalid status '%s': expected " STATUS_VALUES_CSTR, status_str);
             return_defer(1);
         }
     }
@@ -3256,6 +3247,645 @@ defer:
 }
 
 // ---------------------------------------------------------------------------
+// Artifact scans: the shared readers for the sibling records a task carries.
+// `check` lints with them and `flow` gates its transitions on them, so the
+// lint and the lifecycle guards read the same bytes the same way. Keeping one
+// implementation per artifact question is what makes the tying invariant hold:
+// a transition can never produce a state the lint would then flag, because
+// both sides ask the same function.
+// ---------------------------------------------------------------------------
+
+// Reads "<tasks_dir>/<huid>/<name>" if it exists. Returns true and the
+// content (caller frees content->str) when the file was read; false when it
+// does not exist. A file that exists but cannot be read is logged and
+// treated as absent.
+static boolean task_sibling_read(const Aids_String_Slice *tasks_dir,
+                                 const Aids_String_Slice *huid,
+                                 const char *name,
+                                 Aids_String_Slice *content) {
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
+                 SS_Arg(*tasks_dir), SS_Arg(*huid), name) < 0) {
+        return false;
+    }
+    if (access(path_buffer, F_OK) != 0) {
+        return false;
+    }
+    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
+    if (aids_io_read(&path, content, "r") != AIDS_OK) {
+        aids_log(AIDS_WARNING, "'%s' exists but could not be read: %s",
+                 path_buffer, aids_failure_reason());
+        return false;
+    }
+    return true;
+}
+
+// True when "<tasks_dir>/<huid>/<name>" exists. Presence only: RETRO.md is
+// required to exist, never parsed.
+static boolean task_sibling_exists(const Aids_String_Slice *tasks_dir,
+                                   const Aids_String_Slice *huid,
+                                   const char *name) {
+    char path_buffer[PATH_MAX];
+    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
+                 SS_Arg(*tasks_dir), SS_Arg(*huid), name) < 0) {
+        return false;
+    }
+    return access(path_buffer, F_OK) == 0;
+}
+
+// Counts "- [ ]" items under the task body's "## Steps" heading. The heading
+// match is exact, so "## Steps taken later" is NOT the Steps section.
+static size_t artifact_count_unchecked_steps(Aids_String_Slice task_raw) {
+    size_t unchecked = 0;
+    Aids_String_Slice scan = task_raw;
+    Aids_String_Slice line = {0};
+    boolean in_steps = false;
+    Aids_String_Slice steps_heading = aids_string_slice_from_cstr("## Steps");
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    Aids_String_Slice unchecked_box = aids_string_slice_from_cstr("- [ ]");
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice trimmed = line;
+        aids_string_slice_trim_right(&trimmed);
+        if (aids_string_slice_starts_with(&trimmed, any_heading)) {
+            in_steps = aids_string_slice_compare(&trimmed, &steps_heading) == 0;
+            continue;
+        }
+        if (in_steps && aids_string_slice_starts_with(&trimmed, unchecked_box)) {
+            unchecked++;
+        }
+    }
+    return unchecked;
+}
+
+// The known review severities, as written inside the parens of a finding
+// line: "- [ ] R1.2 (MAJOR) file:line - ...".
+static boolean artifact_severity_is_known(Aids_String_Slice severity) {
+    static const char *known[] = {"BLOCKER", "MAJOR", "MINOR", "NIT"};
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
+        Aids_String_Slice k = aids_string_slice_from_cstr((char *)known[i]);
+        if (aids_string_slice_compare(&severity, &k) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Parses one REVIEW.md line as a finding: "- [ ] R1.2 (MAJOR) file:line - ...".
+// Tolerant scan - a finding line starts with a checkbox followed by an R-id
+// (the R must be followed by a digit, so "- [ ] Rebase onto master" is prose),
+// and its severity is whatever sits in the first parens. Returns false for any
+// line that is not a finding; fills *severity with the parenthesised token and
+// *resolved with whether the box is ticked.
+static boolean artifact_parse_finding_line(Aids_String_Slice line,
+                                           Aids_String_Slice *severity,
+                                           boolean *resolved) {
+    Aids_String_Slice l = line;
+    aids_string_slice_trim(&l);
+    Aids_String_Slice box_open = aids_string_slice_from_cstr("- [ ] R");
+    Aids_String_Slice box_done = aids_string_slice_from_cstr("- [x] R");
+    boolean open = aids_string_slice_starts_with(&l, box_open);
+    boolean done = aids_string_slice_starts_with(&l, box_done);
+    if (!open && !done) {
+        return false;
+    }
+    if (l.len <= box_open.len || !isdigit(l.str[box_open.len])) {
+        return false;
+    }
+    unsigned long paren_open = 0;
+    while (paren_open < l.len && l.str[paren_open] != '(') {
+        paren_open++;
+    }
+    if (paren_open == l.len) {
+        return false;
+    }
+    unsigned long paren_close = paren_open + 1;
+    while (paren_close < l.len && l.str[paren_close] != ')') {
+        paren_close++;
+    }
+    if (paren_close == l.len) {
+        return false;
+    }
+    *severity = aids_string_slice_from_parts(l.str + paren_open + 1,
+                                             paren_close - paren_open - 1);
+    *resolved = done;
+    return true;
+}
+
+// Counts the unticked BLOCKER and MAJOR findings in a REVIEW.md. These are the
+// findings a review cycle must resolve before the work moves on; MINOR and NIT
+// do not block.
+static size_t artifact_count_open_blocking_findings(Aids_String_Slice review) {
+    size_t open = 0;
+    Aids_String_Slice scan = review;
+    Aids_String_Slice line = {0};
+    Aids_String_Slice blocker = aids_string_slice_from_cstr("BLOCKER");
+    Aids_String_Slice major = aids_string_slice_from_cstr("MAJOR");
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice severity = {0};
+        boolean resolved = false;
+        if (!artifact_parse_finding_line(line, &severity, &resolved) || resolved) {
+            continue;
+        }
+        if (aids_string_slice_compare(&severity, &blocker) == 0 ||
+            aids_string_slice_compare(&severity, &major) == 0) {
+            open++;
+        }
+    }
+    return open;
+}
+
+// The latest "- VERDICT: " value in a REVIEW.md - rounds are appended, never
+// rewritten, so the last one wins. The value is the first whitespace-delimited
+// token, so "APPROVE (1 round)" and a CRLF "APPROVE\r" both read as APPROVE.
+// Returns false when the file carries no VERDICT line at all.
+static boolean artifact_latest_verdict(Aids_String_Slice review, Aids_String_Slice *out) {
+    Aids_String_Slice scan = review;
+    Aids_String_Slice line = {0};
+    Aids_String_Slice verdict_format = aids_string_slice_from_cstr("- VERDICT: ");
+    boolean found = false;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, verdict_format)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, verdict_format.len);
+        aids_string_slice_trim_left(&l);
+        unsigned long tok = 0;
+        while (tok < l.len && !isspace(l.str[tok])) {
+            tok++;
+        }
+        l.len = tok;
+        *out = l;
+        found = true;
+    }
+    return found;
+}
+
+// Returns the slice up to (not including) an inline " #" comment, so a
+// DECISION.md line like "- STATUS: ACCEPTED   # ACCEPTED | SUPERSEDED by ..."
+// (the enum-hint comment style the spike/decision templates use) validates on
+// its value alone. Leaves the slice untouched when there is no inline comment.
+static Aids_String_Slice artifact_strip_inline_comment(Aids_String_Slice s) {
+    for (size_t i = 0; i + 1 < s.len; ++i) {
+        if (s.str[i] == ' ' && s.str[i + 1] == '#') {
+            s.len = i;
+            break;
+        }
+    }
+    return s;
+}
+
+// The lifecycle a DECISION.md's "- STATUS: " line records.
+typedef enum {
+    Decision_Status_MISSING,    // no STATUS line at all
+    Decision_Status_INVALID,    // a STATUS line that is neither valid form
+    Decision_Status_ACCEPTED,
+    Decision_Status_SUPERSEDED
+} Decision_Status;
+
+// Scans a DECISION.md for its first "- STATUS: " value (first STATUS wins).
+// *value receives the raw value with any inline comment stripped, for use in
+// a diagnostic; *ref receives the supersede reference when the status is
+// SUPERSEDED. An empty "SUPERSEDED by" reference is INVALID, not SUPERSEDED:
+// a supersede that names nothing records nothing.
+static Decision_Status artifact_decision_status(Aids_String_Slice decision,
+                                                Aids_String_Slice *value,
+                                                Aids_String_Slice *ref) {
+    Aids_String_Slice accepted = aids_string_slice_from_cstr("ACCEPTED");
+    Aids_String_Slice superseded_by = aids_string_slice_from_cstr("SUPERSEDED by ");
+    Aids_String_Slice scan = decision;
+    Aids_String_Slice line = {0};
+
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        if (!aids_string_slice_starts_with(&l, STATUS_FORMAT)) {
+            continue;
+        }
+        aids_string_slice_skip(&l, STATUS_FORMAT.len);
+        Aids_String_Slice v = artifact_strip_inline_comment(l);
+        aids_string_slice_trim(&v);
+        *value = v;
+        if (aids_string_slice_compare(&v, &accepted) == 0) {
+            return Decision_Status_ACCEPTED;
+        }
+        if (aids_string_slice_starts_with(&v, superseded_by)) {
+            Aids_String_Slice r = v;
+            aids_string_slice_skip(&r, superseded_by.len);
+            aids_string_slice_trim(&r);
+            if (r.len > 0) {
+                *ref = r;
+                return Decision_Status_SUPERSEDED;
+            }
+        }
+        return Decision_Status_INVALID;
+    }
+    return Decision_Status_MISSING;
+}
+
+// An EPIC container is exempt from the record-completeness rules: its
+// aggregate record lives in its own TASK.md while child tasks carry the review
+// and retro records, so demanding those files would force a fabricated one;
+// and its frozen step boxes stay verbatim (superseded or dropped children are
+// honest history) rather than being ticked to silence the lint. It may also
+// sit IN_PROGRESS without a plan approval of its own - the plan gate applies
+// to the work tasks underneath it. `check` and `flow` share the predicate so
+// the lint and the lifecycle exempt the same records.
+static boolean check_task_is_container(const Task *task) {
+    return task->meta.kind == Task_Kind_EPIC;
+}
+
+// ---------------------------------------------------------------------------
+// flow: the guarded lifecycle. `tatr flow <ID> [--to <STEP>]` is the only
+// writer of STATUS, FLOW STEP and PLAN STATUS - `new` and `edit` cannot set
+// them - so a record can only reach a state by walking edges whose
+// preconditions were met. Every precondition is evaluated before anything is
+// mutated and all unmet ones are reported, so a refused transition leaves
+// TASK.md byte-identical. There is no --force and no repair verb: a record in
+// the wrong state is corrected by hand in TASK.md, where a reviewer sees it in
+// the diff.
+// ---------------------------------------------------------------------------
+
+// STATUS is derived from the flow step, never chosen. A work task therefore
+// stays IN_PROGRESS through review and compound, and closes atomically at DONE
+// in the same write that sets FLOW STEP: DONE.
+static Task_Status flow_step_implied_status(Flow_Step step) {
+    switch (step) {
+    case Flow_Step_BACKLOG:
+    case Flow_Step_UNDERSTANDING:
+    case Flow_Step_PLANNING:
+    case Flow_Step_PLANNED:
+        return Task_Status_OPEN;
+    case Flow_Step_WORKING:
+    case Flow_Step_REVIEWING:
+    case Flow_Step_COMPOUNDING:
+        return Task_Status_IN_PROGRESS;
+    case Flow_Step_DONE:
+        return Task_Status_CLOSED;
+    }
+    return Task_Status_OPEN; // unreachable: the enum is closed
+}
+
+typedef struct {
+    Flow_Step from;
+    Flow_Step to;
+} Flow_Transition;
+
+// The eight legal edges, and nothing else:
+//
+//   BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
+//                                                        ^           |
+//                                                        |           v
+//                                                        +-- (fix) COMPOUNDING -> DONE
+//
+// REVIEWING is the only step with two successors. The first entry for a step
+// is its default - the target a bare `tatr flow <ID>` picks - so the review
+// loop back to WORKING must be asked for by name with `--to WORKING`.
+static const Flow_Transition FLOW_TRANSITIONS[] = {
+    {Flow_Step_BACKLOG,      Flow_Step_UNDERSTANDING},
+    {Flow_Step_UNDERSTANDING, Flow_Step_PLANNING},
+    {Flow_Step_PLANNING,     Flow_Step_PLANNED},
+    {Flow_Step_PLANNED,      Flow_Step_WORKING},
+    {Flow_Step_WORKING,      Flow_Step_REVIEWING},
+    {Flow_Step_REVIEWING,    Flow_Step_COMPOUNDING},
+    {Flow_Step_REVIEWING,    Flow_Step_WORKING},
+    {Flow_Step_COMPOUNDING,  Flow_Step_DONE},
+};
+
+// The default successor of a step: the first edge leaving it. False when the
+// step is terminal (DONE).
+static boolean flow_step_successor(Flow_Step from, Flow_Step *out) {
+    for (size_t i = 0; i < ENUM_COUNT(FLOW_TRANSITIONS); ++i) {
+        if (FLOW_TRANSITIONS[i].from == from) {
+            *out = FLOW_TRANSITIONS[i].to;
+            return true;
+        }
+    }
+    return false;
+}
+
+static boolean flow_transition_is_legal(Flow_Step from, Flow_Step to) {
+    for (size_t i = 0; i < ENUM_COUNT(FLOW_TRANSITIONS); ++i) {
+        if (FLOW_TRANSITIONS[i].from == from && FLOW_TRANSITIONS[i].to == to) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Names what a task at <from> may legally do next, so a refusal tells the
+// caller the move to make instead of only the one it rejected.
+static void flow_print_legal_moves(Flow_Step from) {
+    Flow_Step targets[ENUM_COUNT(FLOW_TRANSITIONS)];
+    size_t count = 0;
+    for (size_t i = 0; i < ENUM_COUNT(FLOW_TRANSITIONS); ++i) {
+        if (FLOW_TRANSITIONS[i].from == from) {
+            targets[count++] = FLOW_TRANSITIONS[i].to;
+        }
+    }
+    if (count == 0) {
+        fprintf(stderr, "  " SS_Fmt " is terminal: nothing follows it\n",
+                SS_Arg(Flow_Step_Strings[from]));
+        return;
+    }
+    if (count == 1) {
+        fprintf(stderr, "  the legal move from " SS_Fmt " is " SS_Fmt "\n",
+                SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[targets[0]]));
+        return;
+    }
+    fprintf(stderr, "  the legal moves from " SS_Fmt " are " SS_Fmt " (the default)",
+            SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[targets[0]]));
+    for (size_t i = 1; i < count; ++i) {
+        fprintf(stderr, " or " SS_Fmt " (--to " SS_Fmt ")",
+                SS_Arg(Flow_Step_Strings[targets[i]]), SS_Arg(Flow_Step_Strings[targets[i]]));
+    }
+    fprintf(stderr, "\n");
+}
+
+// Collected preconditions a transition did not satisfy. Every one is reported,
+// not just the first: an agent that fixes one requirement only to be refused
+// for the next one learns the gate one round trip at a time.
+#define FLOW_UNMET_CAPACITY 32
+#define FLOW_UNMET_MESSAGE_SIZE 512
+
+typedef struct {
+    char messages[FLOW_UNMET_CAPACITY][FLOW_UNMET_MESSAGE_SIZE];
+    size_t count;
+} Flow_Unmet;
+
+static void flow_unmet_add(Flow_Unmet *unmet, const char *fmt, ...) {
+    if (unmet->count >= FLOW_UNMET_CAPACITY) {
+        return; // a task with 32 unmet preconditions has been told enough
+    }
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(unmet->messages[unmet->count], FLOW_UNMET_MESSAGE_SIZE, fmt, args);
+    va_end(args);
+    unmet->count++;
+}
+
+// Every DEPENDS ON id must resolve to an existing task that is CLOSED. Reads
+// each dependency through the same sibling reader and parser the rest of the
+// tool uses, so an unparseable dependency is reported rather than assumed open.
+static void flow_check_dependencies(const Aids_String_Slice *tasks_dir,
+                                    const Task *task,
+                                    Flow_Unmet *unmet) {
+    for (size_t i = 0; i < task->meta.depends_on.count; ++i) {
+        Aids_String_Slice *dep = NULL;
+        if (aids_array_get((Aids_Array *)&task->meta.depends_on, i, (void **)&dep) != AIDS_OK ||
+            dep == NULL) {
+            continue;
+        }
+        Aids_String_Slice raw = {0};
+        if (!task_sibling_read(tasks_dir, dep, TASK_FILE_NAME_CSTR, &raw)) {
+            flow_unmet_add(unmet, "dependency " SS_Fmt " does not exist", SS_Arg(*dep));
+            continue;
+        }
+        Task dep_task = {0};
+        task_init_empty(&dep_task);
+        if (task_deserialize(raw, &dep_task) != AIDS_OK) {
+            flow_unmet_add(unmet, "dependency " SS_Fmt " does not parse", SS_Arg(*dep));
+            AIDS_FREE(raw.str);
+            task_cleanup(&dep_task);
+            continue;
+        }
+        dep_task._buffer = raw.str;
+        if (dep_task.meta.status != Task_Status_CLOSED) {
+            flow_unmet_add(unmet, "dependency " SS_Fmt " is not CLOSED (STATUS: " SS_Fmt ")",
+                           SS_Arg(*dep), SS_Arg(Task_Status_Strings[dep_task.meta.status]));
+        }
+        task_cleanup(&dep_task);
+    }
+}
+
+// Evaluates every precondition the edge <from> -> <to> carries and appends one
+// message per unmet one. Three gates exist, and an edge either carries a gate
+// whole or not at all:
+//
+//   PLANNED    -> WORKING      the plan gate: an approved plan, CLOSED deps
+//   REVIEWING  -> COMPOUNDING  the review gate: an approved REVIEW.md
+//   COMPOUNDING-> DONE         both of the above, plus the close gate:
+//                              no unchecked Steps, a RETRO.md, and a valid
+//                              DECISION.md status when the task carries one
+//
+// REVIEWING -> WORKING and the three pre-plan edges carry no preconditions:
+// going back to fix something must never be harder than going forward.
+//
+// KIND: EPIC is exempt from exactly the four requirements it is already exempt
+// from in `tatr check` - plan approval, review, retro and unchecked Steps -
+// because an Epic container's record lives in its children. Its dependencies
+// and its DECISION.md are checked like anyone's.
+static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
+                                     const Aids_String_Slice *huid,
+                                     const Task *task,
+                                     Aids_String_Slice task_raw,
+                                     Flow_Step from,
+                                     Flow_Step to,
+                                     Flow_Unmet *unmet) {
+    boolean plan_gate = false;
+    boolean review_gate = false;
+    boolean close_gate = false;
+    boolean exempt = check_task_is_container(task);
+
+    if (from == Flow_Step_PLANNED && to == Flow_Step_WORKING) {
+        plan_gate = true;
+    } else if (from == Flow_Step_REVIEWING && to == Flow_Step_COMPOUNDING) {
+        review_gate = true;
+    } else if (from == Flow_Step_COMPOUNDING && to == Flow_Step_DONE) {
+        plan_gate = true;
+        review_gate = true;
+        close_gate = true;
+    }
+
+    if (plan_gate) {
+        if (!exempt && task->meta.plan_status != Plan_Status_APPROVED) {
+            flow_unmet_add(unmet, "the plan is not approved (PLAN STATUS: " SS_Fmt "); "
+                           "walk the plan gate with `tatr flow " SS_Fmt " --to PLANNED` "
+                           "once the user accepts the plan",
+                           SS_Arg(Plan_Status_Strings[task->meta.plan_status]), SS_Arg(*huid));
+        }
+        flow_check_dependencies(tasks_dir, task, unmet);
+    }
+
+    if (review_gate) {
+        Aids_String_Slice review = {0};
+        if (!task_sibling_read(tasks_dir, huid, "REVIEW.md", &review)) {
+            // Only the PRESENCE of the record is exempt for a container -
+            // exactly as `check` exempts it from closed-missing-review but
+            // never from closed-not-approved. A REVIEW.md an Epic does carry
+            // is held to the same verdict as anyone's, so no transition can
+            // produce a state the lint would then flag.
+            if (!exempt) {
+                flow_unmet_add(unmet, "there is no REVIEW.md: the work has not been reviewed");
+            }
+        } else {
+            Aids_String_Slice verdict = {0};
+            Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
+            if (!artifact_latest_verdict(review, &verdict)) {
+                flow_unmet_add(unmet, "REVIEW.md has no VERDICT line");
+            } else if (aids_string_slice_compare(&verdict, &approve) != 0) {
+                flow_unmet_add(unmet, "the latest REVIEW.md verdict is '" SS_Fmt "', not APPROVE",
+                               SS_Arg(verdict));
+            }
+            size_t open = artifact_count_open_blocking_findings(review);
+            if (open > 0) {
+                flow_unmet_add(unmet, "REVIEW.md has %zu open BLOCKER/MAJOR finding(s)", open);
+            }
+            AIDS_FREE(review.str);
+        }
+    }
+
+    if (close_gate) {
+        if (!exempt) {
+            size_t unchecked = artifact_count_unchecked_steps(task_raw);
+            if (unchecked > 0) {
+                flow_unmet_add(unmet, "%zu unchecked Steps item(s) remain", unchecked);
+            }
+            if (!task_sibling_exists(tasks_dir, huid, "RETRO.md")) {
+                flow_unmet_add(unmet, "there is no RETRO.md: the retro has not been written");
+            }
+        }
+        Aids_String_Slice decision = {0};
+        if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
+            Aids_String_Slice value = {0};
+            Aids_String_Slice ref = {0};
+            switch (artifact_decision_status(decision, &value, &ref)) {
+            case Decision_Status_ACCEPTED:
+            case Decision_Status_SUPERSEDED:
+                break;
+            case Decision_Status_INVALID:
+                flow_unmet_add(unmet, "DECISION.md has an invalid STATUS '" SS_Fmt
+                               "' (use ACCEPTED or 'SUPERSEDED by <ref>')", SS_Arg(value));
+                break;
+            case Decision_Status_MISSING:
+                flow_unmet_add(unmet, "DECISION.md has no STATUS line");
+                break;
+            }
+            AIDS_FREE(decision.str);
+        }
+    }
+}
+
+static int main_flow(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_String_Slice raw = {0};
+    Flow_Unmet unmet = {0};
+
+    argparse_parser_init(&parser, "tatr flow", "Move a task to its next flow step", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'o',
+        .long_name = "to",
+        .description = "Target flow step (default: the next step; " FLOW_STEP_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+
+    // The raw bytes come back with the parsed record: the close gate counts
+    // the unchecked Steps in the very body this task was parsed from.
+    if (task_load_raw(&task_file_path, &task, &raw) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    Flow_Step from = task.meta.flow_step;
+    Flow_Step to = from;
+
+    char *to_str = argparse_get_value(&parser, "to");
+    if (to_str != NULL) {
+        Aids_String_Slice to_slice = aids_string_slice_from_cstr(to_str);
+        if (!flow_step_from_string(&to_slice, &to)) {
+            aids_log(AIDS_ERROR, "Invalid flow step '%s': expected " FLOW_STEP_VALUES_CSTR, to_str);
+            return_defer(1);
+        }
+    } else if (!flow_step_successor(from, &to)) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is at " SS_Fmt " and has nowhere to go",
+                 SS_Arg(id), SS_Arg(Flow_Step_Strings[from]));
+        flow_print_legal_moves(from);
+        return_defer(1);
+    }
+
+    if (!flow_transition_is_legal(from, to)) {
+        aids_log(AIDS_ERROR, "Illegal transition for " SS_Fmt ": " SS_Fmt " -> " SS_Fmt,
+                 SS_Arg(id), SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[to]));
+        flow_print_legal_moves(from);
+        return_defer(1);
+    }
+
+    flow_check_preconditions(&tasks_dir, &id, &task, raw, from, to, &unmet);
+    if (unmet.count > 0) {
+        aids_log(AIDS_ERROR, "Refusing to move " SS_Fmt " from " SS_Fmt " to " SS_Fmt
+                 ": %zu precondition(s) not met",
+                 SS_Arg(id), SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[to]),
+                 unmet.count);
+        for (size_t i = 0; i < unmet.count; ++i) {
+            fprintf(stderr, "  - %s\n", unmet.messages[i]);
+        }
+        return_defer(1);
+    }
+
+    // Every precondition held, so the whole transition lands in one write:
+    // the step, the status it implies, and - at the plan gate only - the plan
+    // approval it records.
+    task.meta.flow_step = to;
+    task.meta.status = flow_step_implied_status(to);
+    if (to == Flow_Step_PLANNED) {
+        task.meta.plan_status = Plan_Status_APPROVED;
+    }
+
+    if (task_save(&task_file_path, &task) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to save task"); // task_save logged the cause
+        return_defer(1);
+    }
+
+    printf("Task " SS_Fmt " moved " SS_Fmt " -> " SS_Fmt " (STATUS: " SS_Fmt ")\n",
+           SS_Arg(id), SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[to]),
+           SS_Arg(Task_Status_Strings[task.meta.status]));
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // check: lint task artifacts for process drift. Reports findings one per
 // line as "<id>: <rule>: <detail>" on stdout; exits 1 if anything was found,
 // 0 when clean. Unlike ls, a malformed task is a FINDING here, not an abort:
@@ -3278,69 +3908,6 @@ static boolean slice_contains_cstr(Aids_String_Slice haystack, const char *needl
         }
     }
     return false;
-}
-
-// Reads "<tasks_dir>/<huid>/<name>" if it exists. Returns true and the
-// content (caller frees content->str) when the file was read; false when it
-// does not exist. A file that exists but cannot be read is logged and
-// treated as absent.
-static boolean task_sibling_read(const Aids_String_Slice *tasks_dir,
-                                 const Aids_String_Slice *huid,
-                                 const char *name,
-                                 Aids_String_Slice *content) {
-    char path_buffer[PATH_MAX];
-    if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
-                 SS_Arg(*tasks_dir), SS_Arg(*huid), name) < 0) {
-        return false;
-    }
-    if (access(path_buffer, F_OK) != 0) {
-        return false;
-    }
-    Aids_String_Slice path = aids_string_slice_from_cstr(path_buffer);
-    if (aids_io_read(&path, content, "r") != AIDS_OK) {
-        aids_log(AIDS_WARNING, "check: '%s' exists but could not be read: %s",
-                 path_buffer, aids_failure_reason());
-        return false;
-    }
-    return true;
-}
-
-// The known review severities, as written inside the parens of a finding
-// line: "- [ ] R1.2 (MAJOR) file:line - ...".
-static boolean check_severity_is_known(Aids_String_Slice severity) {
-    static const char *known[] = {"BLOCKER", "MAJOR", "MINOR", "NIT"};
-    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
-        Aids_String_Slice k = aids_string_slice_from_cstr((char *)known[i]);
-        if (aids_string_slice_compare(&severity, &k) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// An EPIC container is exempt from the record-completeness rules: its
-// aggregate record lives in its own TASK.md while child tasks carry the review
-// and retro records, so demanding those files would force a fabricated one;
-// and its frozen step boxes stay verbatim (superseded or dropped children are
-// honest history) rather than being ticked to silence the lint. It may also
-// sit IN_PROGRESS without a plan approval of its own - the plan gate applies
-// to the work tasks underneath it.
-static boolean check_task_is_container(const Task *task) {
-    return task->meta.kind == Task_Kind_EPIC;
-}
-
-// Returns the slice up to (not including) an inline " #" comment, so a
-// DECISION.md line like "- STATUS: ACCEPTED   # ACCEPTED | SUPERSEDED by ..."
-// (the enum-hint comment style the spike/decision templates use) validates on
-// its value alone. Leaves the slice untouched when there is no inline comment.
-static Aids_String_Slice check_strip_inline_comment(Aids_String_Slice s) {
-    for (size_t i = 0; i + 1 < s.len; ++i) {
-        if (s.str[i] == ' ' && s.str[i + 1] == '#') {
-            s.len = i;
-            break;
-        }
-    }
-    return s;
 }
 
 // Resolves a DECISION.md supersede reference to an existing DECISION.md. The
@@ -3385,68 +3952,50 @@ static size_t check_decision(const Aids_String_Slice *tasks_dir,
                              const Aids_String_Slice *huid,
                              const Aids_String_Slice *decision) {
     size_t findings = 0;
-    Aids_String_Slice accepted = aids_string_slice_from_cstr("ACCEPTED");
-    Aids_String_Slice superseded_by = aids_string_slice_from_cstr("SUPERSEDED by ");
     Aids_String_Slice supersedes_format = aids_string_slice_from_cstr("- Supersedes: ");
+    Aids_String_Slice line = {0};
 
     // bad-decision-status: validate the first "- STATUS: " value. A missing
     // STATUS line is itself a finding (a decision record needs a lifecycle).
-    boolean has_status = false;
-    Aids_String_Slice scan = *decision;
-    Aids_String_Slice line = {0};
-    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-        Aids_String_Slice l = line;
-        if (!aids_string_slice_starts_with(&l, STATUS_FORMAT)) {
-            continue;
-        }
-        aids_string_slice_skip(&l, STATUS_FORMAT.len);
-        Aids_String_Slice value = check_strip_inline_comment(l);
-        aids_string_slice_trim(&value);
-        has_status = true;
-        boolean valid = false;
-        if (aids_string_slice_compare(&value, &accepted) == 0) {
-            valid = true;
-        } else if (aids_string_slice_starts_with(&value, superseded_by)) {
-            Aids_String_Slice ref = value;
-            aids_string_slice_skip(&ref, superseded_by.len);
-            aids_string_slice_trim(&ref);
-            if (ref.len > 0) {
-                valid = true;
-                if (!check_supersede_ref_resolves(tasks_dir, ref)) {
-                    printf(SS_Fmt ": dangling-supersede: STATUS supersedes '" SS_Fmt "' which has no DECISION.md\n",
-                           SS_Arg(*huid), SS_Arg(ref));
-                    findings++;
-                }
-            }
-        }
-        if (!valid) {
-            printf(SS_Fmt ": bad-decision-status: invalid STATUS '" SS_Fmt "' in DECISION.md (use ACCEPTED or 'SUPERSEDED by <ref>')\n",
-                   SS_Arg(*huid), SS_Arg(value));
+    Aids_String_Slice value = {0};
+    Aids_String_Slice ref = {0};
+    switch (artifact_decision_status(*decision, &value, &ref)) {
+    case Decision_Status_ACCEPTED:
+        break;
+    case Decision_Status_SUPERSEDED:
+        if (!check_supersede_ref_resolves(tasks_dir, ref)) {
+            printf(SS_Fmt ": dangling-supersede: STATUS supersedes '" SS_Fmt "' which has no DECISION.md\n",
+                   SS_Arg(*huid), SS_Arg(ref));
             findings++;
         }
-        break; // first STATUS wins
-    }
-    if (!has_status) {
+        break;
+    case Decision_Status_INVALID:
+        printf(SS_Fmt ": bad-decision-status: invalid STATUS '" SS_Fmt "' in DECISION.md (use ACCEPTED or 'SUPERSEDED by <ref>')\n",
+               SS_Arg(*huid), SS_Arg(value));
+        findings++;
+        break;
+    case Decision_Status_MISSING:
         printf(SS_Fmt ": bad-decision-status: DECISION.md has no STATUS line\n", SS_Arg(*huid));
         findings++;
+        break;
     }
 
     // dangling-supersede: every "- Supersedes: <ref>" header must resolve.
-    scan = *decision;
+    Aids_String_Slice scan = *decision;
     while (aids_string_slice_tokenize(&scan, '\n', &line)) {
         Aids_String_Slice l = line;
         if (!aids_string_slice_starts_with(&l, supersedes_format)) {
             continue;
         }
         aids_string_slice_skip(&l, supersedes_format.len);
-        Aids_String_Slice ref = check_strip_inline_comment(l);
-        aids_string_slice_trim(&ref);
-        if (ref.len == 0) {
+        Aids_String_Slice header_ref = artifact_strip_inline_comment(l);
+        aids_string_slice_trim(&header_ref);
+        if (header_ref.len == 0) {
             continue; // an empty header is treated as absent, not dangling
         }
-        if (!check_supersede_ref_resolves(tasks_dir, ref)) {
+        if (!check_supersede_ref_resolves(tasks_dir, header_ref)) {
             printf(SS_Fmt ": dangling-supersede: Supersedes '" SS_Fmt "' which has no DECISION.md\n",
-                   SS_Arg(*huid), SS_Arg(ref));
+                   SS_Arg(*huid), SS_Arg(header_ref));
             findings++;
         }
     }
@@ -3493,26 +4042,7 @@ static size_t check_task(const Aids_String_Slice *tasks_dir,
     }
 
     if (task.meta.status == Task_Status_CLOSED && !check_task_is_container(&task)) {
-        Aids_String_Slice scan = raw;
-        Aids_String_Slice line = {0};
-        boolean in_steps = false;
-        size_t unchecked = 0;
-        Aids_String_Slice steps_heading = aids_string_slice_from_cstr("## Steps");
-        Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
-        Aids_String_Slice unchecked_box = aids_string_slice_from_cstr("- [ ]");
-        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-            Aids_String_Slice trimmed = line;
-            aids_string_slice_trim_right(&trimmed);
-            if (aids_string_slice_starts_with(&trimmed, any_heading)) {
-                // Exact heading match: "## Steps taken later" is NOT the
-                // Steps section.
-                in_steps = aids_string_slice_compare(&trimmed, &steps_heading) == 0;
-                continue;
-            }
-            if (in_steps && aids_string_slice_starts_with(&trimmed, unchecked_box)) {
-                unchecked++;
-            }
-        }
+        size_t unchecked = artifact_count_unchecked_steps(raw);
         if (unchecked > 0) {
             printf(SS_Fmt ": closed-unchecked: %zu unchecked Steps item(s) on a CLOSED task\n",
                    SS_Arg(*huid), unchecked);
@@ -3524,30 +4054,9 @@ review_checks:
     has_review = task_sibling_read(tasks_dir, huid, "REVIEW.md", &review);
 
     if (has_review) {
-        // Last "- VERDICT: " line wins (rounds are appended, never rewritten).
-        Aids_String_Slice scan = review;
-        Aids_String_Slice line = {0};
-        Aids_String_Slice verdict_format = aids_string_slice_from_cstr("- VERDICT: ");
         Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
         Aids_String_Slice last_verdict = {0};
-        boolean has_verdict = false;
-        while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-            Aids_String_Slice l = line;
-            if (aids_string_slice_starts_with(&l, verdict_format)) {
-                aids_string_slice_skip(&l, verdict_format.len);
-                aids_string_slice_trim_left(&l);
-                // Tolerant value match: the verdict is the first
-                // whitespace-delimited token, so "APPROVE (1 round)" and a
-                // CRLF "APPROVE\r" both read as APPROVE.
-                unsigned long tok = 0;
-                while (tok < l.len && !isspace(l.str[tok])) {
-                    tok++;
-                }
-                l.len = tok;
-                last_verdict = l;
-                has_verdict = true;
-            }
-        }
+        boolean has_verdict = artifact_latest_verdict(review, &last_verdict);
         if (task_loaded && task.meta.status == Task_Status_CLOSED) {
             if (!has_verdict) {
                 printf(SS_Fmt ": closed-not-approved: REVIEW.md has no VERDICT line\n", SS_Arg(*huid));
@@ -3560,41 +4069,16 @@ review_checks:
         }
 
         // bad-severity: "- [ ] R1.2 (LOW) ..." with a severity outside the
-        // vocabulary. Tolerant line scan: a finding line starts with a
-        // checkbox followed by an R-id, severity in the first parens.
-        scan = review;
+        // vocabulary.
+        Aids_String_Slice scan = review;
+        Aids_String_Slice line = {0};
         while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-            Aids_String_Slice l = line;
-            aids_string_slice_trim(&l);
-            Aids_String_Slice box_open = aids_string_slice_from_cstr("- [ ] R");
-            Aids_String_Slice box_done = aids_string_slice_from_cstr("- [x] R");
-            if (!aids_string_slice_starts_with(&l, box_open) &&
-                !aids_string_slice_starts_with(&l, box_done)) {
+            Aids_String_Slice severity = {0};
+            boolean resolved = false;
+            if (!artifact_parse_finding_line(line, &severity, &resolved)) {
                 continue;
             }
-            // A finding line has an R-ID: the R must be followed by a digit
-            // ("- [ ] Rebase onto master" is prose, not a finding).
-            if (l.len <= box_open.len || !isdigit(l.str[box_open.len])) {
-                continue;
-            }
-            // Find "(...)" and take its content as the severity token.
-            unsigned long open = 0;
-            while (open < l.len && l.str[open] != '(') {
-                open++;
-            }
-            if (open == l.len) {
-                continue;
-            }
-            unsigned long close = open + 1;
-            while (close < l.len && l.str[close] != ')') {
-                close++;
-            }
-            if (close == l.len) {
-                continue;
-            }
-            Aids_String_Slice severity =
-                aids_string_slice_from_parts(l.str + open + 1, close - open - 1);
-            if (!check_severity_is_known(severity)) {
+            if (!artifact_severity_is_known(severity)) {
                 printf(SS_Fmt ": bad-severity: unknown severity '" SS_Fmt "' in REVIEW.md (use BLOCKER|MAJOR|MINOR|NIT)\n",
                        SS_Arg(*huid), SS_Arg(severity));
                 findings++;
@@ -3608,10 +4092,7 @@ review_checks:
             printf(SS_Fmt ": closed-missing-review: CLOSED task has no REVIEW.md\n", SS_Arg(*huid));
             findings++;
         }
-        char retro_buffer[PATH_MAX];
-        if (snprintf(retro_buffer, sizeof(retro_buffer), SS_Fmt "/" SS_Fmt "/RETRO.md",
-                     SS_Arg(*tasks_dir), SS_Arg(*huid)) >= 0 &&
-            access(retro_buffer, F_OK) != 0) {
+        if (!task_sibling_exists(tasks_dir, huid, "RETRO.md")) {
             printf(SS_Fmt ": closed-missing-retro: CLOSED task has no RETRO.md\n", SS_Arg(*huid));
             findings++;
         }
@@ -3837,6 +4318,7 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  ls           List tasks\n");
     fprintf(stderr, "  show         Show a single task by ID\n");
     fprintf(stderr, "  edit         Update fields of an existing task\n");
+    fprintf(stderr, "  flow         Move a task to its next flow step\n");
     fprintf(stderr, "  rm           Remove a task by ID\n");
     fprintf(stderr, "  check        Lint task artifacts for process drift\n");
     fprintf(stderr, "\n");
@@ -3918,6 +4400,9 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "edit") == 0) {
         result = main_edit(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "flow") == 0) {
+        result = main_flow(&ctx);
         return_defer(result);
     } else if (strcmp(subcommand, "rm") == 0) {
         result = main_rm(&ctx);

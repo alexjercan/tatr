@@ -116,12 +116,12 @@ tatr tracks its own work in `tasks/`. Use the tool itself:
 ```bash
 tatr ls -s priority          # see the backlog
 tatr show <ID>               # read a task's full description and steps
-tatr edit <ID> -s IN_PROGRESS  # claim a task
-tatr edit <ID> -s CLOSED     # finish it
+tatr flow <ID> --to WORKING  # claim a task (refuses an unapproved plan or open deps)
+tatr flow <ID>               # advance one step; at COMPOUNDING it closes the task
 tatr new "..." -p 80 -t feature  # add newly discovered work
 tatr new "..." -b body.md    # seed the description body from a file ('-' = stdin)
 tatr new "..." -k STORY -P <ID> -d <ID>  # a Story under an Epic, blocked on a task
-tatr edit <ID> -f WORKING -S APPROVED    # move flow state
+tatr flow <ID> --to PLANNED  # the plan gate: the only writer of PLAN STATUS
 tatr ls -f ':kind eq EPIC'   # the containers
 tatr ls -f ':depends contains <ID>'  # everything blocked on a task
 tatr check                   # lint the backlog for process drift (exit 1 on findings)
@@ -143,6 +143,23 @@ boxes stay verbatim (superseded / dropped / premise-falsified steps are honest
 history) rather than being ticked to silence the lint - and from
 `unplanned-in-progress`, since the plan gate applies to the work tasks under
 them.
+
+Workflow state is not editable metadata: `tatr flow` is the only writer of
+`- STATUS`, `- FLOW STEP` and `- PLAN STATUS`, and `new`/`edit` reject `-s`,
+`-f` and `-S` with a pointer to it. A task is born BACKLOG / DRAFT / OPEN and
+reaches every other state by walking the chain
+(BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING ->
+COMPOUNDING -> DONE, plus the REVIEWING -> WORKING fix loop). STATUS is derived
+from the step, so a task closes atomically at DONE. The gates are: an approved
+plan and CLOSED dependencies to start; an APPROVEd REVIEW.md with no open
+BLOCKER/MAJOR finding to leave review; and additionally ticked Steps, a
+RETRO.md and a valid DECISION.md status to close. `KIND: EPIC` is exempt from
+exactly the four requirements `tatr check` exempts it from. A transition may
+never produce a state the lint would flag - both read the same artifacts
+through the same helpers - so a guard added to one belongs in that shared
+helper, not in a copy. There is no `--force` and no repair verb: a record in a
+wrong state is fixed by hand in `TASK.md`, in the diff, where a reviewer sees
+it.
 
 Workflow state is typed metadata, not prose: `- KIND`, `- FLOW STEP` and
 `- PLAN STATUS` are required fields in the block under the title, and the

@@ -15,10 +15,11 @@ against another directory.
 ```bash
 tatr [-r ROOT] <subcommand> [options]
 
-tatr new "Title" [-p <priority>] [-t tag1,tag2] [-s OPEN|IN_PROGRESS|CLOSED] [-b <file>] [<metadata options>]
+tatr new "Title" [-p <priority>] [-t tag1,tag2] [-b <file>] [<metadata options>]
 tatr ls [-s created|priority|title] [-R] [-f '<query>']
 tatr show <id>
-tatr edit <id> [-T "New title"] [-p <priority>] [-t tag1,tag2] [-s <status>] [<metadata options>]
+tatr edit <id> [-T "New title"] [-p <priority>] [-t tag1,tag2] [<metadata options>]
+tatr flow <id> [-o|--to <STEP>]
 tatr rm <id>
 tatr check [<id>] [-L|--ledger <file>]
 ```
@@ -27,16 +28,19 @@ tatr check [<id>] [-L|--ledger <file>]
 
 ```bash
 -k|--kind TASK|EPIC|STORY|SPIKE
--f|--flow-step BACKLOG|UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE
--S|--plan-status DRAFT|APPROVED|NOT_REQUIRED
 -P|--parent <id>
 -d|--depends-on <id>
 ```
+
+`STATUS`, `FLOW STEP` and `PLAN STATUS` are NOT among them. They are written
+only by `tatr flow`; `new` and `edit` reject `-s`, `-f` and `-S` with a pointer
+to it.
 
 - `tatr new` creates the task directory and TASK.md, then prints the task ID. Defaults are `OPEN`, priority 0, `KIND: TASK`, `FLOW STEP: BACKLOG`, `PLAN STATUS: DRAFT`, and no relationships. `-b/--body-file <file>` seeds the description body from a file (`-` reads stdin) - prefer it over creating an empty task and editing the file afterwards. If the generated ID already exists (two `new` calls in the same second), tatr fails instead of overwriting; retry after the second changes.
 - `tatr ls` prints one line per task: `<filepath>: [PRIORITY: N, KIND: K, FLOW STEP: F, TAGS: ...] Title`. `-s/--sort` orders by `created` (default), `priority` (descending), or `title`; `-R` recurses into nested `tasks/` dirs; `-f` filters with the query language below.
 - `tatr show <id>` prints one task's full details: the whole record exactly as it would be written back, with a clickable file path.
 - `tatr edit <id>` updates fields in place without opening an editor. Only passed flags change; the description body is preserved. `-t` and `-d` replace their lists, they do not merge; an empty value (`-P ""`, `-d ""`) clears an optional relationship field. Invalid values are rejected and the file is left untouched.
+- `tatr flow <id>` moves the task one step along the lifecycle, or to `--to <STEP>`. It is the only writer of `STATUS`, `FLOW STEP` and `PLAN STATUS`, and it refuses any transition whose preconditions are unmet, reporting every one of them and leaving TASK.md byte-identical. See Lifecycle below.
 - `tatr rm <id>` deletes the task's directory after validating the ID and resolving the existing `tasks/<id>/` path.
 - `tatr check` lints task artifacts for process drift. Findings print as `<id>: <rule>: <detail>`, exit 1 on any finding, and exit 0 with no output when clean. There is no `--strict` flag: record-completeness checks are on by default. With `<id>`, it checks one task. With `-L/--ledger <file>`, it also checks the lessons ledger for stalled promotions.
 
@@ -162,10 +166,47 @@ and `tatr new -b` for the initial body; hand-edit the file only for later body
 updates.
 
 `PLAN STATUS: APPROVED` is durable proof that the user accepted the plan gate
-before work began; set it with `tatr edit <id> -S APPROVED`. Do not treat
-`## Steps` checkboxes as proof that planning was approved. `NOT_REQUIRED` is
-for a record whose cycle never carried plan state, such as pre-flow history -
-it says so honestly rather than back-dating an approval that never happened.
+before work began. It is written by the plan gate alone - `tatr flow <id> --to
+PLANNED` - and by nothing else. Do not treat `## Steps` checkboxes as proof
+that planning was approved. `NOT_REQUIRED` is for a record whose cycle never
+carried plan state, such as pre-flow history; it is unreachable through the CLI
+and written by hand, so it says so honestly rather than back-dating an approval
+that never happened.
+
+## Lifecycle
+
+Eight edges, and nothing else:
+
+```
+BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
+                                          ^                      |
+                                          |                      v
+                                          +------- (fix) --- COMPOUNDING -> DONE
+```
+
+A bare `tatr flow <id>` takes the single successor of the current step.
+`REVIEWING` is the only step with two, defaulting to `COMPOUNDING`, so the fix
+loop back to work is `tatr flow <id> --to WORKING`. `DONE` is terminal.
+
+`STATUS` is derived from the step, never chosen: BACKLOG/UNDERSTANDING/
+PLANNING/PLANNED are OPEN, WORKING/REVIEWING/COMPOUNDING are IN_PROGRESS, and
+DONE is CLOSED. A task therefore stays IN_PROGRESS through review and compound
+and closes atomically at DONE.
+
+Three edges are gates:
+
+- `PLANNING -> PLANNED` is the plan gate; its effect is `PLAN STATUS: APPROVED`.
+- `PLANNED -> WORKING` needs `PLAN STATUS: APPROVED` and every `DEPENDS ON` id
+  to resolve to a CLOSED task.
+- `REVIEWING -> COMPOUNDING` needs a `REVIEW.md` whose latest `- VERDICT:` is
+  APPROVE with no unticked BLOCKER or MAJOR finding.
+- `COMPOUNDING -> DONE` needs all of the above, plus zero unchecked `## Steps`
+  items, a `RETRO.md`, and a valid `- STATUS:` on a `DECISION.md` when the task
+  carries one.
+
+`KIND: EPIC` containers are exempt from the plan-approval, review, retro and
+unchecked-Steps requirements, matching `tatr check`. Their dependencies and
+`DECISION.md` are not exempt.
 
 Sibling records live next to TASK.md in the same task folder: `SPIKE.md`,
 `DECISION.md`, `REVIEW.md`, `RETRO.md`, and `NOTES.md`. Use the project's
@@ -178,14 +219,14 @@ Picking up work:
 
 1. Run `tatr ls --sort priority` or `tatr ls -f '(:status eq OPEN)' --sort priority`.
 2. Run `tatr show <id>` and read the full task plus sibling records.
-3. If the task is flow-managed, confirm it has `PLAN STATUS: APPROVED` before `tatr edit <id> -s IN_PROGRESS -f WORKING`; otherwise plan it first.
+3. Claim it with `tatr flow <id> --to WORKING`. The command refuses a task whose plan is not approved or whose dependencies are still open, and names which; plan it first if so.
 4. Append implementation notes to the task description as you go.
 
 Finishing work:
 
 1. Run the project's tests and `tatr check --ledger LESSONS.md` when the repo has a lessons ledger.
 2. Record what changed and why, difficulties encountered and how they were diagnosed, and a short self-reflection in the task record or sibling retro, following the repo's AGENTS.md.
-3. Run `tatr edit <id> -s CLOSED` only when the work is truly done and the task has the records required by `tatr check`.
+3. Walk the tail of the lifecycle: `tatr flow <id>` to REVIEWING, again to COMPOUNDING once `REVIEW.md` carries an APPROVE verdict, and again to DONE - which closes the task - once the Steps are ticked and `RETRO.md` is written. A refusal lists exactly what is missing.
 4. Commit the task changes together with the code changes.
 
 Planning work:
@@ -204,4 +245,5 @@ worktree and remove the main-checkout stub as the first worktree act.
 - "No 'tasks' directory found": create `tasks/` at the project root first.
 - A task only shows in `tatr ls` if its directory matches `YYYYMMDD-HHMMSS` and contains a well-formed TASK.md.
 - Timestamps are local time.
+- A record already in a wrong or impossible state is repaired by hand in `TASK.md`. There is no `--force` and no repair command: the hand correction shows up in the diff, where a reviewer sees it. Fix the fields to a consistent state (the STATUS a FLOW STEP implies) and let `tatr check` confirm.
 - IDs are second-resolution. A same-second `tatr new` fails with "already exists" instead of overwriting; retry once the second changes. Run one `tatr new` per command rather than chaining several.
