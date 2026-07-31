@@ -1,10 +1,10 @@
 # Cut v0.2.0: bump version and compact the CHANGELOG
 
-- STATUS: IN_PROGRESS
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: release, docs, build
 - KIND: TASK
-- FLOW STEP: COMPOUNDING
+- FLOW STEP: DONE
 - PLAN STATUS: APPROVED
 
 ## Story
@@ -27,7 +27,7 @@ annotated tag - so that pushing the tag later is the only step left to publish.
 - [x] Run the release workflow's own gates by hand against the bumped tree: its
   `Validate tag version` greps and its `awk` changelog extraction for
   `version=0.2.0`, whose output must be non-empty.
-- [ ] After the branch lands on `master`, create the annotated tag on the
+- [x] After the branch lands on `master`, create the annotated tag on the
   landed commit: `git tag -a v0.2.0 -m "tatr v0.2.0"`. Do not push it; the
   release publishes only when the tag is pushed.
 
@@ -76,6 +76,8 @@ annotated tag - so that pushing the tag later is the only step left to publish.
   greps `tatr.c` and `flake.nix` against the tag and awk-extracts the notes, and
   the user asked to keep this simple. Those two gates were run by hand here
   instead.
+- Landed as d4e976c on master; `git tag -a v0.2.0` names that commit and is
+  not pushed, so the release workflow has not run.
 - The suite passes 107/107 in the worktree. `checker.sh`'s windows test runs
   `make clean`, so `dist/tatr` has to be rebuilt after a suite run before
   invoking the binary - the `serialize-build-artifact-checks` lesson again.
