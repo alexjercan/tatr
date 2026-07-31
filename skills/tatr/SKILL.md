@@ -29,6 +29,8 @@ tatr claim <id>
 tatr release <id> [-F|--force]
 tatr claims
 tatr check [<id>] [-L|--ledger <file>]
+tatr ledger [-L|--ledger <file>] [-s|--slug <slug> -D|--disposition PROMOTE|DEFER|RETIRE|ABSORBED
+            [-t|--task <id>] [-R|--reason <text>] [-T|--target <text>]]
 ```
 
 `<metadata options>`, shared by `new` and `edit`:
@@ -54,7 +56,8 @@ to it.
 - `tatr context <id> --phase <phase>` prints only the artifact paths that phase needs, as `<path><TAB>present|missing`. Paths only, never contents. Phases: `understand`, `plan`, `work`, `review`, `compound`, `resume` (the default, everything), `landing`. `understand`, `plan` and `resume` also list the parent Epic's TASK.md. A record the phase owns is listed even when missing, because you need the path to create it.
 - `tatr claim <id>` / `tatr release <id>` / `tatr claims` divide work between parallel sessions. A claim is an atomic `O_CREAT|O_EXCL` file; exactly one of any number of racing sessions wins and the losers are told who holds it. `tatr flow <id> --to WORKING` refuses a task another session holds. Ownership is `TATR_SESSION` (default: the working directory), never a pid - tatr is one-shot, so the claiming process is gone before anything reads the claim. `TATR_CLAIMS_DIR` (default `<tasks dir>/.claims`) is where claims live: **set it to one shared directory across parallel worktrees**, or each tree gets its own and the guard can never fire. A session releases its own claim with no flag; `release --force` recovers one from a session that is gone. Nothing expires.
 - `tatr rm <id>` deletes the task's directory after validating the ID and resolving the existing `tasks/<id>/` path.
-- `tatr check` lints task artifacts for process drift. Findings print as `<id>: <rule>: <detail>`, exit 1 on any finding, and exit 0 with no output when clean. There is no `--strict` flag: record-completeness checks are on by default. With `<id>`, it checks one task. With `-L/--ledger <file>`, it also checks the lessons ledger for stalled promotions.
+- `tatr check` lints task artifacts for process drift. Findings print as `<id>: <rule>: <detail>`, exit 1 on any finding, and exit 0 with no output when clean. There is no `--strict` flag: record-completeness checks are on by default. With `<id>`, it checks one task. With `-L/--ledger <file>`, it also checks the lessons ledger for stalled promotions and for pending promotions that still owe a decision.
+- `tatr ledger` lists the ledger's promotions awaiting a decision, one `<slug><TAB>x<count><TAB><state>` row each (default file: `LESSONS.md`). With `--slug` plus `--disposition`, it records the decision the USER made, inside the entry's own count parens. **Ask the user before calling it - never infer a disposition.** It writes the ledger file and NOTHING else: PROMOTE requires `--task <id>` naming an existing task, so the promoted edit to a doc, tool or skill goes through the ordinary plan, review, retro and close guards instead of being applied straight out of the ledger. DEFER and RETIRE require `--reason`, ABSORBED requires `--target`. A recorded disposition is settled and there is no `--force`, with one exception: a DEFER records the count it was taken at, and once the lesson recurs past that count the entry is awaiting a decision again and may be decided a second time. Every refusal leaves the ledger byte-identical.
 
 ## Check Rules
 
@@ -88,6 +91,11 @@ Default `tatr check` rules:
 - `bad-decision-status`: a task's `DECISION.md`, when present, has a `- STATUS:` value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference, either in `SUPERSEDED by <ref>` or `- Supersedes: <ref>`, does not resolve to an existing `tasks/<id>/DECISION.md`.
 - `promotion-stalled`: with `--ledger <file>`, a lesson at `(x3)` or more appears outside the ledger's `## Pending promotions` section. Annotated counts such as `(x3, PROMOTED ...)`, `(x3, absorbed by ...)`, or `(x3, RETIRED ...)` are lifecycle markers and are exempt.
+- `promotion-awaiting-decision`: an entry UNDER `## Pending promotions` carries a bare `(xN)` count, or a DEFER taken at a count the entry has since passed. The section is a decision queue, not a place to park a lesson forever.
+- `bad-disposition`: an entry under `## Pending promotions` whose annotation is not one of `PROMOTE <date> -> <task-id>`, `DEFER <date> at x<count>: <reason>`, `RETIRE <date>: <reason>` or `ABSORBED <date> by <target>`, or that is missing its `YYYY-MM-DD` date, its reason or its target. Record dispositions with `tatr ledger` rather than by hand.
+- `dangling-promotion-task`: a PROMOTE naming something that is not a task ID, or a task with no `TASK.md`.
+
+The disposition grammar is validated ONLY under `## Pending promotions`. A lesson decided earlier and moved back to its own section keeps the applied markers `promotion-stalled` exempts, so adopting the rule never requires rewriting a ledger's history.
 
 The `DECISION.md` and `SPIKE.md` content rules are presence-gated: a task with
 no such sibling is not flagged by them, and any SPIKE.md that does exist is
@@ -269,7 +277,7 @@ Picking up work:
 
 Finishing work:
 
-1. Run the project's tests and `tatr check --ledger LESSONS.md` when the repo has a lessons ledger.
+1. Run the project's tests and `tatr check --ledger LESSONS.md` when the repo has a lessons ledger. A `promotion-awaiting-decision` finding is a question for the USER, not something to resolve on their behalf: ask which disposition they want, then record it with `tatr ledger`.
 2. Record what changed and why, difficulties encountered and how they were diagnosed, and a short self-reflection in the task record or sibling retro, following the repo's AGENTS.md.
 3. Walk the tail of the lifecycle: `tatr flow <id>` to REVIEWING, again to COMPOUNDING once `REVIEW.md` carries an APPROVE verdict, and again to DONE - which closes the task - once the Steps are ticked and `RETRO.md` is written. A refusal lists exactly what is missing.
 4. Commit the task changes together with the code changes.

@@ -130,6 +130,8 @@ tatr release <ID> [--force]  # give it back; --force recovers another session's 
 tatr claims                  # what is held in this tasks directory
 tatr context <ID> --phase work  # only the artifact paths that phase needs
 tatr check                   # lint the backlog for process drift (exit 1 on findings)
+tatr ledger                  # the lessons ledger's promotions awaiting a decision
+tatr ledger --slug <s> --disposition RETIRE --reason "..."  # record one
 tatr scaffold <ID> REVIEW    # write a sibling record from the schema table
 tatr scaffold <ID> --list    # every record kind for a task, path and presence
 tatr proofs <ID>             # the task's DoD proofs as data (nothing is executed)
@@ -260,6 +262,24 @@ sprout worktrees, reviewed out-of-context in round 1, and closed with DoD
 proofs in test:/cmd:/manual: notation. `LESSONS.md` at the repo root is the
 lessons ledger - read it before starting any task. `tatr check` (plus
 `tatr check --ledger LESSONS.md`) is the conformance gate; keep both clean.
+
+A lesson under the ledger's `## Pending promotions` heading owes an explicit
+user disposition, written into the entry's own count parens as
+`PROMOTE <date> -> <task-id>`, `DEFER <date> at x<count>: <reason>`,
+`RETIRE <date>: <reason>` or `ABSORBED <date> by <target>`. A bare count there
+is `promotion-awaiting-decision`, so the section is a queue with an exit rather
+than a place lessons go to be forgotten. That grammar is validated only under
+that heading; a lesson decided earlier and moved back to its own section keeps
+the applied markers `promotion-stalled` exempts, because the ledger's history is
+not rewritten to adopt a rule.
+
+The decision is the USER'S. `tatr ledger` records it and writes the ledger file
+and nothing else: ask before calling it, and never infer a disposition. PROMOTE
+requires a task id precisely so the promoted edit to a doc, tool or skill goes
+through the ordinary plan, review, retro and close guards instead of being made
+straight out of the ledger. A DEFER records the count it was taken at and stops
+covering the entry once the lesson recurs, which is the only disposition that
+can be revisited without a hand edit.
 
 ## Commits
 

@@ -6,6 +6,26 @@ All notable changes to tatr are documented here.
 
 ### Added
 
+- `tatr ledger`: the promotions a lessons ledger is waiting on a decision for,
+  one `<slug><TAB>x<count><TAB><state>` row each, and the command that records
+  the decision the user made. A lesson under `## Pending promotions` now owes an
+  explicit disposition, written into the entry's own count parens as
+  `PROMOTE <date> -> <task-id>`, `DEFER <date> at x<count>: <reason>`,
+  `RETIRE <date>: <reason>` or `ABSORBED <date> by <target>`; three new
+  `--ledger` rules enforce it. `promotion-awaiting-decision` fires on a bare
+  count there, so the section is a queue with an exit rather than the place
+  lessons went to be forgotten. `bad-disposition` covers a malformed annotation
+  and `dangling-promotion-task` a PROMOTE that names no existing task -
+  PROMOTE requires a task id precisely so the promoted edit to a doc, tool or
+  skill goes through the ordinary plan, review, retro and close guards instead
+  of being applied straight out of the ledger, and `tatr ledger` writes the
+  ledger file and nothing else. A DEFER records the count it was taken at and
+  stops covering the entry once the lesson recurs past it, which is what keeps a
+  deferral from becoming a permanent silence without putting a wall clock into
+  `tatr check`. The grammar is validated only under that heading, so a ledger's
+  already-applied `PROMOTED` / `absorbed by` / `RETIRED` markers keep working and
+  no history has to be rewritten. Every refusal leaves the ledger byte-identical.
+
 - `tatr frontier <ID>`: the open work under an Epic, one tab-separated row per
   child and never a task body. `READY` rows are ready to pick up, `BLOCKED`
   rows carry `blocked-by=<ids>` naming only the dependencies that are not yet

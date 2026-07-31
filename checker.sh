@@ -2396,7 +2396,7 @@ test_check_ledger() {
 
 ## Pending promotions (3+ occurrences, user decides)
 
-- `promoted-lesson` (x5): already parked here.
+- `promoted-lesson` (x5, RETIRE 2026-07-30: superseded by the linter): parked.
 LEDGER
 
     set +e
@@ -2428,6 +2428,395 @@ LEDGER
         pass_test
     else
         fail_test "Exit: $exit_code/$abs_code/$missing_code/$dir_code"
+    fi
+}
+
+# Writes a ledger whose Pending section is exactly the lines passed on stdin.
+# Every disposition test shares this shape so the fixtures differ only in the
+# entries under test.
+write_pending_ledger() {
+    local test_dir=$1
+    {
+        echo '# Lessons ledger'
+        echo
+        echo '## Process lessons'
+        echo
+        echo '- `settled-lesson` (x1): nothing to decide. 20260101-100000'
+        echo
+        echo '## Pending promotions (3+ occurrences, user decides)'
+        echo
+        cat
+    } > "$test_dir/LESSONS.md"
+}
+
+test_ledger_pending_requires_disposition() {
+    log_test "ledger (a bare entry in Pending awaits a decision)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `open-lesson` (x3): nobody ever said what to do with this one.
+- `decided-lesson` (x3, RETIRE 2026-07-30: the tool makes it impossible now):
+  kept for the record.
+LEDGER
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -qx "ledger: promotion-awaiting-decision: open-lesson (x3) has no disposition" \
+        && ! echo "$output" | grep -q "decided-lesson" \
+        && ! echo "$output" | grep -q "settled-lesson"; then
+        pass_test
+    else
+        fail_test "Exit: $exit_code, output: $output"
+    fi
+}
+
+test_ledger_dispositions() {
+    log_test "ledger (each disposition parses; malformed ones are findings)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    local task_id
+    task_id=$(run_tatr -r "$test_dir" new "Promotion work" 2>&1 | grep -o '[0-9]\{8\}-[0-9]\{6\}' | head -1)
+
+    write_pending_ledger "$test_dir" <<LEDGER
+- \`promote-lesson\` (x3, PROMOTE 2026-07-30 -> $task_id): goes into AGENTS.md.
+- \`defer-lesson\` (x3, DEFER 2026-07-30 at x3: wait for one more sighting):
+  not yet.
+- \`retire-lesson\` (x4, RETIRE 2026-07-30: the guard makes it impossible): done.
+- \`absorbed-lesson\` (x3, ABSORBED 2026-07-30 by the Makefile build guard): ok.
+LEDGER
+
+    set +e
+    local good_output
+    good_output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local good_code=$?
+    set -e
+
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `bad-verb` (x3, PONDER 2026-07-30: not a disposition): nope.
+- `bad-date` (x3, RETIRE yesterday: no real date): nope.
+- `no-target` (x3, PROMOTE 2026-07-30): nothing to point at.
+- `no-reason` (x3, RETIRE 2026-07-30): no reason given.
+- `no-defer-count` (x3, DEFER 2026-07-30: no count recorded): nope.
+- `no-absorbed-target` (x3, ABSORBED 2026-07-30): nothing named.
+- `deferred-too-far` (x3, DEFER 2026-07-30 at x9: silence past every recurrence):
+  a permanent silence.
+- `unclosed-group` (x3 , RETIRE 2026-07-30: space before the comma): malformed.
+- `runaway-count` (x99999999999999999999999): not a real tally.
+- `no-count-at-all`: a bullet with no count parks the lesson silently.
+LEDGER
+
+    set +e
+    local bad_output
+    bad_output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local bad_code=$?
+    set -e
+
+    if [ $good_code -eq 0 ] && [ -z "$good_output" ] \
+        && [ $bad_code -eq 1 ] \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: bad-verb: 'PONDER' is not PROMOTE|DEFER|RETIRE|ABSORBED" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: bad-date: RETIRE needs a YYYY-MM-DD date" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: no-target: PROMOTE needs '-> <task-id>'" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: no-reason: RETIRE needs ': <reason>'" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: no-defer-count: DEFER needs 'at x<count>'" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: no-absorbed-target: ABSORBED needs 'by <target>'" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: deferred-too-far: DEFER at x9 is above the entry's own x3: a DEFER records the count it was taken at" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: unclosed-group: the count is not '(xN)' or '(xN, <disposition>)'" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: runaway-count: the count is not '(xN)' or '(xN, <disposition>)'" \
+        && echo "$bad_output" | grep -qx "ledger: bad-disposition: no-count-at-all: a pending entry needs an '(xN)' count"; then
+        pass_test
+    else
+        fail_test "good: $good_code '$good_output'; bad: $bad_code '$bad_output'"
+    fi
+}
+
+test_ledger_defer_reraises() {
+    log_test "ledger (a DEFER stops covering the entry once the count grows)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `deferred-lesson` (x3, DEFER 2026-07-30 at x3: one more sighting first): wait.
+LEDGER
+
+    set +e
+    local covered_output
+    covered_output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local covered_code=$?
+    set -e
+
+    # The lesson recurs: /compound bumps the count past the deferred one.
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `deferred-lesson` (x4, DEFER 2026-07-30 at x3: one more sighting first): wait.
+LEDGER
+
+    set +e
+    local reraised_output
+    reraised_output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local reraised_code=$?
+    # A re-raised DEFER is decidable again, unlike a settled disposition.
+    local redecide_output
+    redecide_output=$(run_tatr -r "$test_dir" ledger --slug deferred-lesson \
+        --disposition RETIRE --reason "seen enough of it" 2>&1)
+    local redecide_code=$?
+    set -e
+
+    set +e
+    local settled_output
+    settled_output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local settled_code=$?
+    set -e
+
+    if [ $covered_code -eq 0 ] && [ -z "$covered_output" ] \
+        && [ $reraised_code -eq 1 ] \
+        && echo "$reraised_output" | grep -qx "ledger: promotion-awaiting-decision: deferred-lesson (x4) was deferred at x3" \
+        && [ $redecide_code -eq 0 ] \
+        && grep -q "(x4, RETIRE .*: seen enough of it)" "$test_dir/LESSONS.md" \
+        && [ $settled_code -eq 0 ] && [ -z "$settled_output" ]; then
+        pass_test
+    else
+        fail_test "covered: $covered_code '$covered_output'; reraised: $reraised_code '$reraised_output'; redecide: $redecide_code '$redecide_output'; settled: $settled_code '$settled_output'"
+    fi
+}
+
+test_ledger_promote_requires_task() {
+    log_test "ledger (PROMOTE needs a resolvable task and touches nothing else)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    local task_id
+    task_id=$(run_tatr -r "$test_dir" new "Promotion work" 2>&1 | grep -o '[0-9]\{8\}-[0-9]\{6\}' | head -1)
+
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `not-an-id` (x3, PROMOTE 2026-07-30 -> AGENTS.md Code conventions): a doc.
+- `gone-task` (x3, PROMOTE 2026-07-30 -> 20190101-000000): no such task.
+LEDGER
+
+    set +e
+    local output
+    output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local exit_code=$?
+    set -e
+
+    # The promotion target itself is never edited by a recorded disposition.
+    echo 'untouched' > "$test_dir/AGENTS.md"
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `promote-me` (x3): decide this one.
+LEDGER
+    local task_before
+    task_before=$(cat "$test_dir/tasks/$task_id/TASK.md")
+
+    set +e
+    local no_task_output
+    no_task_output=$(run_tatr -r "$test_dir" ledger --slug promote-me --disposition PROMOTE 2>&1)
+    local no_task_code=$?
+    local bad_task_output
+    bad_task_output=$(run_tatr -r "$test_dir" ledger --slug promote-me \
+        --disposition PROMOTE --task 20190101-000000 2>&1)
+    local bad_task_code=$?
+    local ok_output
+    ok_output=$(run_tatr -r "$test_dir" ledger --slug promote-me \
+        --disposition PROMOTE --task "$task_id" 2>&1)
+    local ok_code=$?
+    set -e
+
+    if [ $exit_code -eq 1 ] \
+        && echo "$output" | grep -qx "ledger: dangling-promotion-task: not-an-id: 'AGENTS.md Code conventions' is not a task ID" \
+        && echo "$output" | grep -qx "ledger: dangling-promotion-task: gone-task: task '20190101-000000' does not exist" \
+        && [ $no_task_code -eq 1 ] && echo "$no_task_output" | grep -q "PROMOTE requires --task" \
+        && [ $bad_task_code -eq 1 ] && echo "$bad_task_output" | grep -q "20190101-000000" \
+        && [ $ok_code -eq 0 ] \
+        && grep -q "(x3, PROMOTE .* -> $task_id)" "$test_dir/LESSONS.md" \
+        && [ "$(cat "$test_dir/AGENTS.md")" = "untouched" ] \
+        && [ "$(cat "$test_dir/tasks/$task_id/TASK.md")" = "$task_before" ]; then
+        pass_test
+    else
+        fail_test "check: $exit_code '$output'; no-task: $no_task_code '$no_task_output'; bad-task: $bad_task_code '$bad_task_output'; ok: $ok_code '$ok_output'"
+    fi
+}
+
+test_ledger_disposition_atomicity() {
+    log_test "ledger (a refused disposition leaves the ledger byte-identical)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `decide-me` (x3): still open.
+- `already-done` (x3, RETIRE 2026-07-30: settled): no second decision.
+- `twice` (x3): the same slug, once.
+- `twice` (x4): and again - which one would a decision land on?
+- `broken` (x3 , RETIRE 2026-07-30: space before the comma): malformed.
+LEDGER
+    cp "$test_dir/LESSONS.md" "$test_dir/LESSONS.expected"
+
+    set +e
+    local unknown_slug
+    unknown_slug=$(run_tatr -r "$test_dir" ledger --slug nope --disposition RETIRE --reason x 2>&1)
+    local unknown_code=$?
+    local no_reason
+    no_reason=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE 2>&1)
+    local no_reason_code=$?
+    local bad_disposition
+    bad_disposition=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition PONDER 2>&1)
+    local bad_code=$?
+    local overwrite
+    overwrite=$(run_tatr -r "$test_dir" ledger --slug already-done --disposition RETIRE --reason y 2>&1)
+    local overwrite_code=$?
+    # A duplicate slug has no single entry to land on.
+    local duplicate
+    duplicate=$(run_tatr -r "$test_dir" ledger --slug twice --disposition RETIRE --reason z 2>&1)
+    local duplicate_code=$?
+    # A malformed entry is fixed by hand, not decided over.
+    local malformed
+    malformed=$(run_tatr -r "$test_dir" ledger --slug broken --disposition RETIRE --reason z 2>&1)
+    local malformed_code=$?
+    # Each disposition takes exactly its own payload flag.
+    local extra_target
+    extra_target=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE \
+        --reason z --target t 2>&1)
+    local extra_target_code=$?
+    local extra_task
+    extra_task=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE \
+        --reason z --task 20190101-000000 2>&1)
+    local extra_task_code=$?
+    local extra_reason
+    extra_reason=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition ABSORBED \
+        --target t --reason r 2>&1)
+    local extra_reason_code=$?
+    local empty_reason
+    empty_reason=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE --reason "" 2>&1)
+    local empty_reason_code=$?
+    local no_disposition
+    no_disposition=$(run_tatr -r "$test_dir" ledger --slug decide-me 2>&1)
+    local no_disposition_code=$?
+    local no_slug
+    no_slug=$(run_tatr -r "$test_dir" ledger --disposition RETIRE --reason z 2>&1)
+    local no_slug_code=$?
+    local stray_payload
+    stray_payload=$(run_tatr -r "$test_dir" ledger --reason "listing takes no payload" 2>&1)
+    local stray_payload_code=$?
+    # A stray ')' closes the count group early: the decision would be truncated
+    # and the rest would spill into the lesson text.
+    local closing_paren
+    closing_paren=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition ABSORBED \
+        --target 'scaffold ) and check' 2>&1)
+    local closing_paren_code=$?
+    # A line break would split the entry in two: refused at the argument.
+    local newline_reason
+    newline_reason=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE \
+        --reason 'two
+lines' 2>&1)
+    local newline_code=$?
+    # An unbalanced parenthesis ends the count group early. Only the re-parse
+    # before the write can tell it from the balanced prose pair below.
+    local unbalanced_reason
+    unbalanced_reason=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE \
+        --reason 'breaks the (format' 2>&1)
+    local unbalanced_code=$?
+    # Every refusal above must have left the file untouched. Compare NOW, before
+    # the write below deliberately changes it.
+    cmp -s "$test_dir/LESSONS.md" "$test_dir/LESSONS.expected"
+    local unchanged_code=$?
+    set -e
+
+    # ... while a balanced pair is ordinary prose and must survive.
+    set +e
+    local balanced_output
+    balanced_output=$(run_tatr -r "$test_dir" ledger --slug decide-me --disposition RETIRE \
+        --reason 'the (rare) case is covered now' 2>&1)
+    local balanced_code=$?
+    set -e
+
+    local codes="$unknown_code/$no_reason_code/$bad_code/$overwrite_code/$duplicate_code"
+    codes="$codes/$malformed_code/$extra_target_code/$extra_task_code/$extra_reason_code"
+    codes="$codes/$empty_reason_code"
+    codes="$codes/$no_disposition_code/$no_slug_code/$stray_payload_code/$closing_paren_code"
+    codes="$codes/$newline_code/$unbalanced_code"
+
+    if [ "$codes" = "1/1/1/1/1/1/1/1/1/1/1/1/1/1/1/1" ] \
+        && echo "$unknown_slug" | grep -q "nope" \
+        && echo "$overwrite" | grep -q "already carries" \
+        && echo "$duplicate" | grep -q "appears 2 times" \
+        && echo "$malformed" | grep -q "malformed disposition" \
+        && echo "$extra_target" | grep -q "RETIRE takes no --target" \
+        && echo "$extra_task" | grep -q "RETIRE takes no --task" \
+        && echo "$extra_reason" | grep -q "ABSORBED takes no --reason" \
+        && echo "$empty_reason" | grep -q "empty" \
+        && echo "$no_disposition" | grep -q "needs --disposition" \
+        && echo "$no_slug" | grep -q "needs --slug" \
+        && echo "$stray_payload" | grep -q "belong to a decision" \
+        && echo "$closing_paren" | grep -q "would not parse back" \
+        && echo "$newline_reason" | grep -q "must not contain a newline or a tab" \
+        && echo "$unbalanced_reason" | grep -q "would not parse back" \
+        && [ $unchanged_code -eq 0 ] \
+        && [ $balanced_code -eq 0 ] \
+        && grep -q '`decide-me` (x3, RETIRE .*: the (rare) case is covered now): still open.' "$test_dir/LESSONS.md"; then
+        pass_test
+    else
+        fail_test "codes: $codes (want all 1); unchanged=$unchanged_code; balanced=$balanced_code; $unknown_slug; $no_reason; $bad_disposition; $overwrite; $duplicate; $malformed; $extra_target; $extra_task; $extra_reason; $empty_reason; $no_disposition; $no_slug; $stray_payload; $closing_paren; $newline_reason; $unbalanced_reason; $balanced_output"
+    fi
+}
+
+test_ledger_command() {
+    log_test "ledger (lists pending decisions and records each disposition)"
+    local test_dir=$(create_test_dir)
+    mkdir -p "$test_dir/tasks"
+    local task_id
+    task_id=$(run_tatr -r "$test_dir" new "Promotion work" 2>&1 | grep -o '[0-9]\{8\}-[0-9]\{6\}' | head -1)
+
+    write_pending_ledger "$test_dir" <<'LEDGER'
+- `promote-me` (x3): first.
+- `defer-me` (x3): second.
+- `retire-me` (x4): third.
+- `absorb-me` (x3): fourth.
+LEDGER
+
+    set +e
+    local list_output
+    list_output=$(run_tatr -r "$test_dir" ledger 2>&1)
+    local list_code=$?
+    set -e
+
+    # Recording must succeed here; capture the codes rather than letting set -e
+    # abort the whole suite on a regression.
+    set +e
+    run_tatr -r "$test_dir" ledger --slug promote-me --disposition PROMOTE --task "$task_id" > /dev/null 2>&1
+    local rec_codes=$?
+    run_tatr -r "$test_dir" ledger --slug defer-me --disposition DEFER --reason "one more sighting" > /dev/null 2>&1
+    rec_codes="$rec_codes/$?"
+    run_tatr -r "$test_dir" ledger --slug retire-me --disposition RETIRE --reason "the guard replaced it" > /dev/null 2>&1
+    rec_codes="$rec_codes/$?"
+    run_tatr -r "$test_dir" ledger --slug absorb-me --disposition ABSORBED --target "the Makefile build guard" > /dev/null 2>&1
+    rec_codes="$rec_codes/$?"
+    set +e
+    local after_output
+    after_output=$(run_tatr -r "$test_dir" ledger 2>&1)
+    local after_code=$?
+    local check_output
+    check_output=$(run_tatr -r "$test_dir" check --ledger LESSONS.md 2>&1)
+    local check_code=$?
+    set -e
+
+    if [ $list_code -eq 0 ] \
+        && [ "$rec_codes" = "0/0/0/0" ] \
+        && [ "$(echo "$list_output" | wc -l)" -eq 4 ] \
+        && echo "$list_output" | grep -qP "^promote-me\tx3\tawaiting-decision$" \
+        && echo "$list_output" | grep -qP "^retire-me\tx4\tawaiting-decision$" \
+        && [ $after_code -eq 0 ] \
+        && echo "$after_output" | grep -qP "^promote-me\tx3\tPROMOTE $task_id$" \
+        && echo "$after_output" | grep -qP "^defer-me\tx3\tDEFER at x3$" \
+        && echo "$after_output" | grep -qP "^retire-me\tx4\tRETIRE$" \
+        && echo "$after_output" | grep -qP "^absorb-me\tx3\tABSORBED the Makefile build guard$" \
+        && grep -q '`defer-me` (x3, DEFER .* at x3: one more sighting): second.' "$test_dir/LESSONS.md" \
+        && grep -q '`absorb-me` (x3, ABSORBED .* by the Makefile build guard): fourth.' "$test_dir/LESSONS.md" \
+        && grep -q '^- `settled-lesson` (x1): nothing to decide. 20260101-100000$' "$test_dir/LESSONS.md" \
+        && [ $check_code -eq 0 ] && [ -z "$check_output" ]; then
+        pass_test
+    else
+        fail_test "list: $list_code '$list_output'; record: $rec_codes; after: $after_code '$after_output'; check: $check_code '$check_output'"
     fi
 }
 
@@ -4451,6 +4840,12 @@ test_check_closed_not_approved
 test_check_bad_severity
 test_check_malformed_header
 test_check_ledger
+test_ledger_pending_requires_disposition
+test_ledger_dispositions
+test_ledger_defer_reraises
+test_ledger_promote_requires_task
+test_ledger_disposition_atomicity
+test_ledger_command
 test_check_per_id
 test_check_exit_codes
 test_check_scanner_edges

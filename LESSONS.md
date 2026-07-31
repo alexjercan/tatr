@@ -7,7 +7,20 @@ Counts stay bare - (xN) - until a lifecycle event annotates them; the
 annotation is the lifecycle marker and exempts the entry from the
 promotion-stalled lint (tatr check --ledger): (xN, PROMOTED <date> -> <target>),
 (xN, absorbed by <tool or template>, <date>), or (xN, RETIRED <date>: <reason>).
-Seeded 2026-07-20 by distilling the pre-flow docs/retros/ (since removed;
+
+Under Pending promotions every entry owes an explicit USER disposition, written
+in the same parens and validated only there (tatr check --ledger reports a bare
+count as promotion-awaiting-decision):
+
+  (xN, PROMOTE <date> -> <task-id>)          the change is that task's work
+  (xN, DEFER <date> at x<count>: <reason>)   until the lesson recurs past x<count>
+  (xN, RETIRE <date>: <reason>)              the lesson is not worth keeping
+  (xN, ABSORBED <date> by <target>)          a tool now makes it impossible
+
+Ask the user, then record the answer with `tatr ledger --slug <slug>
+--disposition ...`; it writes this file and nothing else. Once the promotion
+lands, the entry moves back to its own section carrying the applied marker
+above. Seeded 2026-07-20 by distilling the pre-flow docs/retros/ (since removed;
 git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 ## Process lessons
@@ -84,17 +97,26 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `serialize-build-artifact-checks` (x1): do not parallelize verification
   commands that clean or rewrite the same build outputs in one worktree.
   20260728-095149
+- `watch-how-the-mutant-fails` (x1): a mutant that hangs, corrupts or crashes
+  instead of reporting cleanly means the code below assumed a precondition
+  nobody asserts there; assert it at its use, not just in the guard.
+  20260730-154756
+- `revert-the-mutation-in-the-same-step` (x1): a deliberately broken build left
+  in a worktree is indistinguishable from a bug to the next session; revert in
+  the step that observes the red. 20260730-154756
 
 ## Domain lessons (project-specific)
 
 - `one-resolve-spine` (x3, PROMOTED 2026-07-05 -> AGENTS.md Code conventions):
   new commands reuse task_resolve / task_load / task_save instead of
   reimplementing HUID or path logic. 20260705-172803, 20260705-172804, 20260705-172805
-- `checker-set-e-exit-codes` (x4, PROMOTED 2026-07-05 -> AGENTS.md checker.sh
+- `checker-set-e-exit-codes` (x5, PROMOTED 2026-07-05 -> AGENTS.md checker.sh
   gotcha): under set -e, `local out=$(cmd)` swallows the exit code; should-fail
   tests use the set +e / split-declaration pattern. Applies to YOUR OWN
   verification commands too - `./checker.sh --memcheck | tail` reported exit 0
-  on a run that died mid-suite. 20260705-172803, 20260730-153325, 20260730-154657
+  on a run that died mid-suite, and `./checker.sh | tail -20` later hid a HANG
+  for twenty minutes because a pipe buffers until exit. 20260705-172803,
+  20260730-153325, 20260730-154657, 20260730-154756
 - `huid-gates-destruction` (x1, PROMOTED 2026-07-05 -> AGENTS.md Code
   conventions): deletion only ever touches tasks/<id>/ behind a validated
   HUID; never build a destructive path from raw input. 20260705-172805
@@ -110,13 +132,15 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 ## Pending promotions (3+ occurrences, user decides)
 
-- `mutation-test-the-new-guard` (x3): delete each new guard one at a time and
+- `mutation-test-the-new-guard` (x3, PROMOTE 2026-07-31 -> 20260731-002334):
+  delete each new guard one at a time and
   watch its own test go red, BEFORE review - every gap it found this way was
   cheaper than a review round. The mutation must remove the SIDE EFFECT, not
   just the return value: `0 * report(...)` still prints.
   20260730-154657, 20260730-154745, 20260730-154740
 
-- `test-first-for-check-messages` (x3): for a check rule, write the test with
+- `test-first-for-check-messages` (x3, PROMOTE 2026-07-31 -> 20260731-002339):
+  for a check rule, write the test with
   its exact expected message before the emitting code, so the format is designed
   from the assertion not reverse-engineered into it. 20260722-152010,
   20260725-111031, 20260730-153325
