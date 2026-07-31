@@ -1,45 +1,33 @@
-# Tatr Workflow
+# Workflow
 
-Picking up work:
+## Plan
 
-1. Run `tatr ls --sort priority` or `tatr ls -f '(:status eq OPEN)' --sort priority`.
-2. Run `tatr show <id>` and read the full task plus relevant sibling records.
-3. Use `tatr context <id> --phase <phase>` to list only the artifacts needed
-   for the current phase.
-4. Start with `tatr flow <id> --to WORKING`; it refuses missing approval, open
-   dependencies, and conflicting claims.
-5. Append implementation notes to the task record or sibling notes as you go.
+- One cohesive request -> one task.
+- Split only for independently implementable work or explicit EPIC/release scope.
+- Match project tags and relative priorities.
+- Record non-trivial follow-up work as tasks, not TODO comments.
+- Approval marker: `tatr flow <id> --to PLANNED` only.
 
-Finishing work:
+## Pick up
 
-1. Run the project's tests and `tatr check --ledger LESSONS.md` when the repo
-   has a lessons ledger.
-2. Treat `promotion-awaiting-decision` as a user question, not a decision for
-   the agent.
-3. Record what changed and why, alternatives considered, difficulties and
-   diagnosis, and short self-reflection in the task record or retro, following
-   the repo's `AGENTS.md`.
-4. Walk `WORKING -> REVIEWING -> COMPOUNDING -> DONE`. A refusal lists exactly
-   what is missing.
-5. Commit task changes together with code or docs changes.
+1. `tatr ls --sort priority` or filter OPEN tasks.
+2. `tatr show <id>`; read the task and relevant siblings.
+3. `tatr context <id> --phase <phase>`; read listed artifacts.
+4. `tatr flow <id> --to WORKING`; resolve any named gate failure.
+5. Record useful implementation notes in task artifacts.
 
-Planning work:
+## Finish
 
-- Keep one cohesive requested thing in one task.
-- Split only when pieces are independently implementable and committable, or
-  when the user explicitly asks for an EPIC, sprint, version, release, or
-  multi-feature container.
-- Use project-consistent tags.
-- Create tasks for non-trivial follow-up work discovered mid-session instead
-  of leaving TODO comments in code.
+1. Run project tests and `tatr check --ledger LESSONS.md` when available.
+2. Ask the user about `promotion-awaiting-decision`; never choose for them.
+3. Record what/why, tradeoffs, bugs/fixes, and next-time improvement in the repository's declared record.
+4. Move WORKING -> REVIEWING -> COMPOUNDING -> DONE. Fix-loop to WORKING when needed.
+5. Commit task records with the related change.
 
-Gotchas:
+## Gotchas
 
-- "No 'tasks' directory found" means create `tasks/` at the project root.
-- A task only appears in `tatr ls` if its directory matches
-  `YYYYMMDD-HHMMSS` and contains a well-formed `TASK.md`.
-- Timestamps are local time.
-- A record in a wrong state is repaired by hand in `TASK.md`; there is no
-  `--force` or repair command.
-- Same-second `tatr new` collisions fail. Run one `tatr new` per command and
-  retry after the second changes.
+- No `tasks/`: create it at project root.
+- Discoverable task: valid timestamp directory plus parseable `TASK.md`.
+- IDs: local-time seconds; same-second `new` fails. Retry after the second changes.
+- Impossible historical state: repair `TASK.md` by hand, then run `check`.
+- No lifecycle `--force` or repair command.

@@ -1,32 +1,27 @@
 ---
 name: tatr
-description: Track work items with the tatr CLI, which stores tasks as markdown files under a tasks/ directory so they are versioned with the code. Use this skill whenever a project has a tasks/ directory, the user mentions tasks, TODOs, backlog, TASK.md, or task tracking, or Codex needs to create, inspect, update, lint, or close project task records.
+description: Track versioned Markdown tasks with the tatr CLI. Use when a project has a tasks/ directory; the user mentions tasks, TODOs, backlog, TASK.md, or task tracking; or Codex needs to create, inspect, plan, update, lint, claim, review, or close task records.
 ---
-# Tatr - Task Tracking for Code Projects
-Tatr stores tasks as `tasks/<YYYYMMDD-HHMMSS>/TASK.md` files. The timestamp
-directory is the task ID. Tatr searches upward to find `tasks/`; `-r ROOT`
-runs against another tree.
+# Tatr
 
-## Critical Rules
-- Prefer the CLI over hand edits: `tatr new`, `ls`, `show`, `edit`, `flow`,
-  `scaffold`, `proofs`, `frontier`, `context`, `claim`, `release`, `check`,
-  and `ledger`.
-- `STATUS`, `FLOW STEP`, and `PLAN STATUS` are owned by `tatr flow`; `new` and
-  `edit` reject direct writes to them.
-- Planning approval is only `tatr flow <id> --to PLANNED`. Do not treat
-  checked steps as approval.
-- Start work with `tatr flow <id> --to WORKING`; it enforces approved plans,
-  closed dependencies, and cross-session claims.
-- Scaffold sibling records (`SPIKE.md`, `DECISION.md`, `REVIEW.md`,
-  `RETRO.md`) with `tatr scaffold`; edit existing records by hand in the diff.
-- `tatr proofs <id>` prints proof commands; it never executes them.
-- `tatr check` exits 1 on findings and uses the same rule collectors as
-  lifecycle gates.
-- Ask the user before recording any lessons ledger disposition with
-  `tatr ledger`; never infer PROMOTE, DEFER, RETIRE, or ABSORBED.
-- Deletion must go through a validated HUID and only touch `tasks/<id>/`.
+Task layout: `tasks/<YYYYMMDD-HHMMSS>/TASK.md`. Directory name = task ID.
+Tatr searches upward for `tasks/`. Use `-r ROOT` for another tree.
 
-## Common Flow
+## Rules
+
+- Prefer the CLI for task creation, metadata, lifecycle, records, claims, and checks.
+- Hand-edit task bodies and existing sibling records. Keep changes visible in the diff.
+- Treat `STATUS`, `FLOW STEP`, and `PLAN STATUS` as `tatr flow`-owned.
+- Record plan approval only with `tatr flow <id> --to PLANNED`.
+- Start implementation with `tatr flow <id> --to WORKING`. Requires: approved plan, closed dependencies, no foreign claim.
+- Create `SPIKE.md`, `DECISION.md`, `REVIEW.md`, and `RETRO.md` with `tatr scaffold`.
+- Treat `tatr proofs <id>` output as data. It never runs commands.
+- Expect `tatr check` exit 1 on findings. Lifecycle gates reuse its collectors.
+- Ask the user before `tatr ledger --disposition ...`. Never infer a disposition.
+- Delete only through `tatr rm <validated-id>`. Target: `tasks/<id>/` only.
+
+## Core flow
+
 ```bash
 tatr ls --sort priority
 tatr show <id>
@@ -36,13 +31,15 @@ tatr proofs <id>
 tatr check --ledger LESSONS.md
 ```
 
-## Load On Demand
-Read one only when its condition holds.
-- command syntax or subcommand behavior -> `commands.md`
-- planning, lifecycle state, gates, or status meaning -> `lifecycle.md`
-- sibling records, scaffolding, proofs, or ledger disposition -> `records.md`
-- `tatr check` findings, rule slugs, or exemptions -> `check-rules.md`
-- `tatr ls -f` filters -> `filtering.md`
-- manual `TASK.md` body or metadata edits -> `format.md`
-- claims, frontier, or parallel worktrees -> `claims.md`
-- pickup, finish, docs, lessons, or project workflow -> `workflow.md`
+## References
+
+| Need | Read |
+|---|---|
+| Commands and behavior | `commands.md` |
+| Lifecycle and gates | `lifecycle.md` |
+| Sibling records, proofs, ledger | `records.md` |
+| Check rules and exemptions | `check-rules.md` |
+| List filters | `filtering.md` |
+| Manual task edits | `format.md` |
+| Claims, frontier, worktrees | `claims.md` |
+| Planning, pickup, finish | `workflow.md` |

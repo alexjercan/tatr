@@ -1,30 +1,28 @@
-# Claims, Frontier, and Worktrees
+# Claims, Frontier, Worktrees
 
-`tatr frontier <id>` prints open work under an EPIC, one tab-separated row per
-child:
+## Frontier
+
+`tatr frontier <epic-id>` prints open children:
 
 ```text
-<STATE><TAB><id><TAB>p<priority><TAB><flow step><TAB><title>
+<READY|BLOCKED|CLAIMED><TAB><id><TAB>p<priority><TAB><flow-step><TAB><title>
 ```
 
-A blocked row appends `<TAB>blocked-by=<ids>`. STATE is `READY`, `BLOCKED`, or
-`CLAIMED`. CLOSED children and non-children are omitted. Order is deterministic:
-READY, BLOCKED, CLAIMED, then priority descending, then id ascending.
+BLOCKED rows add `blocked-by=<ids>`. Order: state, priority descending, ID
+ascending. Closed children and non-children are absent.
 
-`tatr claim <id>`, `tatr release <id>`, and `tatr claims` coordinate parallel
-sessions. A claim is an atomic `O_CREAT|O_EXCL` file, so one racing session
-wins and losers are told who holds it. `tatr flow <id> --to WORKING` refuses a
-task another session holds.
+## Claims
 
-Ownership is `TATR_SESSION`, defaulting to the working directory. It is never a
-pid because tatr is a one-shot CLI. `TATR_CLAIMS_DIR` defaults to
-`<tasks dir>/.claims`; point parallel worktrees at one shared directory or each
-tree will have isolated claims and the guard cannot work across them.
+- `tatr claim <id>`: atomic claim; one racing session wins.
+- `tatr release <id>`: release this session's claim.
+- `tatr release <id> --force`: recover another session's stale claim.
+- `tatr claims`: list claims.
+- Expiry: none.
+- Ownership: `TATR_SESSION`; default working directory. Never a PID.
+- Storage: `TATR_CLAIMS_DIR`; default `<tasks-dir>/.claims`.
 
-A session releases its own claim with no flag. `release --force` deliberately
-recovers another session's claim. Nothing expires automatically.
+`tatr flow <id> --to WORKING` refuses a foreign claim.
 
-When work will happen in a sprout worktree, create the worktree first and run
-`tatr new` inside it so the task file is born on the branch. If a task stub was
-unavoidably created in the shared main checkout, copy it into the worktree and
-remove the main-checkout stub as the first worktree act.
+Parallel worktrees require one shared `TATR_CLAIMS_DIR`; per-tree defaults do
+not coordinate. Create the worktree before `tatr new` so the task starts on its
+branch. If created in the shared checkout, move the stub to the worktree first.

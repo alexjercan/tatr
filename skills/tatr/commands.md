@@ -1,55 +1,42 @@
-# Tatr Commands
+# Commands
 
-```bash
-tatr [-r ROOT] <subcommand> [options]
+```text
+tatr [-r ROOT] <command> [options]
 
-tatr new "Title" [-p <priority>] [-t tag1,tag2] [-b <file>] [<metadata options>]
-tatr ls [-s created|priority|title] [-R] [-f '<query>']
-tatr show <id>
-tatr edit <id> [-T "New title"] [-p <priority>] [-t tag1,tag2] [<metadata options>]
-tatr flow <id> [-o|--to <STEP>]
-tatr rm <id>
-tatr scaffold <id> [SPIKE|DECISION|REVIEW|RETRO] [-l|--list] [-n|--dry-run]
-tatr proofs <id> [-k|--kind test|cmd|manual]
-tatr frontier <id>
-tatr context <id> [-P|--phase understand|plan|work|review|compound|resume|landing]
-tatr claim <id>
-tatr release <id> [-F|--force]
-tatr claims
-tatr check [<id>] [-L|--ledger <file>]
-tatr ledger [-L|--ledger <file>] [-s|--slug <slug> -D|--disposition PROMOTE|DEFER|RETIRE|ABSORBED
-            [-t|--task <id>] [-R|--reason <text>] [-T|--target <text>]]
+new "Title" [-p N] [-t tags] [-b file] [-k KIND] [-P id] [-d ids]
+ls [-s created|priority|title] [-R] [-f query]
+show <id>
+edit <id> [-T title] [-p N] [-t tags] [-k KIND] [-P id] [-d ids]
+flow <id> [-o|--to STEP]
+rm <id>
+scaffold <id> [TASK|SPIKE|DECISION|REVIEW|RETRO] [-l|--list] [-n|--dry-run]
+proofs <id> [-k|--kind test|cmd|manual]
+frontier <id>
+context <id> [-P|--phase understand|plan|work|review|compound|resume|landing]
+claim <id>
+release <id> [-F|--force]
+claims
+check [id] [-L|--ledger file]
+ledger [-L file] [-s slug -D PROMOTE|DEFER|RETIRE|ABSORBED ...]
 ```
 
-`<metadata options>`, shared by `new` and `edit`:
+Use `tatr <command> --help` for exact flags.
 
-```bash
--k|--kind TASK|EPIC|STORY|SPIKE
--P|--parent <id>
--d|--depends-on <id>
-```
+| Command | Behavior |
+|---|---|
+| `new` | Creates `tasks/<id>/TASK.md`; defaults to OPEN, priority 0, TASK, BACKLOG, DRAFT. `-b -` reads stdin. Same-second collision fails. Validates relationships before writing. |
+| `ls` | Prints path, priority, kind, flow step, tags, title. `-R` finds nested `tasks/`. Malformed records go to stderr and cause non-zero exit. |
+| `show` | Prints the full record and clickable path. |
+| `edit` | Changes passed fields only; preserves body. Tags and dependencies replace their lists. Empty `-P` or `-d` clears them. |
+| `flow` | Takes the next edge or named valid edge. Refusal leaves the record unchanged. |
+| `rm` | Resolves a validated HUID, then deletes only its task directory. |
+| `scaffold` | Creates a missing SPIKE, DECISION, REVIEW, or RETRO record. TASK is listed but refused: use `new`. Never overwrites. `--list` reports presence; `--dry-run` writes nothing. |
+| `proofs` | Prints DoD proofs as tab-separated data. Never executes them. |
+| `frontier` | Lists open Epic children by readiness. |
+| `context` | Lists phase-relevant paths as `path<TAB>present|missing`; never reads contents. |
+| `claim`, `release`, `claims` | Coordinate parallel sessions. |
+| `check` | Prints `id: rule: detail`; exit 1 on findings, 0 with no output when clean. |
+| `ledger` | Lists undecided promotions or records the user's disposition in the ledger only. |
 
-`STATUS`, `FLOW STEP`, and `PLAN STATUS` are not metadata options. They are
-written only by `tatr flow`; `new` and `edit` reject `-s`, `-f`, and `-S`.
-
-- `new` creates `tasks/<id>/TASK.md` and prints the id. Defaults are `OPEN`,
-  priority 0, `KIND: TASK`, `FLOW STEP: BACKLOG`, `PLAN STATUS: DRAFT`, and no
-  relationships. `-b/--body-file <file>` seeds the description body; `-`
-  reads stdin. Same-second id collisions fail instead of overwriting.
-  Relationship flags are validated before creating anything.
-- `ls` prints `<filepath>: [PRIORITY: N, KIND: K, FLOW STEP: F, TAGS: ...]
-  Title`. Sort by `created`, `priority`, or `title`; `-R` recurses into nested
-  `tasks/`; `-f` uses the filter language.
-- `show <id>` prints the whole serialized record with a clickable path.
-- `edit <id>` updates only passed fields and preserves the body. `-t` and `-d`
-  replace lists; empty `-P ""` or `-d ""` clears optional relationships.
-- `flow <id>` moves the lifecycle forward, or to `--to <STEP>`, refusing
-  unmet gates without modifying the file.
-- `context <id> --phase <phase>` prints only artifact paths needed for the
-  phase as `<path><TAB>present|missing`, never contents. Phases are
-  `understand`, `plan`, `work`, `review`, `compound`, `resume`, and `landing`.
-  `understand`, `plan`, and `resume` also include the parent EPIC `TASK.md`.
-- `rm <id>` deletes the task directory after resolving a validated id.
-- `check [<id>]` prints findings as `<id>: <rule>: <detail>`, exits 1 on any
-  finding, and exits 0 with no output when clean. `--ledger` also checks the
-  lessons ledger.
+Workflow fields are not `new` or `edit` options. Use `flow` for `STATUS`,
+`FLOW STEP`, and `PLAN STATUS`.

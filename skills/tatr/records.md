@@ -1,58 +1,53 @@
-# Tatr Records
+# Records
 
-Sibling records live next to `TASK.md`: `SPIKE.md`, `DECISION.md`,
-`REVIEW.md`, `RETRO.md`, and optional notes such as `NOTES.md`.
+Sibling records: `SPIKE.md`, `DECISION.md`, `REVIEW.md`, `RETRO.md`; optional
+free-form notes such as `NOTES.md`.
 
-Use `tatr scaffold <id> <RECORD>` for `SPIKE`, `DECISION`, `REVIEW`, and
-`RETRO`. It writes from the schema table in `tatr.c`, the same table
-`tatr check` validates. It prints `<path><TAB><RECORD>`, refuses to overwrite
-an existing record, and has no `--force`. Edit existing records by hand so the
-diff shows the repair.
+Create schema records with `tatr scaffold <id> <kind>`. The same table powers
+`tatr scaffold`, `tatr check`, and lifecycle gates. Existing file: edit by hand;
+no overwrite flag.
 
-`tatr scaffold <id> --list` prints each record kind with its path and
-`present` or `missing`. `--dry-run` prints what would be written.
+## Required shapes
 
-## Schema Shapes
+| Record | Header | Sections |
+|---|---|---|
+| `TASK.md` | `# title`; typed metadata from `format.md` | TASK/STORY: Steps, Definition of Done. EPIC: Done Means, Child Tasks. SPIKE: Question. |
+| `SPIKE.md` | `# Spike:`; DATE, STATUS, TAGS | Question, Context, Options considered, Recommendation, Open questions, Next steps |
+| `DECISION.md` | `# Decision:`; DATE, STATUS, TASK, TAGS | Context, Decision, Alternatives considered, Consequences |
+| `REVIEW.md` | `# Review:`; TASK, BRANCH | Sequential `## Round N`; REVIEWER; VERDICT; findings |
+| `RETRO.md` | `# Retro:`; TASK, BRANCH, REVIEW ROUNDS | What went well, What went wrong, What to improve next time, Action items |
 
-All records open with a required title prefix and then required `- KEY: `
-header fields with non-empty values. Section headings must each have at least
-one non-blank line under them.
+Required fields and sections need non-empty content. Defaults: SPIKE status
+`RECOMMENDED`; DECISION status `ACCEPTED`.
 
-- `TASK.md`: title prefix `# `. Required metadata is the typed `TASK.md`
-  header from `format.md`. Required body sections are kind-specific:
-  `TASK`/`STORY` -> `## Steps`, `## Definition of Done`; `EPIC` ->
-  `## Done Means`, `## Child Tasks`; `SPIKE` -> `## Question`.
-- `SPIKE.md`: title prefix `# Spike: `. Fields: `- DATE: `, `- STATUS: `,
-  `- TAGS: `. Sections: `## Question`, `## Context`,
-  `## Options considered`, `## Recommendation`, `## Open questions`,
-  `## Next steps`. Scaffold defaults `STATUS` to `RECOMMENDED`.
-- `DECISION.md`: title prefix `# Decision: `. Fields: `- DATE: `,
-  `- STATUS: `, `- TASK: `, `- TAGS: `. Sections: `## Context`,
-  `## Decision`, `## Alternatives considered`, `## Consequences`. Scaffold
-  defaults `STATUS` to `ACCEPTED`.
-- `REVIEW.md`: title prefix `# Review: `. Fields: `- TASK: `, `- BRANCH: `.
-  Body is round-structured: `## Round 1`, `- REVIEWER: `,
-  `- VERDICT: APPROVE|REQUEST_CHANGES`, and findings shaped as
-  `- [ ] R<round>.<index> (BLOCKER|MAJOR|MINOR|NIT) file:line - detail`.
-- `RETRO.md`: title prefix `# Retro: `. Fields: `- TASK: `, `- BRANCH: `,
-  `- REVIEW ROUNDS: `. Sections: `## What went well`,
-  `## What went wrong`, `## What to improve next time`, `## Action items`.
+Review values:
 
-`tatr proofs <id>` prints each `## Definition of Done` proof as:
+- Verdict: `APPROVE|REQUEST_CHANGES`.
+- Finding: `- [ ] R<round>.<index> (BLOCKER|MAJOR|MINOR|NIT) file:line - detail`.
+- Round and finding numbers: start at 1, remain contiguous.
+
+## Proofs
+
+`tatr proofs <id>` prints:
 
 ```text
-<n><TAB><kind><TAB><text>
+<n><TAB><test|cmd|manual><TAB><text>
 ```
 
-Kinds are `test`, `cmd`, and `manual`. Nothing is executed. A `cmd:` proof's
-shell text round-trips verbatim and running it is the caller's decision.
-Whitespace collapses only when it contains a newline or tab, so each output
-line remains three fields while intra-line spacing survives.
+- Reads `## Definition of Done` proof markers.
+- `-k` selects one kind.
+- Never executes commands.
+- Preserves intra-line spacing; collapses newline or tab runs for stable fields.
 
-`tatr ledger` lists promotions awaiting a user decision from `LESSONS.md` by
-default. With `--slug` plus `--disposition`, it records the decision inside the
-entry's count parens and writes only the ledger file. Ask the user before
-calling it. PROMOTE requires `--task <id>` naming an existing task. DEFER and
-RETIRE require `--reason`; ABSORBED requires `--target`. DEFER may be revisited
-after the lesson count passes the deferred count; other dispositions are
-settled.
+## Lessons ledger
+
+- `tatr ledger`: list promotions awaiting a user decision.
+- `--slug` plus `--disposition`: record the user's decision in the ledger only.
+- Ask first. Never infer PROMOTE, DEFER, RETIRE, or ABSORBED.
+
+| Disposition | Requires |
+|---|---|
+| PROMOTE | `--task <existing-id>` |
+| DEFER | `--reason <text>`; returns to the queue after a later recurrence |
+| RETIRE | `--reason <text>` |
+| ABSORBED | `--target <tool-or-template>` |

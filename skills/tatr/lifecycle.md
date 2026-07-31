@@ -1,40 +1,33 @@
-# Tatr Lifecycle
-
-`PLAN STATUS: APPROVED` is durable proof that the user accepted the plan gate.
-It is written only by `tatr flow <id> --to PLANNED`. Do not treat checked
-`## Steps` items as approval. `NOT_REQUIRED` is for pre-flow history and is
-written by hand, not the CLI.
-
-Eight lifecycle edges exist:
+# Lifecycle
 
 ```text
-BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
-                                          ^                      |
-                                          |                      v
-                                          +------- (fix) --- COMPOUNDING -> DONE
+BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING -> COMPOUNDING -> DONE
 ```
 
-A bare `tatr flow <id>` takes the single successor of the current step.
-`REVIEWING` defaults to `COMPOUNDING`; the fix loop is
-`tatr flow <id> --to WORKING`. `DONE` is terminal.
+- Bare `tatr flow <id>`: next step.
+- Review fix loop: `tatr flow <id> --to WORKING`.
+- `DONE`: terminal.
+- Invalid, skipped, or backward edge: refusal; no write.
 
-`STATUS` is derived from the step:
+## Derived status
 
-- `BACKLOG`, `UNDERSTANDING`, `PLANNING`, `PLANNED` -> `OPEN`
-- `WORKING`, `REVIEWING`, `COMPOUNDING` -> `IN_PROGRESS`
-- `DONE` -> `CLOSED`
+| Flow step | Status |
+|---|---|
+| BACKLOG through PLANNED | OPEN |
+| WORKING through COMPOUNDING | IN_PROGRESS |
+| DONE | CLOSED |
 
-Gated edges:
+## Gates
 
-- `PLANNING -> PLANNED`: the plan gate; writes `PLAN STATUS: APPROVED`.
-- `PLANNED -> WORKING`: needs approval, closed dependencies, and no conflicting
-  claim.
-- `REVIEWING -> COMPOUNDING`: needs a schema-clean `REVIEW.md` whose latest
-  verdict is `APPROVE` with no unticked `BLOCKER` or `MAJOR` finding.
-- `COMPOUNDING -> DONE`: needs all earlier gates, zero unchecked `## Steps`
-  items, a schema-clean `RETRO.md`, and a valid `DECISION.md` status when that
-  sibling exists.
+| Edge | Requires |
+|---|---|
+| PLANNING -> PLANNED | Valid plan. Writes `PLAN STATUS: APPROVED`; sole approval marker. |
+| PLANNED -> WORKING | Approved plan, closed dependencies, no claim owned by another session. |
+| REVIEWING -> COMPOUNDING | Schema-clean `REVIEW.md`; latest verdict APPROVE; no open BLOCKER or MAJOR finding. |
+| COMPOUNDING -> DONE | All earlier gates; all `## Steps` checked; schema-clean `RETRO.md`; valid `DECISION.md` status when present. |
 
-`KIND: EPIC` containers are exempt from plan approval, review, retro, and
-unchecked-Steps requirements, matching `tatr check`. Their dependencies and
-`DECISION.md` are not exempt.
+Checked steps do not prove approval. `PLAN STATUS: NOT_REQUIRED` exists only
+for pre-flow history and requires a manual repair.
+
+`KIND: EPIC` exemptions: plan approval, review, retro, unchecked Steps.
+Still enforced: dependencies and any present `DECISION.md`.

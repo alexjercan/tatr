@@ -1,6 +1,6 @@
-# Task File Format
+# Task Format
 
-Keep the metadata header exact; tatr owns it:
+Use `tatr new` and `tatr edit` for metadata. Hand-edit body content.
 
 ```markdown
 # Task Title
@@ -14,65 +14,47 @@ Keep the metadata header exact; tatr owns it:
 - PARENT: 20260730-153122
 - DEPENDS ON: 20260730-153325, 20260730-154745
 
-<free-form description body>
+<body>
 ```
 
-The first six fields are required and always written back in that order.
-`PARENT` and `DEPENDS ON` are optional and appear only when set.
+- First six fields: required, fixed order.
+- PARENT and DEPENDS ON: optional, same task tree only.
+- Values: exact and case-sensitive.
+- Priority: non-negative; higher = more important relative to this backlog.
 
-Valid values are exact and case-sensitive:
+| Field | Values |
+|---|---|
+| STATUS | OPEN, IN_PROGRESS, CLOSED |
+| KIND | TASK, EPIC, STORY, SPIKE |
+| FLOW STEP | BACKLOG, UNDERSTANDING, PLANNING, PLANNED, WORKING, REVIEWING, COMPOUNDING, DONE |
+| PLAN STATUS | DRAFT, APPROVED, NOT_REQUIRED |
 
-- `STATUS`: `OPEN|IN_PROGRESS|CLOSED`
-- `KIND`: `TASK|EPIC|STORY|SPIKE`
-- `FLOW STEP`: `BACKLOG|UNDERSTANDING|PLANNING|PLANNED|WORKING|REVIEWING|COMPOUNDING|DONE`
-- `PLAN STATUS`: `DRAFT|APPROVED|NOT_REQUIRED`
+`flow` owns STATUS, FLOW STEP, and PLAN STATUS. Relationship writes validate
+existence, STORY parent requirements, and EPIC parent kind before mutation.
 
-Priority is a non-negative integer; higher means more important. Slot it
-relative to the backlog, not an absolute scale. Check project tag conventions
-before tagging.
+Body bytes after metadata remain opaque and preserved. Blank lines between
+fields normalize on write. Empty keys such as `- PARENT:` fail parsing.
+Legacy records without KIND or with `## Flow State` require manual repair.
+`ls` skips malformed records, reports them on stderr, and exits non-zero.
 
-`PARENT` and `DEPENDS ON` hold task ids from the same `tasks/` tree. A parent
-in another repository belongs in body prose. Creation and edits that touch
-relationships validate the referenced tasks, STORY parent requirements, and
-EPIC parent kind before writing.
-
-There is no migration path from the older format that had no `KIND` line and
-kept flow state under `## Flow State`. Such records are rejected; correct them
-by hand.
-
-Everything after the metadata block is opaque body text and is preserved byte
-for byte. Blank lines and leading whitespace between fields are tolerated and
-normalized on the next write. A key with no value, such as `- PARENT:`, is an
-error, not body text.
-
-tatr never writes a record it cannot read back: `new` and `edit` re-parse the
-serialized bytes before writing and fail without touching disk if the result
-would not parse.
-
-`tatr ls` skips malformed records, names them on stderr, and exits non-zero so
-one broken record cannot hide the rest of the backlog.
-
-For non-trivial tasks, use:
+Suggested non-trivial body:
 
 ```markdown
 ## Story
 
-As a <who>, I want <what>, so that <why>.
+<cold-start context and outcome>
 
 ## Steps
 
-- [ ] Concrete, verifiable actions.
+- [ ] Concrete action.
 
 ## Definition of Done
 
 - Observable outcome. (test: <name>)
 - Observable outcome. (cmd: <command>)
-- Observable outcome. (manual: <what the user confirms>)
+- Observable outcome. (manual: <user check>)
 
 ## Notes
 
-- Constraints, file pointers, sequencing, and assumptions.
+- Constraints, paths, sequencing, assumptions.
 ```
-
-Prefer `tatr edit` for metadata and `tatr new -b` for the initial body. Hand
-edit later body updates.
