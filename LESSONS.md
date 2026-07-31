@@ -94,6 +94,16 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
   infinite recursion, not exponential work; decide whether a graph walk may
   revisit a node and carry a visited set (12.4s to 0.005s on 78 tasks).
   20260730-154740
+- `mutation-test-the-new-guard` (x4, PROMOTED 2026-07-31 -> AGENTS.md Testing):
+  delete each new guard's SIDE EFFECT one at a time and watch its own test go
+  red, before review; a guard no mutation kills, or a mutant that hangs instead
+  of refusing, is the finding. 20260730-154657, 20260730-154745,
+  20260730-154740, 20260730-154756
+- `test-first-for-check-messages` (x3, PROMOTED 2026-07-31 -> AGENTS.md
+  Testing): for a check rule, write the assertion with its exact expected
+  message before the emitting code, so the format is designed from the
+  assertion not reverse-engineered into it. 20260722-152010, 20260725-111031,
+  20260730-153325
 - `serialize-build-artifact-checks` (x1): do not parallelize verification
   commands that clean or rewrite the same build outputs in one worktree.
   20260728-095149
@@ -132,15 +142,3 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 ## Pending promotions (3+ occurrences, user decides)
 
-- `mutation-test-the-new-guard` (x3, PROMOTE 2026-07-31 -> 20260731-002334):
-  delete each new guard one at a time and
-  watch its own test go red, BEFORE review - every gap it found this way was
-  cheaper than a review round. The mutation must remove the SIDE EFFECT, not
-  just the return value: `0 * report(...)` still prints.
-  20260730-154657, 20260730-154745, 20260730-154740
-
-- `test-first-for-check-messages` (x3, PROMOTE 2026-07-31 -> 20260731-002339):
-  for a check rule, write the test with
-  its exact expected message before the emitting code, so the format is designed
-  from the assertion not reverse-engineered into it. 20260722-152010,
-  20260725-111031, 20260730-153325

@@ -87,6 +87,49 @@ set -e
 
 To capture a generated task ID in a test, use the `new_task_id` helper.
 
+### Writing a check rule
+
+Write the `checker.sh` assertion carrying the rule's EXACT expected message
+BEFORE the code that emits it. The format is then designed from the assertion,
+instead of the assertion being reverse-engineered into whatever the code
+happened to print - which is how a test ends up agreeing with a message nobody
+chose. Writing it first also proves the assertion is a real one: it fails
+before the rule exists, so you have seen it go red.
+
+Use `grep -qx` to match a rule's output as a whole line; a bare `grep -q`
+passes on a substring of a longer, different finding.
+
+Watch fixture names when a test asserts a rule does NOT fire. A negative
+assertion like `! echo "$output" | grep -q "decided-lesson"` is broken by any
+OTHER fixture whose name contains that slug: the grep matches the wrong entry,
+the `!` turns it false, and the test fails for a reason that has nothing to do
+with the rule. So fixture names must not be substrings of one another.
+`test_ledger_pending_requires_disposition` is a live example - its undecided
+entry is `open-lesson`, and naming it `undecided-lesson` instead would trip the
+`! grep -q "decided-lesson"` assertion meant for a different entry.
+
+### Mutation-test every new guard
+
+Before review, delete each new guard's SIDE EFFECT one at a time, rebuild, and
+confirm that guard's OWN test goes red. Removing only the return value is not a
+mutation - `0 * report(...)` still prints, so the assertion still passes.
+
+Two results are findings, not noise:
+
+- **No test dies.** The guard is unverified. Either it needs an assertion, or
+  it is redundant with a neighbouring check - in which case say so in the
+  record rather than leaving the mutation-test step ticked as if it held.
+- **The mutant hangs, corrupts data, or crashes** instead of refusing cleanly.
+  The code below was assuming a precondition that only this guard enforced, and
+  nothing asserts it at the point of use. Assert it there too. In
+  `20260730-154756` a malformed-entry refusal was the only thing keeping an
+  entry with NULL splice offsets out of pointer arithmetic that wrapped to a
+  runaway length; deleting the guard hung the suite instead of failing it.
+
+Revert the mutation in the same step that observes the red. A deliberately
+broken build that outlives its step is indistinguishable from a bug to whoever
+picks the branch up next.
+
 ## Code conventions
 
 - Keep it a single file. New commands go in `tatr.c`; do not split into multiple
