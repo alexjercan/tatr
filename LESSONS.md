@@ -118,6 +118,13 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `revert-the-mutation-in-the-same-step` (x1): a deliberately broken build left
   in a worktree is indistinguishable from a bug to the next session; revert in
   the step that observes the red. 20260730-154756
+- `carried-prose-is-a-new-claim` (x1): text moved from one document into another
+  - Unreleased into a release, a task body into a README - is re-published, not
+  re-reviewed; check its counts, versions and paths at the move. 20260731-145621
+- `offer-the-guard-do-not-assume-it` (x1): when the ask is a release, a bump or
+  a doc change, plan the smallest thing that meets it and offer extra machinery
+  as an option; a test the user has to cut is planning cost spent twice.
+  20260731-145621
 
 ## Domain lessons (project-specific)
 
@@ -146,7 +153,7 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 
 ## Pending promotions (3+ occurrences, user decides)
 
-- `counts-come-from-the-diff` (x6, PROMOTE 2026-07-31 -> 20260731-094524)
+- `counts-come-from-the-diff` (x7, PROMOTE 2026-07-31 -> 20260731-094524)
   -> tatr (tool), falling back to the nix.dotfiles close-out template: work
   reports and close records must cite what the diff SHOWS - numbers and
   identifiers alike - not what a summary of it says. The sixth occurrence was
@@ -170,4 +177,9 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
   promote; `tatr check --ledger` resolves a PROMOTE target only inside its own
   `tasks/` tree, so the entry cannot live in one repository and its task in
   another. The recurrences below are nix.dotfiles task IDs.
-  20260720-171843, 20260720-171836, 20260730-142540, 20260730-154955, 20260730-155003
+  The seventh occurrence was in this repository and in prose rather than a
+  record: "Fourteen flow-artifact rules" above a list of thirteen, carried
+  verbatim from `## Unreleased` into the v0.2.0 release notes. A count is owed
+  to the thing it counts even when nothing was diffed.
+  20260720-171843, 20260720-171836, 20260730-142540, 20260730-154955,
+  20260730-155003, 20260731-145621
