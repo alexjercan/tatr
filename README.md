@@ -81,12 +81,13 @@ nix eval .#skills.tatr
 ## AI Agent Skill
 
 This repository ships a `tatr` skill for AI-capable tools that understand
-skill folders. The skill lives at `skills/tatr/` and teaches agents how to use
-the CLI, task file format, `tatr check`, and the project workflow around
-TASK.md, REVIEW.md, RETRO.md, and lessons ledgers.
+skill folders. The skill lives at `skills/tatr/`. Its `SKILL.md` is a short
+entrypoint, with command syntax, task file format, `tatr check`, lifecycle,
+records, claims, and workflow details split into referenced markdown files.
 
 Downstream flakes can consume the skill through the exported `skills.tatr`
-flake output and install it into their agent skills directory.
+flake output, which exports the full skill directory, and install it into their
+agent skills directory.
 
 ### Manual Build
 

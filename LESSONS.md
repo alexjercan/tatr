@@ -71,6 +71,10 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
 - `paste-transcripts-from-a-real-run` (x1): a command transcript in a doc is a
   claim; paste it from a run in the same session rather than typing what you
   expect. Three of one round's seven findings were invented output. 20260730-154745
+- `stage-before-flake-source-proof` (x1): when a flake output should include
+  newly added files, stage them before treating `nix eval` or the store path as
+  a proof; untracked files are not part of the exported source.
+  20260731-115401
 - `a-passing-suite-is-not-a-covered-property` (x1): before trusting N/N on a
   cross-cutting property (warning-cleanliness, leaks, portability), read the
   test that supposedly covers it - the Windows test asserted a PE artifact and
@@ -167,4 +171,3 @@ git history keeps them); new per-task retros live in tasks/<id>/RETRO.md.
   `tasks/` tree, so the entry cannot live in one repository and its task in
   another. The recurrences below are nix.dotfiles task IDs.
   20260720-171843, 20260720-171836, 20260730-142540, 20260730-154955, 20260730-155003
-
