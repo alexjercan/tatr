@@ -61,9 +61,19 @@ jobs:
             seen { print }
           ' CHANGELOG.md > "$body_file"
           test -s "$body_file"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "tatr v${version}" \
-            --notes-file "$body_file" \
-            "dist/tatr-${version}-linux-x86_64.tar.gz" \
-            "dist/tatr-${version}-windows-x86_64.zip" \
-            dist/SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "tatr v${version}" \
+              --notes-file "$body_file"
+            gh release upload "$GITHUB_REF_NAME" --clobber \
+              "dist/tatr-${version}-linux-x86_64.tar.gz" \
+              "dist/tatr-${version}-windows-x86_64.zip" \
+              dist/SHA256SUMS
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "tatr v${version}" \
+              --notes-file "$body_file" \
+              "dist/tatr-${version}-linux-x86_64.tar.gz" \
+              "dist/tatr-${version}-windows-x86_64.zip" \
+              dist/SHA256SUMS
+          fi
