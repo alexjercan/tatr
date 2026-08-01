@@ -28,7 +28,7 @@ tatr show <id>
 tatr context <id> --phase work
 tatr flow <id> --to WORKING
 tatr proofs <id>
-tatr check --ledger LESSONS.md
+tatr check
 ```
 
 ## References

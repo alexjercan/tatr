@@ -25,7 +25,6 @@ primarily a toy project inspired by Tsoding's streams.
 - **Epic graph**: `PARENT` and `DEPENDS ON` are validated as a graph - dangling links, duplicates, self-links and cycles are findings, not silent waits
 - **Parallel sessions**: `tatr frontier` shows the open work under an Epic, and `tatr claim` divides it between sessions with an atomic filesystem claim
 - **Phase context**: `tatr context <id> --phase <phase>` prints only the artifact paths one flow phase needs
-- **Decided promotions**: a lessons ledger's pending promotions each owe an explicit user disposition, recorded by `tatr ledger` - a promotion is handed to a task, never applied out of the ledger
 - **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
 - **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
 - **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
@@ -397,7 +396,6 @@ anything was found and 0 (silently) when clean:
 ```bash
 tatr check                    # lint every task
 tatr check 20260331-144635    # lint one task
-tatr check --ledger LESSONS.md   # also lint a lessons ledger
 ```
 
 **Default rules:**
@@ -517,84 +515,6 @@ same way, because every finding routes through the same reporter. An entry that
 never fires is itself a finding (`unused-exemption`) on a full scan, so the list
 cannot rot. New work does not get exemptions: scaffold the record and it is
 schema-clean from the first byte.
-
-**Options:**
-- `-L, --ledger <FILE>`: also lint a lessons ledger (path relative to the root)
-  for `promotion-stalled`, `promotion-awaiting-decision`, `bad-disposition` and
-  `dangling-promotion-task` - see [Deciding Lesson Promotions](#deciding-lesson-promotions)
-
-### Deciding Lesson Promotions
-
-A lessons ledger records each lesson with an occurrence count. At three
-occurrences the lesson moves under a `## Pending promotions` heading, where it
-waits for the user to decide what should happen to it. `tatr ledger` is how that
-decision gets asked for and recorded:
-
-```bash
-tatr ledger                       # what is waiting on a decision
-tatr ledger -L docs/LESSONS.md    # a ledger somewhere other than LESSONS.md
-```
-
-```console
-$ tatr ledger
-reproduce-before-fixing	x3	awaiting-decision
-name-the-invariant-first	x4	awaiting-decision
-```
-
-The decision itself is one of four dispositions, written into the entry's own
-count parens:
-
-```bash
-tatr ledger --slug <slug> --disposition PROMOTE  --task 20260731-101010
-tatr ledger --slug <slug> --disposition DEFER    --reason "one more sighting first"
-tatr ledger --slug <slug> --disposition RETIRE   --reason "the guard makes it impossible"
-tatr ledger --slug <slug> --disposition ABSORBED --target "the Makefile build guard"
-```
-
-```markdown
-- `slug` (x3, PROMOTE 2026-07-30 -> 20260731-101010): <lesson text>
-- `slug` (x3, DEFER 2026-07-30 at x3: <reason>): <lesson text>
-- `slug` (x3, RETIRE 2026-07-30: <reason>): <lesson text>
-- `slug` (x3, ABSORBED 2026-07-30 by <target>): <lesson text>
-```
-
-**`tatr ledger` writes the ledger file and nothing else.** It never edits the
-doc, tool, template or skill a lesson is promoted into. PROMOTE therefore
-requires `--task <id>` naming a task that exists: the promoted change is that
-task's work and goes through the ordinary plan, review, retro and close guards,
-rather than being applied straight out of the ledger.
-
-A **DEFER records the count it was taken at**. It buys quiet only until the
-lesson recurs - once the live count passes the recorded one the deferral no
-longer covers the entry, `promotion-awaiting-decision` fires again, and that
-entry (alone among the four) may be decided a second time. Every other recorded
-disposition is settled: there is no `--force`, and changing a decision that was
-already made is a hand edit, in the diff.
-
-**Rules under `## Pending promotions`:**
-- `promotion-awaiting-decision`: an entry with a bare `(xN)` count, or one whose
-  DEFER was taken at a count the entry has since passed
-- `bad-disposition`: an annotation that is not one of the four forms, or that is
-  missing its `YYYY-MM-DD` date, its reason or its target
-- `dangling-promotion-task`: a PROMOTE naming something that is not a task ID,
-  or a task with no `TASK.md`
-
-This grammar is validated **only** under that heading. A lesson decided in the
-past and moved back to its own section keeps the applied markers
-`promotion-stalled` exempts (`PROMOTED <date> -> <target>`, `absorbed by
-<target>, <date>`, `RETIRED <date>: <reason>`), so adopting the rule does not
-require rewriting a ledger's history.
-
-**Options:**
-- `-L, --ledger <FILE>`: the ledger to read (default: `LESSONS.md`, relative to
-  the root)
-- `-s, --slug <SLUG>`: the lesson to record a decision for; without it, `ledger`
-  lists every pending entry as `<slug><TAB>x<count><TAB><state>`
-- `-D, --disposition <PROMOTE|DEFER|RETIRE|ABSORBED>`: the decision
-- `-t, --task <ID>`: PROMOTE only - the task that will make the change
-- `-R, --reason <TEXT>`: DEFER and RETIRE only
-- `-T, --target <TEXT>`: ABSORBED only - the tool or template that made the
-  lesson unnecessary
 
 ### Scaffolding Sibling Records
 

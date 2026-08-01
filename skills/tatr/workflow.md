@@ -18,11 +18,10 @@
 
 ## Finish
 
-1. Run project tests and `tatr check --ledger LESSONS.md` when available.
-2. Ask the user about `promotion-awaiting-decision`; never choose for them.
-3. Record what/why, tradeoffs, bugs/fixes, and next-time improvement in the repository's declared record.
-4. Move WORKING -> REVIEWING -> COMPOUNDING -> DONE. Fix-loop to WORKING when needed.
-5. Commit task records with the related change.
+1. Run project tests and `tatr check`.
+2. Record what/why, tradeoffs, bugs/fixes, and next-time improvement in the repository's declared record.
+3. Move WORKING -> REVIEWING -> COMPOUNDING -> DONE. Fix-loop to WORKING when needed.
+4. Commit task records with the related change.
 
 ## Gotchas
 

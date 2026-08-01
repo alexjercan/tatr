@@ -11,7 +11,6 @@ Project-specific guidance. Global `AGENTS.md` still applies.
 - Build: `Makefile`, Nix toolchain.
 - Tests: `checker.sh` integration suite.
 - User docs: `README.md`.
-- Durable lessons: `LESSONS.md`; read before work.
 
 ## Build
 
@@ -71,4 +70,5 @@ nix develop -c ./checker.sh --memcheck
 - Examples/retention: `checker.sh`; retain task-specific evidence in `tasks/<id>/`.
 - Domain docs: `README.md`; implementation truth in `tatr.c`.
 - Research/network: offline-first; task research belongs in its scaffolded `SPIKE.md`.
-- Checks/records: `checker.sh`, `tatr check --ledger LESSONS.md`, and scaffolded task records.
+- Checks/records: `checker.sh`, `tatr check`, and scaffolded task records.
+- Knowledge: central repo `/home/alex/personal/agent-knowledge`; project=tatr; tags=tasks,c,workflow,agents. Advisory only; failed writes stay in RETRO.
