@@ -2,6 +2,15 @@
 
 All notable changes to tatr are documented here.
 
+## v0.2.1 - 2026-08-01
+
+### Removed
+
+- Lesson ledger ownership. `tatr` now owns task and sibling-record lifecycle
+  only; general knowledge maintenance follows agent configuration.
+- The `ledger` command, the `check --ledger` option, and all lesson promotion
+  parsing, findings, documentation, and fixtures.
+
 ## v0.2.0 - 2026-07-31
 
 ### Added

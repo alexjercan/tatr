@@ -1,7 +1,7 @@
 # Check Rules
 
 `tatr check [id]` prints `id: rule: detail`. Any finding -> exit 1. Clean ->
-exit 0 with no output. `--ledger FILE` also checks lesson promotions.
+exit 0 with no output.
 
 ## Records and review
 
@@ -37,15 +37,6 @@ exit 0 with no output. `--ledger FILE` also checks lesson promotions.
 | `closed-unchecked` | CLOSED non-EPIC has unchecked Steps. |
 | `closed-missing-review`, `closed-missing-retro` | CLOSED non-EPIC lacks record. |
 | `closed-not-approved` | CLOSED non-EPIC lacks latest APPROVE verdict. |
-
-## Ledger
-
-| Rule | Finding |
-|---|---|
-| `promotion-stalled` | x3+ lesson remains outside Pending promotions without a lifecycle marker. |
-| `promotion-awaiting-decision` | Pending entry has bare count, or recurrence passed its DEFER count. |
-| `bad-disposition` | Pending annotation violates disposition grammar. |
-| `dangling-promotion-task` | PROMOTE target is missing. |
 
 ## Scope and exemptions
 

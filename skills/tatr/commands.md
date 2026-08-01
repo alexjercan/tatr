@@ -16,8 +16,7 @@ context <id> [-P|--phase understand|plan|work|review|compound|resume|landing]
 claim <id>
 release <id> [-F|--force]
 claims
-check [id] [-L|--ledger file]
-ledger [-L file] [-s slug -D PROMOTE|DEFER|RETIRE|ABSORBED ...]
+check [id]
 ```
 
 Use `tatr <command> --help` for exact flags.
@@ -36,7 +35,6 @@ Use `tatr <command> --help` for exact flags.
 | `context` | Lists phase-relevant paths as `path<TAB>present|missing`; never reads contents. |
 | `claim`, `release`, `claims` | Coordinate parallel sessions. |
 | `check` | Prints `id: rule: detail`; exit 1 on findings, 0 with no output when clean. |
-| `ledger` | Lists undecided promotions or records the user's disposition in the ledger only. |
 
 Workflow fields are not `new` or `edit` options. Use `flow` for `STATUS`,
 `FLOW STEP`, and `PLAN STATUS`.
