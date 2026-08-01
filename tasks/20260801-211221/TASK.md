@@ -1,10 +1,10 @@
 # Remove lesson ledger ownership from tatr
 
-- STATUS: IN_PROGRESS
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: tatr, knowledge, lessons, migration, tooling
 - KIND: TASK
-- FLOW STEP: WORKING
+- FLOW STEP: DONE
 - PLAN STATUS: APPROVED
 
 ## Story
