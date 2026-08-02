@@ -27,24 +27,29 @@ exit 0 with no output.
 
 | Rule | Finding |
 |---|---|
-| `malformed-header` | Missing/unreadable TASK or invalid exact metadata token. |
+| `malformed-header` | Missing/unreadable TASK, invalid exact metadata token, or a v0 record still carrying `- FLOW STEP: `. |
 | `missing-parent`, `missing-dependency` | Referenced task missing. |
 | `self-parent`, `self-dependency` | Task references itself. |
 | `duplicate-dependency` | Repeated dependency. |
 | `parent-cycle`, `dependency-cycle` | Link cycle. |
 | `bad-epic-relationship` | Parent is not an EPIC, or STORY lacks a parent. |
-| `unplanned-in-progress` | IN_PROGRESS non-EPIC lacks approved plan. |
-| `closed-unchecked` | CLOSED non-EPIC has unchecked Steps. |
-| `closed-missing-review`, `closed-missing-retro` | CLOSED non-EPIC lacks record. |
-| `closed-not-approved` | CLOSED non-EPIC lacks latest APPROVE verdict. |
+| `inconsistent-gates` | Non-EPIC cursor past an activity whose gate is not in GATES. Covers work started without the PLAN gate. |
+| `closed-unchecked` | RESOLUTION: DONE non-EPIC has unchecked Steps. |
+| `closed-missing-review`, `closed-missing-retro` | RESOLUTION: DONE non-EPIC lacks record. |
+| `closed-not-approved` | RESOLUTION: DONE non-EPIC lacks latest APPROVE verdict. |
+| `dropped-missing-reason` | RESOLUTION: WONTDO without a non-empty `- REASON:`. |
+| `dropped-bad-superseder` | `- SUPERSEDED BY:` names no other task. |
+| `dangling-duplicate-of` | `- DUPLICATE OF:` names no other task. |
 
 ## Scope and exemptions
 
 - SPIKE and DECISION content rules: only when the sibling exists.
-- `missing-spike-record`: only planned `KIND: SPIKE`.
-- TASK/STORY plan sections: required from PLANNED onward.
+- `missing-spike-record`: only a `KIND: SPIKE` that carries the PLAN gate.
+- TASK/STORY plan sections: required once PLAN is in GATES.
 - EPIC body sections: Done Means and Child Tasks.
 - SPIKE body section: Question; planned SPIKE also needs `SPIKE.md`.
-- Historical exemption: `- <task-id> <rule>: <reason>` in `tasks/EXEMPTIONS.md`.
+- Historical exemption, in `tasks/EXEMPTIONS.md`:
+  `- <task-id> <rule>: <reason>` suppresses one rule;
+  `- <task-id>: <reason>` suppresses every rule for that task.
 - New work: fix or scaffold; never exempt.
 - `unused-exemption`: exemption never matched a finding.

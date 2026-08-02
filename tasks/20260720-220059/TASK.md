@@ -1,11 +1,11 @@
 # build guard: fail bare-shell build, require nix develop
 
-- STATUS: CLOSED
 - PRIORITY: 60
 - TAGS: feature
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 - PARENT: 20260720-225230
 
 ## Story

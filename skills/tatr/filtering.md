@@ -4,7 +4,7 @@ Use `tatr ls -f '<query>'`; prefer it over `grep`.
 
 | Field | Operators |
 |---|---|
-| `:status`, `:kind`, `:flow_step`, `:plan_status` | `eq`, `in [...]` |
+| `:status`, `:kind`, `:activity`, `:resolution` | `eq`, `in [...]` |
 | `:priority` | `eq` |
 | `:title` | `eq`, `contains` |
 | `:tags`, `:depends` | `contains` |

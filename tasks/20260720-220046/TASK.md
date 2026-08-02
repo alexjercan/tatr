@@ -1,11 +1,11 @@
 # tatr check: recognize historical/no-retro tasks so pre-flow tasks stop flagging
 
-- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: feature
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 
 ## Story
 

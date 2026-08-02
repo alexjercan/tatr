@@ -1,11 +1,11 @@
 # new: fail on same-second ID collision; add --body-file
 
-- STATUS: CLOSED
 - PRIORITY: 80
-- TAGS: feature,historical
+- TAGS: feature, historical
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 
 ## What changed
 

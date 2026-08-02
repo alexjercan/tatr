@@ -5,36 +5,40 @@ Use `tatr new` and `tatr edit` for metadata. Hand-edit body content.
 ```markdown
 # Task Title
 
-- STATUS: OPEN
 - PRIORITY: 100
 - TAGS: feature, security
 - KIND: TASK
-- FLOW STEP: BACKLOG
-- PLAN STATUS: DRAFT
+- ACTIVITY: -
+- GATES: -
+- RESOLUTION: -
 - PARENT: 20260730-153122
 - DEPENDS ON: 20260730-153325, 20260730-154745
 
 <body>
 ```
 
-- First six fields: required, fixed order.
-- PARENT and DEPENDS ON: optional, same task tree only.
+- First six fields: required, fixed order. `-` means unset.
+- DUPLICATE OF, PARENT and DEPENDS ON: optional, same task tree only.
 - Values: exact and case-sensitive.
 - Priority: non-negative; higher = more important relative to this backlog.
 
 | Field | Values |
 |---|---|
-| STATUS | OPEN, IN_PROGRESS, CLOSED |
 | KIND | TASK, EPIC, STORY, SPIKE |
-| FLOW STEP | BACKLOG, UNDERSTANDING, PLANNING, PLANNED, WORKING, REVIEWING, COMPOUNDING, DONE |
-| PLAN STATUS | DRAFT, APPROVED, NOT_REQUIRED |
+| ACTIVITY | -, UNDERSTANDING, PLANNING, WORKING, REVIEWING, COMPOUNDING |
+| GATES | -, or a space-separated subset of PLAN REVIEW RETRO in that order |
+| RESOLUTION | -, DONE, WONTDO, DUPLICATE, SUPERSEDED |
 
-`flow` owns STATUS, FLOW STEP, and PLAN STATUS. Relationship writes validate
-existence, STORY parent requirements, and EPIC parent kind before mutation.
+STATUS is not a field: it is derived from ACTIVITY and RESOLUTION and printed,
+never stored. `flow`, `rewind`, `close` and `reopen` own the three that are
+stored. Relationship writes validate existence, STORY parent requirements, and
+EPIC parent kind before mutation.
 
 Body bytes after metadata remain opaque and preserved. Blank lines between
 fields normalize on write. Empty keys such as `- PARENT:` fail parsing.
-Legacy records without KIND or with `## Flow State` require manual repair.
+A record still carrying `- FLOW STEP: ` is v0: every command refuses it, and
+`tatr migrate --apply` converts it. Other malformed headers require manual
+repair.
 `ls` skips malformed records, reports them on stderr, and exits non-zero.
 
 Suggested non-trivial body:

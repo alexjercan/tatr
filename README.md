@@ -19,7 +19,7 @@ primarily a toy project inspired by Tsoding's streams.
 - **Filesystem-based storage**: Tasks stored as Markdown files in a `tasks/` directory
 - **Human-readable IDs**: Each task gets a timestamp-based HUID (format: `YYYYMMDD-HHMMSS`)
 - **Metadata support**: Track status, priority, and tags for each task
-- **Guarded lifecycle**: `tatr flow` is the only writer of the workflow fields, and every transition is checked before it is written
+- **Guarded lifecycle**: a freely moving `ACTIVITY` cursor, an earned `GATES` set that only `tatr flow` writes, and a `RESOLUTION` that records why work stopped
 - **One record schema**: `tatr scaffold` writes the sibling records (SPIKE, DECISION, REVIEW, RETRO) from the same in-code table `tatr check` validates them against
 - **Structured DoD proofs**: `tatr proofs` prints each Definition of Done proof as data - tatr never executes any of it
 - **Epic graph**: `PARENT` and `DEPENDS ON` are validated as a graph - dangling links, duplicates, self-links and cycles are findings, not silent waits
@@ -148,10 +148,10 @@ touches something else is not blocked by a dangling edge it did not create - a
 reference can still break when its referent is removed, and `tatr check` is what
 reports that.
 
-A task is always born `- STATUS: OPEN`, `- FLOW STEP: BACKLOG`,
-`- PLAN STATUS: DRAFT`. Those three workflow fields cannot be set here: they
-belong to [`tatr flow`](#moving-a-task-through-the-flow), which is the only
-command that writes them.
+A task is always born with `- ACTIVITY: -`, `- GATES: -` and
+`- RESOLUTION: -`: nothing started, nothing proven, nothing decided. Those
+three workflow fields cannot be set here; they belong to
+[the lifecycle commands](#moving-a-task-through-the-lifecycle).
 
 Task IDs have second resolution (`YYYYMMDD-HHMMSS`). If a task with the
 generated ID already exists (two `new` calls in the same second), `tatr new`
@@ -188,7 +188,7 @@ needs correcting. Scripts chaining `tatr ls && ...` should account for that.
 The `-f` flag takes a small query language over task fields. Fields are written
 with a leading colon, combined with operators and grouped with parentheses.
 The fields are `:status`, `:priority`, `:title`, `:tags`, `:kind`,
-`:flow_step`, `:plan_status`, `:parent` and `:depends`:
+`:activity`, `:gates`, `:resolution`, `:parent` and `:depends`:
 
 ```bash
 # Only open tasks
@@ -204,15 +204,21 @@ tatr ls -f '(:status eq OPEN) and (:tags contains feature)'
 tatr ls -f ':kind eq EPIC'
 
 # Approved work that has not been picked up yet
-tatr ls -f '(:plan_status eq APPROVED) and (:flow_step in [BACKLOG, PLANNED])'
+tatr ls -f '(:gates contains PLAN) and (:activity in [UNDERSTANDING, PLANNING])'
+
+# Everything that was abandoned rather than finished
+tatr ls -f ':resolution in [WONTDO, DUPLICATE, SUPERSEDED]'
 
 # The children of one Epic, and everything blocked on one task
 tatr ls -f ':parent eq 20260730-153122'
 tatr ls -f ':depends contains 20260730-153325'
 ```
 
-The enum-valued fields (`:status`, `:kind`, `:flow_step`, `:plan_status`) take
-`eq` and `in`; `:parent` takes `eq`; `:tags` and `:depends` take `contains`.
+The enum-valued fields (`:status`, `:kind`, `:activity`, `:resolution`) take
+`eq` and `in`; `:parent` takes `eq`; `:tags`, `:depends` and `:gates` take
+`contains`. `:activity` and `:resolution` are nullable, so a record that leaves
+one unset matches no value of it. The retired `:flow_step` and `:plan_status`
+are refused by name with a pointer at the replacement.
 
 Supported operators include `eq`, `contains`, `in` (with `[...]` lists), and the
 boolean connectives `and`, `or`, `not`. Literal values may contain `.` and `-`
@@ -222,9 +228,9 @@ recursive mode, and applies per section in recursive mode.
 
 **Output format:**
 ```
-tasks/20260331-144635/TASK.md: [PRIORITY: 100, KIND: TASK, FLOW STEP: DONE, TAGS: feature] Implement filter system
-tasks/20260330-202358/TASK.md: [PRIORITY: 80, KIND: STORY, FLOW STEP: WORKING, TAGS: testing, bug] Add unit tests
-tasks/20260329-123700/TASK.md: [PRIORITY: 0, KIND: TASK, FLOW STEP: BACKLOG, TAGS: ] Fix memory leak in parser
+tasks/20260331-144635/TASK.md: [PRIORITY: 100, KIND: TASK, STATUS: CLOSED, ACTIVITY: COMPOUNDING, TAGS: feature] Implement filter system
+tasks/20260330-202358/TASK.md: [PRIORITY: 80, KIND: STORY, STATUS: IN_PROGRESS, ACTIVITY: WORKING, TAGS: testing, bug] Add unit tests
+tasks/20260329-123700/TASK.md: [PRIORITY: 0, KIND: TASK, STATUS: OPEN, ACTIVITY: -, TAGS: ] Fix memory leak in parser
 ```
 
 ### Showing a Task
@@ -264,14 +270,18 @@ tatr edit 20260331-144635 -k STORY -P 20260730-153122 -d 20260730-153325
 - `-P, --parent <id>`: New parent task ID (empty value clears it)
 - `-d, --depends-on <id>...`: New dependency task IDs (empty value clears them)
 
-`edit` cannot set `STATUS`, `FLOW STEP` or `PLAN STATUS`. The flags for them
-were removed, and the retired spellings fail with a pointer to the lifecycle
-rather than a generic unknown-argument error:
+`edit` cannot set `ACTIVITY`, `GATES` or `RESOLUTION`, and `STATUS` is not a
+settable field at all. The flags for them were removed, and both the current
+and the retired spellings fail with a pointer to the command that does own the
+field, rather than a generic unknown-argument error:
 
 ```console
 $ tatr edit 20260730-185007 --status CLOSED
 ERROR: '--status' was removed: STATUS is not settable through `new` or `edit`
-  STATUS is derived from FLOW STEP; move the task with `tatr flow <ID> [--to <STEP>]`
+  STATUS is derived from ACTIVITY and RESOLUTION; it is not stored at all
+$ tatr edit 20260730-185007 --activity WORKING
+ERROR: '--activity' was removed: ACTIVITY is not settable through `new` or `edit`
+  move the cursor with `tatr flow <ID>` or `tatr rewind <ID> --to <ACTIVITY>`
 ```
 
 (The transcripts here elide the `tatr.c:<line>:` source location every
@@ -281,110 +291,249 @@ verbatim.)
 An invalid value for any option `edit` does accept is rejected before anything
 is written, so the task file is left unchanged.
 
-### Moving a Task Through the Flow
+### Moving a Task Through the Lifecycle
 
-`tatr flow` is the only writer of the three workflow fields. Without `--to` it
-advances one step along the chain; with `--to` it names the target explicitly:
+The lifecycle is three independent fields, not one chain:
+
+| Field | Job | Nature |
+| ------------ | ------------------------ | ------------------------------------------------ |
+| `ACTIVITY`   | where attention sits     | a nullable cursor; moves backward as freely as forward; proves nothing |
+| `GATES`      | what has been proven     | an accumulating set over `PLAN`, `REVIEW`, `RETRO` |
+| `RESOLUTION` | why the work stopped     | nullable and terminal until `tatr reopen`         |
+
+```
+ACTIVITY:   - -> UNDERSTANDING -> PLANNING -> WORKING -> REVIEWING -> COMPOUNDING
+                                       |                     |             |
+GATES:                              +PLAN                +REVIEW       +RETRO
+```
+
+Four commands write them, and between them they are the only writers:
 
 ```bash
-tatr flow 20260331-144635              # advance one step
-tatr flow 20260331-144635 --to WORKING # name the target (the review fix loop)
-tatr flow 20260331-144635 --to DROPPED --reason "Duplicate work"
+tatr flow 20260331-144635                  # advance one activity, run its exit gate
+tatr flow 20260331-144635 --dry-run        # print the edge and the gate, write nothing
+tatr rewind 20260331-144635 --to WORKING   # move back; clears the gates that invalidates
+tatr close 20260331-144635 --resolution WONTDO --reason "Duplicate work"
+tatr reopen 20260331-144635                # clear the resolution, keep the cursor
 ```
 
-**The transition table.** The normal chain plus a terminal retirement edge:
+`tatr flow` has no `--to`. A command that can only move forward one activity
+cannot skip a gate, which is what makes the gates unavoidable; going backward
+is `tatr rewind`, which is a different thing with different consequences.
 
-```
-BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
-                                          ^                      |
-                                          |                      v
-                                          +------- (fix) --- COMPOUNDING -> DONE
-  any non-terminal step -------------------------------------> DROPPED
-```
+**STATUS is derived, never chosen, and never stored.** It is a rollup of the
+other two nullable fields, so it cannot drift from them:
 
-`DROPPED` is only selected explicitly, so it never changes the default walk.
-`REVIEWING` is the only normal step with two successors. Its default - what a bare
-`tatr flow` picks - is `COMPOUNDING`, so the fix loop back to `WORKING` must be
-asked for by name with `--to WORKING`. Every other step has exactly one
-successor, and `DONE` is terminal.
+| Condition          | STATUS      |
+| ------------------ | ----------- |
+| `RESOLUTION` set   | CLOSED      |
+| `ACTIVITY` unset   | OPEN        |
+| otherwise          | IN_PROGRESS |
 
-**STATUS is derived, never chosen.** The flow step implies it, so a work task
-stays IN_PROGRESS through review and compound and closes atomically at DONE, in
-the same write that sets `- FLOW STEP: DONE`:
+No `TASK.md` contains a `- STATUS: ` line. Every command that reports still
+prints one.
 
-| FLOW STEP                                 | STATUS      |
-| ----------------------------------------- | ----------- |
-| BACKLOG, UNDERSTANDING, PLANNING, PLANNED | OPEN        |
-| WORKING, REVIEWING, COMPOUNDING           | IN_PROGRESS |
-| DONE, DROPPED                             | CLOSED      |
+**Exit gates.** Each gate is the requirement for LEAVING one activity:
 
-**Preconditions.** Three edges are gates:
+| Leaving       | Earns    | Requires                                                                                       |
+| ------------- | -------- | ---------------------------------------------------------------------------------------------- |
+| UNDERSTANDING | -        | nothing: picking a task up proves nothing                                                        |
+| PLANNING      | `PLAN`   | `## Steps` and `## Definition of Done` well-formed, every DoD item carrying a proof, a graph position whose references resolve, and any `SPIKE.md` held to its schema |
+| WORKING       | -        | nothing: handing work to review costs nothing; leaving review is what is expensive               |
+| REVIEWING     | `REVIEW` | a `REVIEW.md` whose latest `- VERDICT:` is APPROVE, with no unticked BLOCKER or MAJOR finding    |
+| COMPOUNDING   | `RETRO`  | a schema-clean `RETRO.md`, plus the close gate below                                             |
 
-- `PLANNING -> PLANNED` is the plan gate. It has no preconditions of its own;
-  its effect is to write `- PLAN STATUS: APPROVED`, and it is the only way that
-  value is ever written.
-- `PLANNED -> WORKING` requires `- PLAN STATUS: APPROVED` and every
-  `- DEPENDS ON` id to resolve to an existing task that is CLOSED.
-- `REVIEWING -> COMPOUNDING` requires a `REVIEW.md` whose latest `- VERDICT:`
-  is APPROVE, with no unticked BLOCKER or MAJOR finding left.
-- `COMPOUNDING -> DONE` requires all of the above, plus zero unchecked items
-  under `## Steps`, a `RETRO.md`, and a valid `- STATUS:` on a `DECISION.md`
-  when the task carries one.
+The close gate, which only `--resolution DONE` runs, asks what "done" means
+beyond the individual gates: all three gates actually earned, zero unchecked
+items under `## Steps`, a valid `- STATUS:` on any `DECISION.md` the task
+carries, and every child of an Epic CLOSED. `tatr flow` out of `COMPOUNDING`
+earns `RETRO` and closes as `DONE` in one motion, so the happy path stays one
+verb; `tatr close --resolution DONE` does the same thing for a caller who wants
+to name it.
 
-`REVIEWING -> WORKING` and the three pre-plan edges carry no preconditions:
-going back to fix something is never harder than going forward.
-
-`DROPPED` requires `--reason <text>`. `--superseded-by <ID>` optionally names
-the existing replacement task. The transition appends a `## Dropped` record to
-TASK.md. It does not require an approved plan, completed Steps, REVIEW.md, or
-RETRO.md. `tatr check` validates the reason and optional reference.
+The other three resolutions run no gate at all and are legal from any activity.
+Anything can be abandoned at any time, and demanding proof before letting go of
+a task is exactly backward.
 
 `KIND: EPIC` containers are exempt from exactly what `tatr check` already
-exempts them from - the plan-approval, review, retro and unchecked-Steps
-requirements - because an Epic's record lives in its children. Their
-dependencies and their `DECISION.md` are checked like anyone else's.
+exempts them from - review presence, retro presence, unchecked Steps and
+`inconsistent-gates` - because an Epic's record lives in its children. Their own
+sections, their dependencies, any `REVIEW.md` they do carry and their
+`DECISION.md` are checked like anyone else's, and every child must be CLOSED
+before the container may be.
 
-**Failure is atomic.** Every precondition is evaluated before anything is
-mutated, all unmet ones are reported rather than one per round trip, and a
-refused transition leaves `TASK.md` byte-identical:
+**A refused gate writes nothing.** Every precondition is evaluated before
+anything is mutated, and all unmet ones are reported rather than one per round
+trip:
 
 ```console
-$ tatr flow 20260730-185007
-Task 20260730-185007 moved BACKLOG -> UNDERSTANDING (STATUS: OPEN)
-$ tatr flow 20260730-185007
-Task 20260730-185007 moved UNDERSTANDING -> PLANNING (STATUS: OPEN)
-$ tatr flow 20260730-185007
-Task 20260730-185007 moved PLANNING -> PLANNED (STATUS: OPEN)
-$ tatr flow 20260730-185007 --to DONE
-ERROR: Illegal transition for 20260730-185007: PLANNED -> DONE
-  the legal move from PLANNED is WORKING
-$ tatr flow 20260730-185007
-Task 20260730-185007 moved PLANNED -> WORKING (STATUS: IN_PROGRESS)
-$ tatr flow 20260730-185007
-Task 20260730-185007 moved WORKING -> REVIEWING (STATUS: IN_PROGRESS)
-$ tatr flow 20260730-185007
-ERROR: Refusing to move 20260730-185007 from REVIEWING to COMPOUNDING: 1 precondition(s) not met
+$ tatr flow 20260802-211009
+Task 20260802-211009 moved - -> UNDERSTANDING (STATUS: IN_PROGRESS)
+$ tatr flow 20260802-211009
+Task 20260802-211009 moved UNDERSTANDING -> PLANNING (STATUS: IN_PROGRESS)
+$ tatr flow 20260802-211009
+ERROR: Refusing to advance 20260802-211009 from PLANNING: 2 precondition(s) not met
+  - bad-record-schema: TASK.md has no '## Steps' section
+  - bad-record-schema: TASK.md has no '## Definition of Done' section
+  Record unchanged.
+$ tatr flow 20260802-211009 --dry-run
+Task 20260802-211009 would move PLANNING -> WORKING
+  gate PLAN would run
+$ tatr flow 20260802-211009
+gate PLAN recorded
+Task 20260802-211009 moved PLANNING -> WORKING (STATUS: IN_PROGRESS)
+$ tatr flow 20260802-211009
+Task 20260802-211009 moved WORKING -> REVIEWING (STATUS: IN_PROGRESS)
+$ tatr flow 20260802-211009
+ERROR: Refusing to advance 20260802-211009 from REVIEWING: 1 precondition(s) not met
   - there is no REVIEW.md: the work has not been reviewed
-$ printf -- '- VERDICT: APPROVE\n' > tasks/20260730-185007/REVIEW.md
-$ tatr flow 20260730-185007
-Task 20260730-185007 moved REVIEWING -> COMPOUNDING (STATUS: IN_PROGRESS)
-$ tatr flow 20260730-185007
-ERROR: Refusing to move 20260730-185007 from COMPOUNDING to DONE: 2 precondition(s) not met
-  - 1 unchecked Steps item(s) remain
-  - there is no RETRO.md: the retro has not been written
+  Record unchanged.
 ```
 
-**Options:**
-- `-o, --to <STEP>`: the target flow step (default: the current step's successor)
-- `-R, --reason <TEXT>`: required reason when targeting `DROPPED`
-- `-S, --superseded-by <ID>`: optional existing replacement task
+(The transcripts here elide the `tatr.c:<line>:` source location every
+`ERROR:` line carries, which moves with the code; everything after it is
+verbatim.)
 
-There is no `--force` and no repair command. A transition may never produce a
-state `tatr check` would flag: both read the same artifacts through the same
-helpers. A record that is already in the wrong state is corrected by hand in
-`TASK.md`, where the fix shows up in the diff and a reviewer sees it.
-`- PLAN STATUS: NOT_REQUIRED` is likewise unreachable through the CLI - it is
-how a record says its cycle predated plan state, and it is written by hand.
+**Rewinding costs the gates it invalidates.** Going back to fix something must
+never be harder than going forward, so `rewind` runs no gate and asks nothing
+of the world. What it does cost is the gates the move discards - replanning
+invalidates the review that judged the old plan - and those are named, and
+behind `--force` so an earned approval is never discarded silently:
+
+| Rewind to     | Clears               | Why                                       |
+| ------------- | -------------------- | ----------------------------------------- |
+| UNDERSTANDING | PLAN, REVIEW, RETRO  | everything is up for grabs                |
+| PLANNING      | PLAN, REVIEW, RETRO  | replanning invalidates the review         |
+| WORKING       | REVIEW, RETRO        | the fix loop; `PLAN` survives             |
+| REVIEWING     | REVIEW, RETRO        | re-reviewing discards the old verdict     |
+
+```console
+$ tatr rewind 20260802-211009 --to WORKING
+Task 20260802-211009 rewound REVIEWING -> WORKING (no gates cleared)
+$ tatr rewind 20260802-211009 --to PLANNING
+ERROR: Rewinding 20260802-211009 to PLANNING would discard an earned gate; pass --force to clear it
+  - the PLAN gate
+  Record unchanged.
+```
+
+A forward or equal target is refused by name rather than silently accepted: a
+rewind that moved forward would be a way to reach an activity without running
+its gate.
+
+**Closing, and reopening.** The last `tatr flow` earns `RETRO` and sets the
+resolution in the same write. The cursor stays where the work ended rather than
+resetting, so reopening restores a live position without having to invent one:
+
+```console
+$ tatr flow 20260802-211009
+gate REVIEW recorded
+Task 20260802-211009 moved REVIEWING -> COMPOUNDING (STATUS: IN_PROGRESS)
+$ tatr flow 20260802-211009
+ERROR: Refusing to advance 20260802-211009 from COMPOUNDING: 2 precondition(s) not met
+  - there is no RETRO.md: the retro has not been written
+  - 1 unchecked Steps item(s) remain
+  Record unchanged.
+$ tatr flow 20260802-211009
+gate RETRO recorded
+Task 20260802-211009 moved COMPOUNDING -> CLOSED (RESOLUTION: DONE)
+$ tatr flow 20260802-211009
+ERROR: Task 20260802-211009 is CLOSED (RESOLUTION: DONE): reopen it with `tatr reopen 20260802-211009` before moving it
+$ tatr reopen 20260802-211009
+Task 20260802-211009 reopened at COMPOUNDING (STATUS: IN_PROGRESS)
+```
+
+`WONTDO` requires `--reason <text>` and appends a `## Dropped` record to
+`TASK.md`. `DUPLICATE` and `SUPERSEDED` require `--of <ID>`, which is validated
+to resolve to another existing task and written as `- DUPLICATE OF: `.
+`reopen` clears everything `close` wrote - the resolution, the `- DUPLICATE OF: `
+pointer and a trailing `## Dropped` block - so a record cannot accumulate two
+closure reasons across a close, reopen and re-close:
+
+```console
+$ tatr close 20260802-211009 --resolution DUPLICATE --of 20260101-000000
+ERROR: --of task '20260101-000000' does not resolve to another task
+```
+
+**`flow` may half-succeed.** Entering `WORKING` is the one edge that asks
+anything of anyone else: every `- DEPENDS ON` id must resolve to a CLOSED task,
+and no other session may hold a claim. Those are facts about the world, not
+about the record, and the two are allowed to disagree. When the gate passes but
+the world does not permit the advance, `flow` records the gate, holds the
+cursor, and reports both halves - still one atomic `task_save`, so nothing is
+left inconsistent:
+
+```console
+$ tatr flow 20260802-210549
+gate PLAN recorded
+ERROR: Not advancing 20260802-210549 to WORKING: 1 precondition(s) not met
+  - dependency 20260802-210548 is not CLOSED (STATUS: OPEN)
+  Cursor held at PLANNING.
+```
+
+This is the case the three-field design exists for. Under a single chain,
+approving a plan and starting the work were one edge, so a task could not have
+its plan blessed until its dependencies closed. It is also where `PLANNED`
+went: not deleted, derived.
+
+```
+READY == GATES contains PLAN and ACTIVITY < WORKING and deps CLOSED and unclaimed
+```
+
+[`tatr frontier`](#working-an-epic-in-parallel) answers that query.
+
+**Options:**
+- `flow`: `-n, --dry-run` prints the edge and the gate and writes nothing
+- `rewind`: `-o, --to <ACTIVITY>` (required), `-F, --force`
+- `close`: `-x, --resolution <R>` (required), `-O, --of <ID>`, `-R, --reason <TEXT>`
+
+There is no repair command. A transition may never produce a state `tatr check`
+would flag: both read the same artifacts through the same helpers. A record that
+is already in the wrong state is corrected by hand in `TASK.md`, where the fix
+shows up in the diff and a reviewer sees it.
+
+### Migrating v0 Records
+
+The record format changed in v1.0.0. Every command refuses a record that still
+carries `- FLOW STEP: `, so the migration is total rather than opt-in - an
+unmigrated record is not ignored, it is unreadable:
+
+```console
+$ tatr show 20260101-090000
+ERROR: task_deserialize: this record is in the v0 format (it still carries '- STATUS: '); run `tatr migrate --apply` to convert it
+```
+
+`tatr migrate` is dry-run by default and prints one line per record it would
+change:
+
+```console
+$ tatr migrate
+20260101-090000	FLOW STEP: PLANNED, PLAN STATUS: APPROVED -> ACTIVITY: PLANNING, GATES: PLAN, RESOLUTION: -
+1 record(s) would change; nothing was written. Re-run with --apply.
+$ tatr migrate --apply
+20260101-090000	FLOW STEP: PLANNED, PLAN STATUS: APPROVED -> ACTIVITY: PLANNING, GATES: PLAN, RESOLUTION: -
+1 record(s) migrated
+```
+
+The mapping is record-local, so the command works unchanged in any repository:
+
+| v0                              | v1                                          |
+| ------------------------------- | ------------------------------------------- |
+| `- STATUS: <any>`               | dropped; derived                            |
+| `- FLOW STEP: BACKLOG`          | `ACTIVITY: -`                               |
+| `- FLOW STEP: PLANNED`          | `ACTIVITY: PLANNING` + the `PLAN` gate      |
+| `- FLOW STEP: DONE`             | `ACTIVITY: COMPOUNDING` + `RESOLUTION: DONE`|
+| `- FLOW STEP: DROPPED`          | `RESOLUTION: WONTDO`, keeping `- REASON: `  |
+| other steps                     | the same name                               |
+| `- PLAN STATUS: APPROVED`       | the `PLAN` gate                             |
+| `- PLAN STATUS: DRAFT` or `NOT_REQUIRED` | no `PLAN` gate                     |
+| `REVIEW.md` with a latest APPROVE | the `REVIEW` gate                         |
+| `RETRO.md` present              | the `RETRO` gate                            |
+
+Only metadata headers move: no `REVIEW.md` or `RETRO.md` body is rewritten. A
+schema version bump is a different thing from backfilling history.
+
+`tatr migrate` is the only v0-format knowledge in the v1 binary, and it is
+removed again in v1.1.0.
 
 ### Removing a Task
 
@@ -448,29 +597,40 @@ tatr check 20260331-144635    # lint one task
   or a `KIND: STORY` with no parent at all.
 - `unused-exemption`: an entry in `tasks/EXEMPTIONS.md` never fired on a full
   scan (reported against the task it names).
-- `closed-unchecked`: a CLOSED task still has unchecked `- [ ]` items under
-  its `## Steps` section (other sections may keep open boxes).
-- `closed-missing-review`: a CLOSED task has no `REVIEW.md`.
-- `closed-missing-retro`: a CLOSED task has no `RETRO.md`.
-- `closed-not-approved`: a CLOSED task's REVIEW.md exists but its latest
-  `- VERDICT:` line is not APPROVE (or there is no verdict at all).
+- `closed-unchecked`: a `RESOLUTION: DONE` task still has unchecked `- [ ]`
+  items under its `## Steps` section (other sections may keep open boxes).
+- `closed-missing-review`: a `RESOLUTION: DONE` task has no `REVIEW.md`.
+- `closed-missing-retro`: a `RESOLUTION: DONE` task has no `RETRO.md`.
+- `closed-not-approved`: a `RESOLUTION: DONE` task's REVIEW.md exists but its
+  latest `- VERDICT:` line is not APPROVE (or there is no verdict at all).
+- `inconsistent-gates`: the cursor is past an activity whose gate the record
+  does not carry - `ACTIVITY: REVIEWING` with no `PLAN` in `GATES`, say. A
+  single chain made this unrepresentable by conflating position with proof;
+  two free axes can disagree, so a rule has to say so. Work started without an
+  approved plan is the `PLANNING` case of this rule and has no rule of its own.
+  `KIND: EPIC` containers are exempt.
+- `dangling-duplicate-of`: a `- DUPLICATE OF: ` that names the task itself or
+  a task that does not exist.
+- `dropped-missing-reason`: a `RESOLUTION: WONTDO` task has no non-empty
+  `- REASON:` line.
+- `dropped-bad-superseder`: a `- SUPERSEDED BY: ` that does not resolve to
+  another task.
 - `bad-severity`: a REVIEW.md finding uses a severity outside
   BLOCKER|MAJOR|MINOR|NIT.
 - `malformed-header`: TASK.md is missing/unreadable, or its title and metadata
   block do not parse. This covers every invalid metadata value: the parser
-  validates the exact token it consumes, so `- STATUS: DONE`,
+  validates the exact token it consumes, so `- ACTIVITY: PLANNED`,
   `- KIND: EPICS`, a trailing space after a value or a CRLF tail all land
-  here rather than in a rule of their own.
-- `unplanned-in-progress`: an ordinary IN_PROGRESS task lacks
-  `- PLAN STATUS: APPROVED`. `KIND: EPIC` containers are exempt.
+  here rather than in a rule of their own. A record still carrying
+  `- FLOW STEP: ` is a v0 record and lands here too; `tatr migrate` is the fix.
 - `bad-decision-status`: a task's `DECISION.md` (when present) has a `- STATUS:`
   value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference - in a
   `SUPERSEDED by <ref>` status or a `- Supersedes: <ref>` line - does not
   resolve to an existing `tasks/<id>/DECISION.md`.
 
-The approved-plan requirement applies only when an ordinary task is moved to
-IN_PROGRESS, so CLOSED tasks and OPEN backlog items are never asked for one.
+The plan-gate requirement applies only once an ordinary task's cursor is past
+`PLANNING`, so unstarted backlog items are never asked for one.
 `KIND: EPIC` marks an explicit /flow epic, sprint, version, release, or
 multi-feature container. The container's broader record lives in that task's
 own `TASK.md` sections, such as `## Epic`, `## Done Means`, `## Child Tasks`,
@@ -479,7 +639,7 @@ review and retro records. Do not create a container task for one requested
 thing. Containers are exempt from the record-completeness rules
 (`closed-missing-review`, `closed-missing-retro`), from `closed-unchecked`
 (a frozen container's step boxes stay verbatim, since superseded or dropped
-children are honest history), and from `unplanned-in-progress` (the plan gate
+children are honest history), and from `inconsistent-gates` (the plan gate
 applies to the work tasks underneath it).
 
 The `DECISION.md` and `SPIKE.md` rules are presence-gated: a task without such
@@ -487,7 +647,7 @@ a sibling is never flagged for its contents, so they need no migration of
 existing tasks.
 
 `## Steps` and `## Definition of Done` are the plan gate's output, so
-`bad-record-schema` asks for them only from `- FLOW STEP: PLANNED` on - a task
+`bad-record-schema` asks for them only once `PLAN` is in `GATES` - a task
 `tatr new` just created is not a finding the moment it exists. The required
 sections are kind-specific: `TASK`/`STORY` owe `## Steps` and
 `## Definition of Done`, `EPIC` owes `## Done Means` and `## Child Tasks`, and
@@ -495,19 +655,20 @@ sections are kind-specific: `TASK`/`STORY` owe `## Steps` and
 
 The same rules gate the lifecycle. `tatr flow` reads them through the same
 functions `check` does, so a transition can never mint a record the lint would
-immediately flag: `PLANNING -> PLANNED` requires the plan sections, their
-proofs and a well-formed place in the graph, `REVIEWING -> COMPOUNDING`
-requires a schema-clean REVIEW.md, and `COMPOUNDING -> DONE` requires all of
-that plus a schema-clean RETRO.md and DECISION.md. Two guards are the graph's
-alone: a task another session has claimed cannot be started, and a
+immediately flag: the `PLAN` gate requires the plan sections, their proofs and
+a well-formed place in the graph, the `REVIEW` gate requires a schema-clean
+REVIEW.md, and closing as `DONE` requires all three gates earned plus a
+schema-clean RETRO.md and DECISION.md. Two guards are the graph's alone: a task
+another session has claimed cannot be entered into `WORKING`, and a
 `KIND: EPIC` cannot close while any of its children is not CLOSED. A refusal
 names the same rule slug the lint would print:
 
 ```console
-$ tatr flow 20260101-100000 --to PLANNED
-ERROR: Refusing to move 20260101-100000 from PLANNING to PLANNED: 2 precondition(s) not met
+$ tatr flow 20260101-100000
+ERROR: Refusing to advance 20260101-100000 from PLANNING: 2 precondition(s) not met
   - bad-record-schema: TASK.md has no '## Steps' section
   - bad-record-schema: TASK.md has no '## Definition of Done' section
+  Record unchanged.
 ```
 
 #### Historical exemptions
@@ -596,16 +757,24 @@ the whole map:
 
 ```console
 $ tatr frontier 20260101-410000
-READY	20260101-410005	p90	PLANNED	Ready, high priority
-READY	20260101-410004	p10	PLANNED	Ready, low priority
-BLOCKED	20260101-410003	p80	PLANNED	Blocked on one of two	blocked-by=20260101-410005
-CLAIMED	20260101-410002	p70	PLANNED	Someone has it
+READY	20260101-410005	p90	PLANNING+PLAN	Ready, high priority
+READY	20260101-410004	p10	PLANNING+PLAN	Ready, low priority
+BLOCKED	20260101-410003	p80	PLANNING+PLAN	Blocked on one of two	blocked-by=20260101-410005
+CLAIMED	20260101-410002	p70	PLANNING+PLAN	Someone has it	claimed-by=agent-a
 ```
 
+`READY` is the derived query the old `PLANNED` node used to stand for: the
+`PLAN` gate earned, the cursor still below `WORKING`, every dependency CLOSED,
+and nobody holding a claim. Anything else under the Epic is open work you
+cannot pick up, which is what `BLOCKED` means here; `blocked-by` names the
+dependencies when dependencies are the reason, and is omitted when they are
+not. The fourth column prints the row's activity and its gates, because
+`PLANNING` alone no longer separates a plan being drafted from one that was
+approved.
+
 The order is deterministic: `READY` before `BLOCKED` before `CLAIMED`, then
-priority descending, then ID ascending. `blocked-by` lists only the
-dependencies that are not yet CLOSED. A CLOSED child is not open work and does
-not appear; neither does a task that is not a child of this Epic.
+priority descending, then ID ascending. A closed child is not open work and
+does not appear; neither does a task that is not a child of this Epic.
 
 `tatr claim <id>` takes a task for the current session, `tatr release <id>`
 gives it back, and `tatr claims` lists what is held:
@@ -622,8 +791,9 @@ claims in /repo/tasks/.claims
 A claim is a file created with `O_CREAT|O_EXCL` under `tasks/.claims/<id>`,
 which the kernel makes atomic: of any number of racing sessions exactly one
 wins and the rest are told who holds it. The winner writes its identity in the
-same call that wins the race, so a claim is never anonymous. `tatr flow <id>
---to WORKING` refuses to start a task another session holds.
+same call that wins the race, so a claim is never anonymous. A `tatr flow`
+that would enter `WORKING` refuses to advance a task another session holds -
+though it still records the gate it earned on the way, and says so.
 
 Two environment variables control who holds a claim and where claims live:
 
@@ -648,15 +818,16 @@ export TATR_CLAIMS_DIR=/path/to/main/checkout/tasks/.claims
 export TATR_SESSION=agent-a
 
 tatr claim 20260101-410002                 # taken in the shared claims dir
-tatr flow 20260101-410002 --to WORKING     # edits THIS worktree's TASK.md
+tatr flow 20260101-410002                  # edits THIS worktree's TASK.md
 ```
 
 Another session with a different `TATR_SESSION` is then refused that start:
 
 ```console
-$ TATR_SESSION=agent-b tatr flow 20260101-410002 --to WORKING
-ERROR: Refusing to move 20260101-410002 from PLANNED to WORKING: 1 precondition(s) not met
-  - the task is claimed by session 'agent-a' (alex@nixos, since 20260730-222012); release it with `tatr release 20260101-410002 --force` if that session is gone
+$ TATR_SESSION=agent-b tatr flow 20260101-410002
+ERROR: Not advancing 20260101-410002 to WORKING: 1 precondition(s) not met
+  - the task is claimed by session 'agent-a' (alex@nixos, since 20260730-222012); set TATR_SESSION to that id if it is yours, or release it with `tatr release 20260101-410002 --force` if that session is gone
+  Cursor held at PLANNING.
 ```
 
 There is no timeout and nothing steals a claim automatically: "the owner is
@@ -715,12 +886,12 @@ Tasks are stored as Markdown files with structured metadata. Each task file (`TA
 ```markdown
 # Task Title
 
-- STATUS: OPEN
 - PRIORITY: 100
 - TAGS: feature, enhancement
 - KIND: TASK
-- FLOW STEP: BACKLOG
-- PLAN STATUS: DRAFT
+- ACTIVITY: -
+- GATES: -
+- RESOLUTION: -
 - PARENT: 20260730-153122
 - DEPENDS ON: 20260730-153325, 20260730-154745
 
@@ -729,9 +900,12 @@ Can span multiple lines and include any markdown formatting.
 ```
 
 The metadata is one flat block directly under the title, read in exactly this
-order. The first six fields are required and always written back. `PARENT` and
+order. The first six fields are required and always written back; `-` is how
+each of the three nullable ones says it is unset, so the field set a record
+carries never depends on the values in it. `DUPLICATE OF`, `PARENT` and
 `DEPENDS ON` are optional and appear only when set, so a task with no
-relationships carries no empty relationship lines.
+relationships carries no empty relationship lines. There is no `- STATUS: `
+line: STATUS is derived from `ACTIVITY` and `RESOLUTION` at every read.
 
 Blank lines and leading whitespace between fields are tolerated when reading
 and normalized away on the next write. Values are validated on the exact token
@@ -747,25 +921,29 @@ serialized bytes before touching disk and fail without writing if the result
 would not parse - a newline in a title or tag is the usual cause - and a failed
 `new` leaves no task directory behind.
 
-**Status values:**
-- `OPEN`: Task not yet started
-- `IN_PROGRESS`: Currently being worked on
-- `CLOSED`: Task completed
+**Derived status values:** `OPEN` (no `ACTIVITY`), `IN_PROGRESS` (an
+`ACTIVITY` and no `RESOLUTION`), `CLOSED` (a `RESOLUTION`). Reported by every
+command, stored by none.
 
 **Kind values:** `TASK` (the default), `EPIC` (an explicit /flow container),
 `STORY` (a unit of work under an Epic), `SPIKE` (an exploration).
 
-**Flow step values:** `BACKLOG`, `UNDERSTANDING`, `PLANNING`, `PLANNED`,
-`WORKING`, `REVIEWING`, `COMPOUNDING`, `DONE`, `DROPPED`.
+**Activity values:** `-`, `UNDERSTANDING`, `PLANNING`, `WORKING`, `REVIEWING`,
+`COMPOUNDING`.
 
-**Plan status values:** `DRAFT`, `APPROVED` (the user accepted the plan at the
-/flow gate), `NOT_REQUIRED` (the record's cycle never carried plan state, as
-with pre-flow history).
+**Gate values:** `-`, or a space-separated subset of `PLAN REVIEW RETRO`,
+always written in that order whatever order they were earned in.
+
+**Resolution values:** `-`, `DONE`, `WONTDO` (abandoned, with a `- REASON: `),
+`DUPLICATE` and `SUPERSEDED` (both with a `- DUPLICATE OF: <ID>`).
+`SUPERSEDED` reuses the `- DUPLICATE OF: ` spelling deliberately: one pointer
+field serves both resolutions, and `RESOLUTION` is what says which relation it
+records. The spelling is frozen by v1.0.0.
 
 `PARENT` and `DEPENDS ON` hold task IDs from the same `tasks/` tree, and are
 validated as IDs only: whether the graph they form is acyclic and whether a
 dependency is listed twice are not checked. The one place a reference is
-resolved is the `PLANNED -> WORKING` gate, which requires every `DEPENDS ON` id
+resolved is the advance into `WORKING`, which requires every `DEPENDS ON` id
 to name an existing task that is CLOSED. A parent in another repository is not expressible as a `PARENT` and
 belongs in the body prose.
 

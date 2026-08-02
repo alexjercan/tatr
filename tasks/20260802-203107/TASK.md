@@ -1,11 +1,11 @@
 # Remove the tatr migrate command once every backlog is on v1
 
-- STATUS: OPEN
 - PRIORITY: 20
 - TAGS: chore, cleanup
 - KIND: TASK
-- FLOW STEP: UNDERSTANDING
-- PLAN STATUS: DRAFT
+- ACTIVITY: UNDERSTANDING
+- GATES: -
+- RESOLUTION: -
 - DEPENDS ON: 20260802-201918
 
 ## Story

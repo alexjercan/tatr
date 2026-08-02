@@ -1,11 +1,11 @@
 # Add an honest terminal state for retired tasks
 
-- STATUS: CLOSED
 - PRIORITY: 60
 - TAGS: feature, flow, lifecycle
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: APPROVED
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 
 ## Story
 

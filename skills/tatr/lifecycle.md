@@ -1,33 +1,85 @@
 # Lifecycle
 
+Three independent fields, not one chain.
+
+| Field | Meaning |
+|---|---|
+| ACTIVITY | Where attention sits. Nullable; moves freely. Proves nothing. |
+| GATES | What has been proven. Accumulating set. `flow` is its sole writer. |
+| RESOLUTION | Why work stopped. Nullable; terminal until `reopen`. |
+
 ```text
-BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING -> COMPOUNDING -> DONE
+ACTIVITY:   - -> UNDERSTANDING -> PLANNING -> WORKING -> REVIEWING -> COMPOUNDING
+GATES:                                PLAN         REVIEW        RETRO
+RESOLUTION: - | DONE | WONTDO | DUPLICATE | SUPERSEDED
 ```
 
-- Bare `tatr flow <id>`: next step.
-- Review fix loop: `tatr flow <id> --to WORKING`.
-- `DONE`: terminal.
-- Invalid, skipped, or backward edge: refusal; no write.
+## Commands
+
+| Command | Does | Gates |
+|---|---|---|
+| `tatr flow <id>` | Advance one activity. `--dry-run` prints the edge. | Runs and records the current activity's exit gate; forward only. |
+| `tatr rewind <id> --to <ACTIVITY> [--force]` | Move backward. | None. Clears per the table below and names each one. |
+| `tatr close <id> --resolution <R> [--of <ID>] [--reason <text>]` | Set RESOLUTION. | `DONE` runs the close gate; the others run nothing. |
+| `tatr reopen <id>` | Clear RESOLUTION, `- DUPLICATE OF:` and a trailing `## Dropped` block. | None. Cursor and gates stay. |
+
+- `flow` out of `COMPOUNDING` earns `RETRO` and closes as `DONE` in one motion.
+- `flow` refuses to run at all once a RESOLUTION is set.
+- `WONTDO` requires `--reason`; `DUPLICATE` and `SUPERSEDED` require `--of`.
 
 ## Derived status
 
-| Flow step | Status |
+| Condition | Status |
 |---|---|
-| BACKLOG through PLANNED | OPEN |
-| WORKING through COMPOUNDING | IN_PROGRESS |
-| DONE | CLOSED |
+| RESOLUTION set | CLOSED |
+| ACTIVITY unset | OPEN |
+| otherwise | IN_PROGRESS |
 
-## Gates
+Never stored. Every command that reports prints it.
 
-| Edge | Requires |
-|---|---|
-| PLANNING -> PLANNED | Valid plan. Writes `PLAN STATUS: APPROVED`; sole approval marker. |
-| PLANNED -> WORKING | Approved plan, closed dependencies, no claim owned by another session. |
-| REVIEWING -> COMPOUNDING | Schema-clean `REVIEW.md`; latest verdict APPROVE; no open BLOCKER or MAJOR finding. |
-| COMPOUNDING -> DONE | All earlier gates; all `## Steps` checked; schema-clean `RETRO.md`; valid `DECISION.md` status when present. |
+## Exit gates
 
-Checked steps do not prove approval. `PLAN STATUS: NOT_REQUIRED` exists only
-for pre-flow history and requires a manual repair.
+| Leaving | Earns | Requires |
+|---|---|---|
+| UNDERSTANDING | - | - |
+| PLANNING | PLAN | `## Steps` and `## Definition of Done` well-formed, DoD proofs parseable, graph position resolvable, any `SPIKE.md` schema-clean. |
+| WORKING | - | - |
+| REVIEWING | REVIEW | Schema-clean `REVIEW.md`; latest verdict APPROVE; no open BLOCKER or MAJOR. |
+| COMPOUNDING | RETRO | Schema-clean `RETRO.md`, plus the close gate below. |
 
-`KIND: EPIC` exemptions: plan approval, review, retro, unchecked Steps.
-Still enforced: dependencies and any present `DECISION.md`.
+Close gate (`DONE` only): all three gates earned, no unchecked `## Steps`, valid
+`DECISION.md` when present, every EPIC child CLOSED.
+
+## World preconditions
+
+Entering `WORKING` also needs dependencies CLOSED and no foreign claim. These
+are facts about the world, not the record, so `flow` may half-succeed: it
+records the gate, holds the cursor, and reports both halves in one write. That
+is what a planned-but-blocked task is.
+
+## Rewind clear table
+
+| Rewind to | Clears | Why |
+|---|---|---|
+| UNDERSTANDING | PLAN, REVIEW, RETRO | Everything is up for grabs. |
+| PLANNING | PLAN, REVIEW, RETRO | Replanning invalidates the review. |
+| WORKING | REVIEW, RETRO | The fix loop; PLAN survives. |
+| REVIEWING | REVIEW, RETRO | Re-reviewing discards the old verdict. |
+
+`--force` is required when the record actually carries a gate being cleared.
+
+## Ready queue
+
+`PLANNED` is a query, not a state:
+
+```text
+READY == GATES contains PLAN and ACTIVITY < WORKING and deps CLOSED and unclaimed
+```
+
+`tatr frontier <epic>` answers it.
+
+## EPIC exemptions
+
+Exempt: `REVIEW.md` presence, `RETRO.md` presence, unchecked Steps,
+`inconsistent-gates`. Still enforced: its own sections, dependencies, any
+present `REVIEW.md`/`DECISION.md`, and every child CLOSED before it closes.

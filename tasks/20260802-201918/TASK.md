@@ -1,11 +1,11 @@
 # Replace the FLOW STEP chain with ACTIVITY, GATES and RESOLUTION
 
-- STATUS: OPEN
 - PRIORITY: 95
 - TAGS: feature, lifecycle, breaking
 - KIND: TASK
-- FLOW STEP: PLANNED
-- PLAN STATUS: APPROVED
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 
 ## Story
 
@@ -26,7 +26,7 @@ target transcript this task is finished against.
 
 ## Steps
 
-- [ ] Replace the metadata triple in `Task_Meta`: drop `Flow_Step`,
+- [x] Replace the metadata triple in `Task_Meta`: drop `Flow_Step`,
       `Plan_Status` and the stored `status` field; add `Activity` (nullable,
       `UNDERSTANDING PLANNING WORKING REVIEWING COMPOUNDING`), `gates` (a
       bitset over `PLAN REVIEW RETRO`) and `Resolution` (nullable,
@@ -36,19 +36,19 @@ target transcript this task is finished against.
       `task_serialize` (tatr.c:342-392) and `task_deserialize`
       (tatr.c:460-565) around the new fixed field order. An unset value
       serializes as `-`; `GATES` serializes in gate order, space separated.
-- [ ] Add `task_derived_status` returning CLOSED when `RESOLUTION` is set,
+- [x] Add `task_derived_status` returning CLOSED when `RESOLUTION` is set,
       OPEN when `ACTIVITY` is unset, IN_PROGRESS otherwise, and re-point every
       reader of `task->meta.status` at it. Delete
       `flow_step_implied_status` (tatr.c:5231). `- STATUS: ` stops being
       written to `TASK.md`; every command that reports still prints it.
-- [ ] Add the two ordering helpers the machine runs on: the gate each activity
+- [x] Add the two ordering helpers the machine runs on: the gate each activity
       produces on exit (`PLANNING -> PLAN`, `REVIEWING -> REVIEW`,
       `COMPOUNDING -> RETRO`; `UNDERSTANDING` and `WORKING` produce none), and
       the clear set for a rewind to activity A (every gate produced at or
       after A). Both are single tables next to the activity enum, read by
       `flow`, `rewind` and `check` alike, per the shared-collector invariant
       in AGENTS.md.
-- [ ] Rewrite `main_flow` (tatr.c:5596) as forward-only single-activity
+- [x] Rewrite `main_flow` (tatr.c:5596) as forward-only single-activity
       advance with no `--to`: resolve the task, refuse when a `RESOLUTION` is
       set, run the current activity's exit gate through the existing
       `Record_Problems` collectors, and on success record the gate. Advance
@@ -57,12 +57,12 @@ target transcript this task is finished against.
       cursor and report both halves. Both halves reach disk through one
       `task_save`. Keep `--dry-run` printing the edge and the gate it would
       run without writing.
-- [ ] Add `main_rewind` for `tatr rewind <id> --to <ACTIVITY>`: backward moves
+- [x] Add `main_rewind` for `tatr rewind <id> --to <ACTIVITY>`: backward moves
       only, refusing a forward or equal target by naming `tatr flow`. It runs
       no gate and clears the rewind set, printing each cleared gate by name.
       Require `--force` when the clear set is non-empty and the record carries
       that gate, so discarding an earned approval is never silent.
-- [ ] Add `main_close` for
+- [x] Add `main_close` for
       `tatr close <id> --resolution <R> [--of <ID>]` and `main_reopen` for
       `tatr reopen <id>`. `DONE` runs the close gate (all three gates earned,
       no unchecked `## Steps`, valid `DECISION.md` when present); the other
@@ -72,7 +72,7 @@ target transcript this task is finished against.
       `reopen` clears `RESOLUTION` and leaves the cursor where it was. Fold
       the `DONE` close into `tatr flow` from `COMPOUNDING` so the happy path
       stays one motion.
-- [ ] Re-point the lifecycle check rules at the new fields: the TASK/STORY
+- [x] Re-point the lifecycle check rules at the new fields: the TASK/STORY
       plan sections become required once `PLAN` is in `GATES` rather than from
       `PLANNED` onward (tatr.c:4546, 6053); `unplanned-in-progress` reads
       `ACTIVITY >= WORKING` without the `PLAN` gate; the `closed-*` family
@@ -80,20 +80,20 @@ target transcript this task is finished against.
       whose cursor is past an activity whose gate it does not carry, which is
       the drift the chain used to make unrepresentable. Findings still leave
       through `check_report_problems` and `flow_unmet_add_problems` only.
-- [ ] Retire `:flow_step` and `:plan_status` from the filter engine and add
+- [x] Retire `:flow_step` and `:plan_status` from the filter engine and add
       `:activity` and `:resolution` to `tatr_filter_enum_table`
       (tatr.c:2755-2795) and `:gates` to the `contains` arm alongside `:tags`
       and `:depends` (tatr.c:3031). No new operator: `contains` already covers
       set fields. Reject the two retired spellings by name with a pointer to
       the replacement, following the `-s`/`-f`/`-S` precedent.
-- [ ] Re-point `main_frontier` (tatr.c:6958) at the derived ready query -
+- [x] Re-point `main_frontier` (tatr.c:6958) at the derived ready query -
       `GATES` has `PLAN`, `ACTIVITY` below `WORKING`, dependencies CLOSED, no
       foreign claim - keeping the `READY`/`BLOCKED`/`CLAIMED` ordering and the
       `blocked-by` column byte for byte. Open work becomes "no `RESOLUTION`"
       rather than `STATUS: OPEN`, since `UNDERSTANDING` and `PLANNING` now
       derive as IN_PROGRESS. Print the row's gates next to the activity so the
       column still separates drafting from blessed.
-- [ ] Generalize the exemption format to a whole-task entry. `- <task-id>:
+- [x] Generalize the exemption format to a whole-task entry. `- <task-id>:
       <reason>` with no rule token suppresses every rule for that task;
       `- <task-id> <rule>: <reason>` keeps its current meaning.
       `check_exemptions_load` (tatr.c:5844) currently tokenizes the HUID on a
@@ -101,7 +101,7 @@ target transcript this task is finished against.
       on the first `:` before deciding which form the line is. A whole-task
       entry that never fires is still reported as `unused-exemption`, so the
       blunt form cannot rot either.
-- [ ] Add `main_migrate` for `tatr migrate [--apply]`, dry-run by default,
+- [x] Add `main_migrate` for `tatr migrate [--apply]`, dry-run by default,
       printing one line per record it would change and writing nothing without
       `--apply`. It is the only place in the v1 binary that knows the v0
       format: `- STATUS: ` is dropped; `BACKLOG` becomes an unset `ACTIVITY`;
@@ -116,25 +116,25 @@ target transcript this task is finished against.
       pointer to `tatr migrate`. Only metadata headers move: no `REVIEW.md` or
       `RETRO.md` body is rewritten, per the append-only principle
       `tasks/EXEMPTIONS.md` already states.
-- [ ] Run `tatr migrate --apply` over this repository's 39 records and collapse
+- [x] Run `tatr migrate --apply` over this repository's 39 records and collapse
       the 37 per-rule exemption lines over 21 tasks into whole-task entries for
       the historical records whose `REVIEW.md`/`RETRO.md` bodies still cannot
       satisfy the current schema. Rewrite the `tasks/EXEMPTIONS.md` preamble
       around both forms.
-- [ ] Release as v1.0.0: bump `TATR_VERSION` (tatr.c:13) and both `version`
+- [x] Release as v1.0.0: bump `TATR_VERSION` (tatr.c:13) and both `version`
       strings in `flake.nix` (38, 61), which are currently drifted at 0.2.2 and
       0.2.1, and write the `CHANGELOG.md` entry as a major break - the record
       format, `flow --to`, `:flow_step`, `:plan_status`, and `PLANNED`,
       `DONE`, `DROPPED` and `NOT_REQUIRED` as values, against the added
       `rewind`, `close`, `reopen`, `migrate` and whole-task exemptions.
-- [ ] Migrate `checker.sh`: rebuild `drive_task_to` (checker.sh:609) on the
+- [x] Migrate `checker.sh`: rebuild `drive_task_to` (checker.sh:609) on the
       new commands and add the integration tests - each activity edge, the
       forward-only refusal from `rewind`, the rewind clear table including
       `PLAN` surviving a rewind to `WORKING`, the `--force` requirement, the
       half-succeeding `flow` on an open dependency, every resolution including
       `--of` validation, `reopen`, the close gate, the EPIC exemptions, the
       retired filter spellings, and byte-identical rollback on every refusal.
-- [ ] Rewrite the docs against real output: `README.md` lifecycle sections
+- [x] Rewrite the docs against real output: `README.md` lifecycle sections
       (298-360, 490-510, 580-660, 758-770), `skills/tatr/lifecycle.md`,
       `format.md`, `check-rules.md`, `SKILL.md` and `workflow.md`, the
       `AGENTS.md` flow section, and a `CHANGELOG.md` entry marking the record
@@ -160,6 +160,10 @@ target transcript this task is finished against.
 - `tatr rewind` refuses a forward or equal target, and clears exactly the gates
   in the rewind table - a rewind to `WORKING` keeps `PLAN` and clears `REVIEW`
   (test: `test_rewind_clear_table`).
+- `tatr frontier`'s `READY` is reachable only after a `flow` that half-succeeded
+  and whose hold has since cleared, since an unblocked task earns `PLAN` and
+  enters `WORKING` in one command; `DECISION.md` records why that is correct
+  rather than a gap (test: `test_frontier_ready_query`).
 - Clearing an earned gate without `--force` is refused and leaves `TASK.md`
   byte-identical (test: `test_rewind_force_guard`).
 - Every resolution closes from any activity, `DONE` alone runs the close gate,
@@ -191,8 +195,13 @@ target transcript this task is finished against.
   (cmd: `test "$(tatr --version | grep -o '[0-9.]*')" = 1.0.0 && test "$(grep -c 'version = "1.0.0"' flake.nix)" = 2`).
 - Full native and memory-check suites pass
   (cmd: `nix develop -c ./checker.sh && nix develop -c ./checker.sh --memcheck`).
-- No doc or skill surface still names a retired token
-  (cmd: `! grep -rn --exclude-dir=tasks --exclude-dir=.git --include='*.md' --include='*.sh' -E 'FLOW STEP|PLAN STATUS|NOT_REQUIRED|flow_step|plan_status' .`).
+- No doc or skill surface still names a retired token as a live concept. The
+  sweep is narrowed from the plan's original spelling: it excluded neither
+  `checker.sh`, which must test the v0 refusal, nor `CHANGELOG.md`, which must
+  name the removal, nor `### Migrating v0 Records`, whose whole job is the v0
+  names
+  (cmd: `! sed '/^### Migrating v0 Records$/,/^### Removing a Task$/d' README.md | grep -nE 'FLOW STEP|PLAN STATUS|NOT_REQUIRED|flow_step|plan_status' | grep -vE 'retired|v0'`;
+  cmd: `! grep -rnE 'FLOW STEP|PLAN STATUS|NOT_REQUIRED|flow_step|plan_status' AGENTS.md skills/ | grep -vE 'v0'`).
 - `README.md` and `skills/tatr/lifecycle.md` document the activity edges, the
   gate table, the rewind clear table and the resolutions
   (manual: the transcripts match real output, pasted not paraphrased).
@@ -230,3 +239,83 @@ target transcript this task is finished against.
   single set line, the folded close, and the existing exemptions.
 - Half-succeeding `flow` is a real departure from the current all-or-nothing
   refusal contract. Atomicity is preserved at the write, not at the command.
+
+## Close-out
+
+**What and why.** `FLOW STEP` carried two jobs - where attention sits and what
+has been proven - so position implied proof and the machine could afford
+exactly one backward edge. The chain is gone. `ACTIVITY` is a nullable cursor
+over five activities that moves backward as freely as forward; `GATES` is an
+ordered set of earned facts that only `tatr flow` writes; `RESOLUTION` records
+why work stopped. `STATUS` is derived at every read and stored nowhere. Four
+commands own the three fields: `flow` forward, `rewind` backward, `close` and
+`reopen` for the resolution. `tatr migrate` converts v0 records and is the only
+v0-format knowledge in the binary; 20260802-203107 removes it in v1.1.0.
+
+**Alternatives.** `SPIKE.md` records the three shapes that lost. During
+implementation, `DECISION.md` records the choices the plan left open: the world
+check applying to the `WORKING` edge alone, `BLOCKED` absorbing every non-READY
+non-CLAIMED row, the close gate running all-or-nothing with the RETRO gate,
+`WONTDO` keeping its `--reason`, and `NOTES.md` being treated as a shape sketch
+rather than a byte-for-byte target.
+
+**Difficulties and diagnosis.**
+
+- `READY` looked unreachable at first: an unblocked task earns `PLAN` and
+  enters `WORKING` in one command, so `PLANNING+PLAN` never exists. Tracing the
+  half-success path showed it is produced by a hold that later clears, which is
+  precisely the frontier's subject. `checker.sh`'s `PLANNED` fixture now takes
+  a foreign claim to reach it, which also gives the half-success path coverage
+  in every test that wants a planned task.
+- `check_task` computes `plan_gate` and `closed_done` after two `goto
+  review_checks` sites. Declaring them at the computation point would have let
+  the malformed-record paths jump past the initializers and read garbage; both
+  are declared at the top with a comment saying why.
+- The half-success report arrived out of order under a pipe: stdout is block
+  buffered, stderr is not. `fflush(stdout)` after the gate line fixes it, and
+  the checker asserts the ordering.
+- Two `checker.sh` fixtures created a second task in the same second as the
+  first, so `new` refused and `new_task_id` grepped the ID out of the error -
+  giving two names for one task. Both now `sleep 1`, matching the existing
+  convention.
+
+**Evidence.** `nix develop -c ./checker.sh` and
+`nix develop -c ./checker.sh --memcheck`: 111/111, zero leaks. `clang` and
+`x86_64-w64-mingw32-gcc` both warning-clean under `-Wall -Wextra`.
+`tatr migrate --apply` converted all 39 records in this repository and
+`tatr check` is clean against the rewritten `tasks/EXEMPTIONS.md`, which
+collapses 37 rule-scoped lines over 21 tasks into 21 whole-task entries plus 3
+narrow ones. The three version sites read 1.0.0. Every README transcript is
+pasted from a real run of the built binary. The one `manual:` proof - the user
+replaying `NOTES.md` - is pending, and `DECISION.md` explains where the
+implementation deliberately departs from that sketch.
+
+**Reflection.** The plan's doc-sweep proof was written before the migration
+command existed and could not pass while `checker.sh` tests the v0 refusal and
+`CHANGELOG.md` names the removal; narrowing it was a correction, not a
+weakening, and it is stated as such in the DoD. The one thing worth doing
+differently: `NOTES.md` was written as an acceptance target but is a design
+sketch, and reconciling it cost more than writing the transcripts from the
+built binary would have. A target transcript is worth having - it caught the
+half-success reporting shape - but it should be regenerated once the code
+exists rather than treated as a fixture.
+
+**Review round 1.** Five findings, all addressed; responses are on their
+Response lines in `REVIEW.md`. The one with teeth was R1.1: `close` appended a
+`## Dropped` block on every WONTDO, so a close, reopen and re-close left two of
+them and `artifact_field` read the stale one. `reopen` now clears every closure
+fact `close` wrote - the resolution, `- DUPLICATE OF: ` and a trailing
+`## Dropped` block - which is the rule the two commands can actually be stated
+by, and which also covers the WONTDO -> reopen -> DUPLICATE path a strip on the
+`close` side would have missed. R1.2 deleted `unplanned-in-progress`, whose
+predicate had become a strict subset of `inconsistent-gates`, so the fact drew
+two findings and needed two exemption lines. R1.3's `long`-through-an-`unsigned
+int *` write was fixed at both call sites, including the pre-existing one it
+was copied from. R1.4 kept the shared `- DUPLICATE OF: ` line and documented
+the reuse as deliberate and frozen. R1.5 retired two dead chain names from a
+test label and variable.
+
+`nix develop -c ./checker.sh` and `--memcheck`: 112/112, zero leaks; `clang`,
+`gcc` and `x86_64-w64-mingw32-gcc` warning-clean; every `cmd:` proof re-run
+green. `test_reopen_clears_dropped_reason` was confirmed load-bearing by
+stubbing the strip out and watching it fail.

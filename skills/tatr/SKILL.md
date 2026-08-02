@@ -11,7 +11,7 @@ Tatr searches upward for `tasks/`. Use `-r ROOT` for another tree.
 
 - Prefer the CLI for task creation, metadata, lifecycle, records, claims, and checks.
 - Hand-edit task bodies and existing sibling records. Keep changes visible in the diff.
-- Treat `STATUS`, `FLOW STEP`, and `PLAN STATUS` as `tatr flow`-owned.
+- Treat `ACTIVITY`, `GATES`, and `RESOLUTION` as lifecycle-command-owned; `STATUS` is derived.
 - Record plan approval only with `tatr flow <id> --to PLANNED`.
 - Start implementation with `tatr flow <id> --to WORKING`. Requires: approved plan, closed dependencies, no foreign claim.
 - Retire work that should remain as history with `tatr flow <id> --to DROPPED --reason <text>`. Add `--superseded-by <id>` when another task replaced it. Requires: a different existing task ID.

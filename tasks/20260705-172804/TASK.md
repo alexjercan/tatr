@@ -1,11 +1,11 @@
 # Add edit command to update task metadata and title
 
-- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 
 The README lists "No built-in task editing command" as a limitation. Agents
 cannot open an interactive editor, so they need a non-interactive way to change

@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#define TATR_VERSION "0.2.2"
+#define TATR_VERSION "1.0.0"
 
 // Format-checks a vararg reporter, so a message built with SS_Fmt but missing
 // its SS_Arg is a compile error rather than a garbage finding. MinGW's default
@@ -90,14 +90,8 @@ static Aids_String_Slice Task_Status_Strings[] = {
 
 #define STATUS_VALUES_CSTR "OPEN, IN_PROGRESS or CLOSED"
 
-static boolean task_status_from_string(const Aids_String_Slice *slice, Task_Status *out) {
-    int value = 0;
-    if (!enum_from_string(slice, Task_Status_Strings, ENUM_COUNT(Task_Status_Strings), &value)) {
-        return false;
-    }
-    *out = (Task_Status)value;
-    return true;
-}
+// No task_status_from_string: STATUS is never read from a record. It is
+// derived by task_derived_status and only ever printed or filtered on.
 
 // KIND is what makes a record an Epic container: it replaces the old `goal`
 // tag, so a container cannot be conjured (or revoked) by editing a tag list.
@@ -126,87 +120,191 @@ static boolean task_kind_from_string(const Aids_String_Slice *slice, Task_Kind *
     return true;
 }
 
+// ACTIVITY is a cursor over the five things a task can be having done to it.
+// It is nullable - an unstarted task is at no activity at all - and it moves
+// backward as freely as forward, because rework is normal. It proves nothing;
+// GATES does that.
 typedef enum {
-    Flow_Step_BACKLOG,
-    Flow_Step_UNDERSTANDING,
-    Flow_Step_PLANNING,
-    Flow_Step_PLANNED,
-    Flow_Step_WORKING,
-    Flow_Step_REVIEWING,
-    Flow_Step_COMPOUNDING,
-    Flow_Step_DONE,
-    Flow_Step_DROPPED
-} Flow_Step;
+    Task_Activity_UNDERSTANDING,
+    Task_Activity_PLANNING,
+    Task_Activity_WORKING,
+    Task_Activity_REVIEWING,
+    Task_Activity_COMPOUNDING
+} Task_Activity;
 
-static Aids_String_Slice Flow_Step_Strings[] = {
-    [Flow_Step_BACKLOG] = (Aids_String_Slice) { .str = (unsigned char *)"BACKLOG", .len = 7 },
-    [Flow_Step_UNDERSTANDING] = (Aids_String_Slice) { .str = (unsigned char *)"UNDERSTANDING", .len = 13 },
-    [Flow_Step_PLANNING] = (Aids_String_Slice) { .str = (unsigned char *)"PLANNING", .len = 8 },
-    [Flow_Step_PLANNED] = (Aids_String_Slice) { .str = (unsigned char *)"PLANNED", .len = 7 },
-    [Flow_Step_WORKING] = (Aids_String_Slice) { .str = (unsigned char *)"WORKING", .len = 7 },
-    [Flow_Step_REVIEWING] = (Aids_String_Slice) { .str = (unsigned char *)"REVIEWING", .len = 9 },
-    [Flow_Step_COMPOUNDING] = (Aids_String_Slice) { .str = (unsigned char *)"COMPOUNDING", .len = 11 },
-    [Flow_Step_DONE] = (Aids_String_Slice) { .str = (unsigned char *)"DONE", .len = 4 },
-    [Flow_Step_DROPPED] = (Aids_String_Slice) { .str = (unsigned char *)"DROPPED", .len = 7 }
+static Aids_String_Slice Task_Activity_Strings[] = {
+    [Task_Activity_UNDERSTANDING] = (Aids_String_Slice) { .str = (unsigned char *)"UNDERSTANDING", .len = 13 },
+    [Task_Activity_PLANNING] = (Aids_String_Slice) { .str = (unsigned char *)"PLANNING", .len = 8 },
+    [Task_Activity_WORKING] = (Aids_String_Slice) { .str = (unsigned char *)"WORKING", .len = 7 },
+    [Task_Activity_REVIEWING] = (Aids_String_Slice) { .str = (unsigned char *)"REVIEWING", .len = 9 },
+    [Task_Activity_COMPOUNDING] = (Aids_String_Slice) { .str = (unsigned char *)"COMPOUNDING", .len = 11 }
 };
 
-#define FLOW_STEP_VALUES_CSTR \
-    "BACKLOG, UNDERSTANDING, PLANNING, PLANNED, WORKING, REVIEWING, COMPOUNDING, DONE or DROPPED"
+#define ACTIVITY_VALUES_CSTR "UNDERSTANDING, PLANNING, WORKING, REVIEWING or COMPOUNDING"
 
-static boolean flow_step_from_string(const Aids_String_Slice *slice, Flow_Step *out) {
+static boolean task_activity_from_string(const Aids_String_Slice *slice, Task_Activity *out) {
     int value = 0;
-    if (!enum_from_string(slice, Flow_Step_Strings, ENUM_COUNT(Flow_Step_Strings), &value)) {
+    if (!enum_from_string(slice, Task_Activity_Strings, ENUM_COUNT(Task_Activity_Strings), &value)) {
         return false;
     }
-    *out = (Flow_Step)value;
+    *out = (Task_Activity)value;
     return true;
 }
 
-// NOT_REQUIRED is a real answer, not a missing one: it records that a record's
-// cycle never carried plan approval, rather than back-dating an approval that
-// never happened.
+// GATES is the accumulating fact set: what has been proven about the record,
+// independent of where the cursor happens to sit. Stored as a bitset because
+// every question asked of it - "is PLAN earned", "clear everything from
+// REVIEWING on" - is a set operation.
 typedef enum {
-    Plan_Status_DRAFT,
-    Plan_Status_APPROVED,
-    Plan_Status_NOT_REQUIRED
-} Plan_Status;
+    Task_Gate_PLAN,
+    Task_Gate_REVIEW,
+    Task_Gate_RETRO
+} Task_Gate;
 
-static Aids_String_Slice Plan_Status_Strings[] = {
-    [Plan_Status_DRAFT] = (Aids_String_Slice) { .str = (unsigned char *)"DRAFT", .len = 5 },
-    [Plan_Status_APPROVED] = (Aids_String_Slice) { .str = (unsigned char *)"APPROVED", .len = 8 },
-    [Plan_Status_NOT_REQUIRED] = (Aids_String_Slice) { .str = (unsigned char *)"NOT_REQUIRED", .len = 12 }
+static Aids_String_Slice Task_Gate_Strings[] = {
+    [Task_Gate_PLAN] = (Aids_String_Slice) { .str = (unsigned char *)"PLAN", .len = 4 },
+    [Task_Gate_REVIEW] = (Aids_String_Slice) { .str = (unsigned char *)"REVIEW", .len = 6 },
+    [Task_Gate_RETRO] = (Aids_String_Slice) { .str = (unsigned char *)"RETRO", .len = 5 }
 };
 
-#define PLAN_STATUS_VALUES_CSTR "DRAFT, APPROVED or NOT_REQUIRED"
+#define GATE_VALUES_CSTR "PLAN, REVIEW or RETRO"
+#define TASK_GATE_BIT(gate) (1u << (unsigned int)(gate))
+#define TASK_GATES_ALL (TASK_GATE_BIT(Task_Gate_PLAN) | \
+                        TASK_GATE_BIT(Task_Gate_REVIEW) | \
+                        TASK_GATE_BIT(Task_Gate_RETRO))
 
-static boolean plan_status_from_string(const Aids_String_Slice *slice, Plan_Status *out) {
+static boolean task_gate_from_string(const Aids_String_Slice *slice, Task_Gate *out) {
     int value = 0;
-    if (!enum_from_string(slice, Plan_Status_Strings, ENUM_COUNT(Plan_Status_Strings), &value)) {
+    if (!enum_from_string(slice, Task_Gate_Strings, ENUM_COUNT(Task_Gate_Strings), &value)) {
         return false;
     }
-    *out = (Plan_Status)value;
+    *out = (Task_Gate)value;
+    return true;
+}
+
+// The one ordering table the machine runs on: the gate LEAVING each activity
+// produces, or -1 for the activities that prove nothing. `flow` reads it to
+// know which gate to run and record; `rewind` reads it to know which gates a
+// backward move invalidates; `check` reads it to spot a cursor that is past an
+// activity whose gate the record does not carry. One table, three readers - the
+// shared-collector invariant AGENTS.md states, applied to the lifecycle.
+static const int ACTIVITY_EXIT_GATE[] = {
+    [Task_Activity_UNDERSTANDING] = -1,
+    [Task_Activity_PLANNING]      = Task_Gate_PLAN,
+    [Task_Activity_WORKING]       = -1,
+    [Task_Activity_REVIEWING]     = Task_Gate_REVIEW,
+    [Task_Activity_COMPOUNDING]   = Task_Gate_RETRO
+};
+
+static boolean activity_exit_gate(Task_Activity activity, Task_Gate *out) {
+    if (ACTIVITY_EXIT_GATE[activity] < 0) {
+        return false;
+    }
+    *out = (Task_Gate)ACTIVITY_EXIT_GATE[activity];
+    return true;
+}
+
+// The gates a rewind to <activity> invalidates: every gate produced at or after
+// it. Rewinding to WORKING therefore keeps PLAN and clears REVIEW and RETRO -
+// the fix loop does not un-approve the plan, but it does discard the review the
+// fix invalidated.
+static unsigned int activity_rewind_clear_mask(Task_Activity activity) {
+    unsigned int mask = 0;
+    for (size_t a = (size_t)activity; a < ENUM_COUNT(Task_Activity_Strings); ++a) {
+        Task_Gate gate = Task_Gate_PLAN;
+        if (activity_exit_gate((Task_Activity)a, &gate)) {
+            mask |= TASK_GATE_BIT(gate);
+        }
+    }
+    return mask;
+}
+
+// RESOLUTION is why the work stopped, and the only thing that makes a record
+// CLOSED. It is nullable and terminal: setting it is `tatr close`, clearing it
+// is `tatr reopen`, and nothing else touches it.
+typedef enum {
+    Task_Resolution_DONE,
+    Task_Resolution_WONTDO,
+    Task_Resolution_DUPLICATE,
+    Task_Resolution_SUPERSEDED
+} Task_Resolution;
+
+static Aids_String_Slice Task_Resolution_Strings[] = {
+    [Task_Resolution_DONE] = (Aids_String_Slice) { .str = (unsigned char *)"DONE", .len = 4 },
+    [Task_Resolution_WONTDO] = (Aids_String_Slice) { .str = (unsigned char *)"WONTDO", .len = 6 },
+    [Task_Resolution_DUPLICATE] = (Aids_String_Slice) { .str = (unsigned char *)"DUPLICATE", .len = 9 },
+    [Task_Resolution_SUPERSEDED] = (Aids_String_Slice) { .str = (unsigned char *)"SUPERSEDED", .len = 10 }
+};
+
+#define RESOLUTION_VALUES_CSTR "DONE, WONTDO, DUPLICATE or SUPERSEDED"
+
+static boolean task_resolution_from_string(const Aids_String_Slice *slice, Task_Resolution *out) {
+    int value = 0;
+    if (!enum_from_string(slice, Task_Resolution_Strings, ENUM_COUNT(Task_Resolution_Strings), &value)) {
+        return false;
+    }
+    *out = (Task_Resolution)value;
     return true;
 }
 
 typedef struct {
-    Task_Status status;
     unsigned int priority;
     Aids_Array tags; /* Aids_String_Slice */
     Task_Kind kind;
-    Flow_Step flow_step;
-    Plan_Status plan_status;
+    boolean has_activity;
+    Task_Activity activity;
+    unsigned int gates;          /* bitset over Task_Gate */
+    boolean has_resolution;
+    Task_Resolution resolution;
+    Aids_String_Slice duplicate_of; /* len 0 when unset */
     Aids_String_Slice parent;    /* len 0 when unset */
     Aids_Array depends_on;       /* Aids_String_Slice */
 } Task_Meta;
 
+// STATUS is derived from the triple above and never stored, so it cannot drift
+// from the fields it summarizes. See task_derived_status.
 Aids_String_Slice STATUS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- STATUS: ", .len = 10 };
 Aids_String_Slice PRIORITY_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PRIORITY: ", .len = 12 };
 Aids_String_Slice TAGS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- TAGS: ", .len = 8 };
 Aids_String_Slice KIND_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- KIND: ", .len = 8 };
-Aids_String_Slice FLOW_STEP_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- FLOW STEP: ", .len = 13 };
-Aids_String_Slice PLAN_STATUS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PLAN STATUS: ", .len = 15 };
+Aids_String_Slice ACTIVITY_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- ACTIVITY: ", .len = 12 };
+Aids_String_Slice GATES_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- GATES: ", .len = 9 };
+Aids_String_Slice RESOLUTION_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- RESOLUTION: ", .len = 14 };
+Aids_String_Slice DUPLICATE_OF_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- DUPLICATE OF: ", .len = 16 };
 Aids_String_Slice PARENT_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PARENT: ", .len = 10 };
 Aids_String_Slice DEPENDS_ON_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- DEPENDS ON: ", .len = 14 };
+// The v0 spelling, kept only so a record that still carries it is refused by
+// name with a pointer at `tatr migrate` rather than as a shapeless parse error.
+Aids_String_Slice FLOW_STEP_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- FLOW STEP: ", .len = 13 };
+
+// The one place a value's absence is written down. `-` and not the empty
+// string, so a nullable field always has a visible value and an accidentally
+// truncated line is a parse error rather than an unset field.
+#define FIELD_UNSET_CSTR "-"
+
+static Aids_String_Slice FIELD_UNSET = (Aids_String_Slice) { .str = (unsigned char *)FIELD_UNSET_CSTR, .len = 1 };
+
+static boolean field_value_is_unset(const Aids_String_Slice *value) {
+    return aids_string_slice_compare(value, &FIELD_UNSET) == 0;
+}
+
+// The slice a nullable field serializes and reports as: the value when it has
+// one, "-" when it does not.
+static Aids_String_Slice field_value_or_unset(boolean has_value, Aids_String_Slice value) {
+    return has_value ? value : FIELD_UNSET;
+}
+
+// CLOSED when the work stopped, OPEN when it never started, IN_PROGRESS in
+// between. Three stored fields, one derived summary, computed at every read.
+static Task_Status task_derived_status(const Task_Meta *meta) {
+    if (meta->has_resolution) {
+        return Task_Status_CLOSED;
+    }
+    if (!meta->has_activity) {
+        return Task_Status_OPEN;
+    }
+    return Task_Status_IN_PROGRESS;
+}
 
 typedef struct {
     Aids_String_Slice title;
@@ -223,11 +321,14 @@ static void task_init_empty(Task *task) {
 
     task->title = (Aids_String_Slice) {0};
     task->description = (Aids_String_Slice) {0};
-    task->meta.status = Task_Status_OPEN;
     task->meta.priority = 0;
     task->meta.kind = Task_Kind_TASK;
-    task->meta.flow_step = Flow_Step_BACKLOG;
-    task->meta.plan_status = Plan_Status_DRAFT;
+    task->meta.has_activity = false;
+    task->meta.activity = Task_Activity_UNDERSTANDING;
+    task->meta.gates = 0;
+    task->meta.has_resolution = false;
+    task->meta.resolution = Task_Resolution_DONE;
+    task->meta.duplicate_of = (Aids_String_Slice) {0};
     task->meta.parent = (Aids_String_Slice) {0};
     task->_buffer = NULL;
     aids_array_init(&task->meta.tags, sizeof(Aids_String_Slice));
@@ -338,19 +439,6 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
 
-    // - STATUS: OPEN | IN_PROGRESS | CLOSED
-    if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(STATUS_FORMAT)) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append status format: %s", aids_failure_reason());
-        return_defer(AIDS_ERR);
-    }
-    if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(Task_Status_Strings[task.meta.status])) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append status value: %s", aids_failure_reason());
-        return_defer(AIDS_ERR);
-    }
-    if (aids_string_builder_append(&builder, "\n") != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append status newline: %s", aids_failure_reason());
-        return_defer(AIDS_ERR);
-    }
     // - PRIORITY: 100
     if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(PRIORITY_FORMAT)) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append priority format: %s", aids_failure_reason());
@@ -374,7 +462,9 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
 
-    // - KIND / FLOW STEP / PLAN STATUS: always written, in this order.
+    // - KIND / ACTIVITY / GATES / RESOLUTION: always written, in this order.
+    // The nullable three write "-" rather than being omitted: the field set a
+    // record carries must not depend on the values in it.
     if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
                                    SS_Arg(KIND_FORMAT),
                                    SS_Arg(Task_Kind_Strings[task.meta.kind])) != AIDS_OK) {
@@ -382,20 +472,62 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
     if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
-                                   SS_Arg(FLOW_STEP_FORMAT),
-                                   SS_Arg(Flow_Step_Strings[task.meta.flow_step])) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append flow step: %s", aids_failure_reason());
+                                   SS_Arg(ACTIVITY_FORMAT),
+                                   SS_Arg(field_value_or_unset(task.meta.has_activity,
+                                                               Task_Activity_Strings[task.meta.activity]))) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append activity: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    // GATES is written in gate order, space separated, so the line reads the
+    // same whatever order the gates were earned in.
+    if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(GATES_FORMAT)) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append gates format: %s", aids_failure_reason());
+        return_defer(AIDS_ERR);
+    }
+    if (task.meta.gates == 0) {
+        if (aids_string_builder_append(&builder, FIELD_UNSET_CSTR) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "task_serialize: Failed to append gates: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+    } else {
+        boolean first = true;
+        for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
+            if ((task.meta.gates & TASK_GATE_BIT(g)) == 0) {
+                continue;
+            }
+            if (!first && aids_string_builder_append(&builder, " ") != AIDS_OK) {
+                aids_log(AIDS_ERROR, "task_serialize: Failed to append gate separator: %s", aids_failure_reason());
+                return_defer(AIDS_ERR);
+            }
+            if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(Task_Gate_Strings[g])) != AIDS_OK) {
+                aids_log(AIDS_ERROR, "task_serialize: Failed to append gate: %s", aids_failure_reason());
+                return_defer(AIDS_ERR);
+            }
+            first = false;
+        }
+    }
+    if (aids_string_builder_append(&builder, "\n") != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append gates newline: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
     if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
-                                   SS_Arg(PLAN_STATUS_FORMAT),
-                                   SS_Arg(Plan_Status_Strings[task.meta.plan_status])) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append plan status: %s", aids_failure_reason());
+                                   SS_Arg(RESOLUTION_FORMAT),
+                                   SS_Arg(field_value_or_unset(task.meta.has_resolution,
+                                                               Task_Resolution_Strings[task.meta.resolution]))) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "task_serialize: Failed to append resolution: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
 
-    // - PARENT / DEPENDS ON: optional, so an unrelated task carries no empty
-    // relationship lines at all.
+    // - DUPLICATE OF / PARENT / DEPENDS ON: optional, so an unrelated task
+    // carries no empty relationship lines at all.
+    if (task.meta.duplicate_of.len > 0) {
+        if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
+                                       SS_Arg(DUPLICATE_OF_FORMAT),
+                                       SS_Arg(task.meta.duplicate_of)) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "task_serialize: Failed to append duplicate of: %s", aids_failure_reason());
+            return_defer(AIDS_ERR);
+        }
+    }
     if (task.meta.parent.len > 0) {
         if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
                                        SS_Arg(PARENT_FORMAT),
@@ -456,23 +588,15 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     aids_string_slice_skip(&task->title, 2);
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // - STATUS: OPEN | IN_PROGRESS | CLOSED
-    if (!aids_string_slice_starts_with(&buffer, STATUS_FORMAT)) {
-        aids_log(AIDS_ERROR, "task_deserialize: Buffer does not start with expected status format");
+    // A v0 record opens with "- STATUS: " where a v1 one opens with
+    // "- PRIORITY: ". Naming the migration here is the whole compatibility
+    // story: every command loads records through this parser, so every command
+    // refuses a legacy record with the same pointer.
+    if (aids_string_slice_starts_with(&buffer, STATUS_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: this record is in the v0 format (it still carries '"
+                 SS_Fmt "'); run `tatr migrate --apply` to convert it", SS_Arg(STATUS_FORMAT));
         return_defer(AIDS_ERR);
     }
-    aids_string_slice_skip(&buffer, STATUS_FORMAT.len);
-    Aids_String_Slice status_slice;
-    if (!aids_string_slice_tokenize(&buffer, '\n', &status_slice)) {
-        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse status from buffer");
-        return_defer(AIDS_ERR);
-    }
-    if (!task_status_from_string(&status_slice, &task->meta.status)) {
-        aids_log(AIDS_ERROR, "task_deserialize: invalid STATUS '" SS_Fmt "' (use " STATUS_VALUES_CSTR "; whitespace and line endings count)",
-                 SS_Arg(status_slice));
-        return_defer(AIDS_ERR);
-    }
-    aids_string_slice_skip_while(&buffer, isspace);
 
     // - PRIORITY: 100
     if (!aids_string_slice_starts_with(&buffer, PRIORITY_FORMAT)) {
@@ -485,10 +609,15 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
         aids_log(AIDS_ERROR, "task_deserialize: Failed to parse priority from buffer");
         return_defer(AIDS_ERR);
     }
-    if (!aids_string_slice_atol(&priority_slice, (long *)&task->meta.priority, 10)) {
+    // Parsed into a long and narrowed: aids_string_slice_atol writes a whole
+    // long through the pointer it is given, which the 4-byte priority field
+    // cannot receive.
+    long priority = 0;
+    if (!aids_string_slice_atol(&priority_slice, &priority, 10)) {
         aids_log(AIDS_ERROR, "task_deserialize: Failed to convert priority to number: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
     }
+    task->meta.priority = (unsigned int)priority;
     aids_string_slice_skip_while(&buffer, isspace);
 
     // - TAGS: tag1, tag2, tag3
@@ -510,12 +639,12 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     aids_string_slice_skip_while(&buffer, isspace);
 
     // - KIND: TASK | EPIC | STORY | SPIKE
-    // This is where a pre-v2 record stops looking like a v2 one, so it is the
-    // right place to say so: there is no compatibility path to fall back to.
+    // This is where a record stops looking like a v1 one, so it is the right
+    // place to say so: there is no compatibility path to fall back to.
     if (!aids_string_slice_starts_with(&buffer, KIND_FORMAT)) {
         aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the TAGS line "
-                 "(v2 field order: STATUS, PRIORITY, TAGS, KIND, FLOW STEP, PLAN STATUS, "
-                 "[PARENT], [DEPENDS ON]); correct the record by hand", SS_Arg(KIND_FORMAT));
+                 "(v1 field order: PRIORITY, TAGS, KIND, ACTIVITY, GATES, RESOLUTION, "
+                 "[DUPLICATE OF], [PARENT], [DEPENDS ON]); correct the record by hand", SS_Arg(KIND_FORMAT));
         return_defer(AIDS_ERR);
     }
     aids_string_slice_skip(&buffer, KIND_FORMAT.len);
@@ -531,41 +660,112 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     }
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // - FLOW STEP: BACKLOG | ... | DONE
-    if (!aids_string_slice_starts_with(&buffer, FLOW_STEP_FORMAT)) {
-        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the KIND line", SS_Arg(FLOW_STEP_FORMAT));
+    // - ACTIVITY: - | UNDERSTANDING | ... | COMPOUNDING
+    if (aids_string_slice_starts_with(&buffer, FLOW_STEP_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: this record is in the v0 format (it still carries '"
+                 SS_Fmt "'); run `tatr migrate --apply` to convert it", SS_Arg(FLOW_STEP_FORMAT));
         return_defer(AIDS_ERR);
     }
-    aids_string_slice_skip(&buffer, FLOW_STEP_FORMAT.len);
-    Aids_String_Slice flow_step_slice;
-    if (!aids_string_slice_tokenize(&buffer, '\n', &flow_step_slice)) {
-        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse flow step from buffer");
+    if (!aids_string_slice_starts_with(&buffer, ACTIVITY_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the KIND line", SS_Arg(ACTIVITY_FORMAT));
         return_defer(AIDS_ERR);
     }
-    if (!flow_step_from_string(&flow_step_slice, &task->meta.flow_step)) {
-        aids_log(AIDS_ERROR, "task_deserialize: invalid FLOW STEP '" SS_Fmt "' (use " FLOW_STEP_VALUES_CSTR "; whitespace and line endings count)",
-                 SS_Arg(flow_step_slice));
+    aids_string_slice_skip(&buffer, ACTIVITY_FORMAT.len);
+    Aids_String_Slice activity_slice;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &activity_slice)) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse activity from buffer");
         return_defer(AIDS_ERR);
+    }
+    if (field_value_is_unset(&activity_slice)) {
+        task->meta.has_activity = false;
+    } else if (!task_activity_from_string(&activity_slice, &task->meta.activity)) {
+        aids_log(AIDS_ERROR, "task_deserialize: invalid ACTIVITY '" SS_Fmt "' (use " FIELD_UNSET_CSTR
+                 " or " ACTIVITY_VALUES_CSTR "; whitespace and line endings count)",
+                 SS_Arg(activity_slice));
+        return_defer(AIDS_ERR);
+    } else {
+        task->meta.has_activity = true;
     }
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // - PLAN STATUS: DRAFT | APPROVED | NOT_REQUIRED
-    if (!aids_string_slice_starts_with(&buffer, PLAN_STATUS_FORMAT)) {
-        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the FLOW STEP line", SS_Arg(PLAN_STATUS_FORMAT));
+    // - GATES: - | PLAN [REVIEW [RETRO]]
+    if (!aids_string_slice_starts_with(&buffer, GATES_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the ACTIVITY line", SS_Arg(GATES_FORMAT));
         return_defer(AIDS_ERR);
     }
-    aids_string_slice_skip(&buffer, PLAN_STATUS_FORMAT.len);
-    Aids_String_Slice plan_status_slice;
-    if (!aids_string_slice_tokenize(&buffer, '\n', &plan_status_slice)) {
-        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse plan status from buffer");
+    aids_string_slice_skip(&buffer, GATES_FORMAT.len);
+    Aids_String_Slice gates_slice;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &gates_slice)) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse gates from buffer");
         return_defer(AIDS_ERR);
     }
-    if (!plan_status_from_string(&plan_status_slice, &task->meta.plan_status)) {
-        aids_log(AIDS_ERROR, "task_deserialize: invalid PLAN STATUS '" SS_Fmt "' (use " PLAN_STATUS_VALUES_CSTR "; whitespace and line endings count)",
-                 SS_Arg(plan_status_slice));
-        return_defer(AIDS_ERR);
+    if (!field_value_is_unset(&gates_slice)) {
+        Aids_String_Slice rest = gates_slice;
+        while (rest.len > 0) {
+            Aids_String_Slice name = {0};
+            if (!aids_string_slice_tokenize(&rest, ' ', &name)) {
+                name = rest;
+                rest.len = 0;
+            }
+            aids_string_slice_trim(&name);
+            if (name.len == 0) {
+                continue;
+            }
+            Task_Gate gate = Task_Gate_PLAN;
+            if (!task_gate_from_string(&name, &gate)) {
+                aids_log(AIDS_ERROR, "task_deserialize: invalid GATES entry '" SS_Fmt "' (use " FIELD_UNSET_CSTR
+                         " or a space-separated subset of " GATE_VALUES_CSTR ")", SS_Arg(name));
+                return_defer(AIDS_ERR);
+            }
+            task->meta.gates |= TASK_GATE_BIT(gate);
+        }
     }
     aids_string_slice_skip_while(&buffer, isspace);
+
+    // - RESOLUTION: - | DONE | WONTDO | DUPLICATE | SUPERSEDED
+    if (!aids_string_slice_starts_with(&buffer, RESOLUTION_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the GATES line", SS_Arg(RESOLUTION_FORMAT));
+        return_defer(AIDS_ERR);
+    }
+    aids_string_slice_skip(&buffer, RESOLUTION_FORMAT.len);
+    Aids_String_Slice resolution_slice;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &resolution_slice)) {
+        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse resolution from buffer");
+        return_defer(AIDS_ERR);
+    }
+    if (field_value_is_unset(&resolution_slice)) {
+        task->meta.has_resolution = false;
+    } else if (!task_resolution_from_string(&resolution_slice, &task->meta.resolution)) {
+        aids_log(AIDS_ERROR, "task_deserialize: invalid RESOLUTION '" SS_Fmt "' (use " FIELD_UNSET_CSTR
+                 " or " RESOLUTION_VALUES_CSTR "; whitespace and line endings count)",
+                 SS_Arg(resolution_slice));
+        return_defer(AIDS_ERR);
+    } else {
+        task->meta.has_resolution = true;
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    // - DUPLICATE OF: <huid>   (optional; what DUPLICATE and SUPERSEDED point at)
+    if (aids_string_slice_starts_with(&buffer, DUPLICATE_OF_FORMAT)) {
+        aids_string_slice_skip(&buffer, DUPLICATE_OF_FORMAT.len);
+        Aids_String_Slice duplicate_of_slice;
+        if (!aids_string_slice_tokenize(&buffer, '\n', &duplicate_of_slice)) {
+            aids_log(AIDS_ERROR, "task_deserialize: Failed to parse duplicate of from buffer");
+            return_defer(AIDS_ERR);
+        }
+        if (duplicate_of_slice.len == 0) {
+            aids_log(AIDS_ERROR, "task_deserialize: DUPLICATE OF has no value; omit the line entirely, or write '"
+                     SS_Fmt "20240630-235959'", SS_Arg(DUPLICATE_OF_FORMAT));
+            return_defer(AIDS_ERR);
+        }
+        if (!ishuid(&duplicate_of_slice)) {
+            aids_log(AIDS_ERROR, "task_deserialize: invalid DUPLICATE OF '" SS_Fmt "' (expected a task ID like 20240630-235959)",
+                     SS_Arg(duplicate_of_slice));
+            return_defer(AIDS_ERR);
+        }
+        task->meta.duplicate_of = duplicate_of_slice;
+        aids_string_slice_skip_while(&buffer, isspace);
+    }
 
     // - PARENT: <huid>   (optional)
     if (aids_string_slice_starts_with(&buffer, PARENT_FORMAT)) {
@@ -629,6 +829,11 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     // police it: a bullet is a bullet, even an uppercase one. The single
     // exception is a valueless optional field, which is a hand-editing slip
     // rather than prose.
+    if (starts_with_empty_field(buffer, DUPLICATE_OF_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: DUPLICATE OF has no value; omit the line entirely, or write '"
+                 SS_Fmt "20240630-235959'", SS_Arg(DUPLICATE_OF_FORMAT));
+        return_defer(AIDS_ERR);
+    }
     if (starts_with_empty_field(buffer, PARENT_FORMAT)) {
         aids_log(AIDS_ERROR, "task_deserialize: PARENT has no value; omit the line entirely, or write '"
                  SS_Fmt "20240630-235959'", SS_Arg(PARENT_FORMAT));
@@ -892,8 +1097,10 @@ defer:
     return result;
 }
 
-// The workflow fields STATUS, FLOW STEP and PLAN STATUS are written by
-// `tatr flow` alone, so their flags are gone from `new` and `edit`. argparse
+// The workflow fields are written by the lifecycle commands alone, so their
+// flags are gone from `new` and `edit`. The v0 spellings are still listed here
+// because a caller who reaches for them needs the new name, not a generic
+// "unknown option". argparse
 // rejects an unknown option with a generic message that says nothing about
 // where the field went, so both subcommands scan for the retired spellings
 // first and point at the lifecycle. The scan is a plain token match over the
@@ -907,11 +1114,18 @@ static boolean argparse_reject_retired_workflow_flags(const Tatr_Context *ctx) {
         const char *pointer;
     } retired[] = {
         {"-s", "--status", "STATUS",
-         "STATUS is derived from FLOW STEP; move the task with `tatr flow <ID> [--to <STEP>]`"},
+         "STATUS is derived from ACTIVITY and RESOLUTION; it is not stored at all"},
         {"-f", "--flow-step", "FLOW STEP",
-         "move the task with `tatr flow <ID> [--to <STEP>]`"},
+         "FLOW STEP was replaced by ACTIVITY, GATES and RESOLUTION; move the task with "
+         "`tatr flow <ID>`, `tatr rewind <ID> --to <ACTIVITY>` or `tatr close <ID> --resolution <R>`"},
         {"-S", "--plan-status", "PLAN STATUS",
-         "PLAN STATUS: APPROVED is written by the plan gate: `tatr flow <ID> --to PLANNED`"},
+         "PLAN STATUS became the PLAN gate, recorded by `tatr flow <ID>` out of PLANNING"},
+        {"-a", "--activity", "ACTIVITY",
+         "move the cursor with `tatr flow <ID>` or `tatr rewind <ID> --to <ACTIVITY>`"},
+        {"-g", "--gates", "GATES",
+         "a gate is earned by `tatr flow <ID>` and cleared by `tatr rewind <ID> --to <ACTIVITY>`"},
+        {"-x", "--resolution", "RESOLUTION",
+         "close the task with `tatr close <ID> --resolution <R>`, reopen it with `tatr reopen <ID>`"},
     };
 
     for (int i = 1; i < ctx->argc; ++i) {
@@ -1354,10 +1568,14 @@ static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task
 
     print_file_path(path_buffer);
 
-    printf(": [PRIORITY: %u, KIND: " SS_Fmt ", FLOW STEP: " SS_Fmt ", TAGS: ",
+    // STATUS is printed even though it is not stored: it is the one-word answer
+    // to "where is this", and a reader should not have to derive it themselves.
+    printf(": [PRIORITY: %u, KIND: " SS_Fmt ", STATUS: " SS_Fmt ", ACTIVITY: " SS_Fmt ", TAGS: ",
            task.meta.priority,
            SS_Arg(Task_Kind_Strings[task.meta.kind]),
-           SS_Arg(Flow_Step_Strings[task.meta.flow_step]));
+           SS_Arg(Task_Status_Strings[task_derived_status(&task.meta)]),
+           SS_Arg(field_value_or_unset(task.meta.has_activity,
+                                       Task_Activity_Strings[task.meta.activity])));
     for (size_t i = 0; i < task.meta.tags.count; ++i) {
         Aids_String_Slice *tag = NULL;
         AIDS_ASSERT(aids_array_get(&task.meta.tags, i, (void **)&tag) == AIDS_OK,
@@ -1380,7 +1598,11 @@ static Aids_Result task_print_full(Aids_String_Slice task_file_path, Task task) 
     }
 
     print_file_path(path_buffer);
-    printf("\n\n");
+    // The derived STATUS rides on the header line rather than in the record
+    // body: the body below is exactly what would be written back, and a
+    // "- STATUS: " line in it would be a field the format no longer has.
+    printf("  (STATUS: " SS_Fmt ")\n\n",
+           SS_Arg(Task_Status_Strings[task_derived_status(&task.meta)]));
 
     // Print what would be written back, so `show` can never drift from the
     // on-disk format the serializer defines.
@@ -2688,10 +2910,14 @@ typedef enum {
     TATR_FILTER_FIELD_TYPE_PRIORITY,
     TATR_FILTER_FIELD_TYPE_TITLE,
     TATR_FILTER_FIELD_TYPE_KIND,
-    TATR_FILTER_FIELD_TYPE_FLOW_STEP,
-    TATR_FILTER_FIELD_TYPE_PLAN_STATUS,
+    TATR_FILTER_FIELD_TYPE_ACTIVITY,
+    TATR_FILTER_FIELD_TYPE_RESOLUTION,
+    TATR_FILTER_FIELD_TYPE_GATES,
     TATR_FILTER_FIELD_TYPE_PARENT,
     TATR_FILTER_FIELD_TYPE_DEPENDS,
+    // The two v0 spellings, recognized only so they can be refused by name.
+    TATR_FILTER_FIELD_TYPE_RETIRED_FLOW_STEP,
+    TATR_FILTER_FIELD_TYPE_RETIRED_PLAN_STATUS,
     TATR_FILTER_FIELD_TYPE_UNKNOWN
 } Tatr_Filter_Field_Type;
 
@@ -2710,6 +2936,9 @@ static Aids_String_Slice FIELD_NAME_TAGS = (Aids_String_Slice) { .str = (unsigne
 static Aids_String_Slice FIELD_NAME_PRIORITY = (Aids_String_Slice) { .str = (unsigned char *)"priority", .len = 8 };
 static Aids_String_Slice FIELD_NAME_TITLE = (Aids_String_Slice) { .str = (unsigned char *)"title", .len = 5 };
 static Aids_String_Slice FIELD_NAME_KIND = (Aids_String_Slice) { .str = (unsigned char *)"kind", .len = 4 };
+static Aids_String_Slice FIELD_NAME_ACTIVITY = (Aids_String_Slice) { .str = (unsigned char *)"activity", .len = 8 };
+static Aids_String_Slice FIELD_NAME_RESOLUTION = (Aids_String_Slice) { .str = (unsigned char *)"resolution", .len = 10 };
+static Aids_String_Slice FIELD_NAME_GATES = (Aids_String_Slice) { .str = (unsigned char *)"gates", .len = 5 };
 static Aids_String_Slice FIELD_NAME_FLOW_STEP = (Aids_String_Slice) { .str = (unsigned char *)"flow_step", .len = 9 };
 static Aids_String_Slice FIELD_NAME_PLAN_STATUS = (Aids_String_Slice) { .str = (unsigned char *)"plan_status", .len = 11 };
 static Aids_String_Slice FIELD_NAME_PARENT = (Aids_String_Slice) { .str = (unsigned char *)"parent", .len = 6 };
@@ -2732,11 +2961,20 @@ static Tatr_Filter_Field_Type tatr_filter_get_field_type(Aids_String_Slice field
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_KIND) == 0) {
         return TATR_FILTER_FIELD_TYPE_KIND;
     }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_ACTIVITY) == 0) {
+        return TATR_FILTER_FIELD_TYPE_ACTIVITY;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_RESOLUTION) == 0) {
+        return TATR_FILTER_FIELD_TYPE_RESOLUTION;
+    }
+    if (aids_string_slice_compare(&field_name, &FIELD_NAME_GATES) == 0) {
+        return TATR_FILTER_FIELD_TYPE_GATES;
+    }
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_FLOW_STEP) == 0) {
-        return TATR_FILTER_FIELD_TYPE_FLOW_STEP;
+        return TATR_FILTER_FIELD_TYPE_RETIRED_FLOW_STEP;
     }
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_PLAN_STATUS) == 0) {
-        return TATR_FILTER_FIELD_TYPE_PLAN_STATUS;
+        return TATR_FILTER_FIELD_TYPE_RETIRED_PLAN_STATUS;
     }
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_PARENT) == 0) {
         return TATR_FILTER_FIELD_TYPE_PARENT;
@@ -2765,29 +3003,53 @@ static const Aids_String_Slice *tatr_filter_enum_table(Tatr_Filter_Field_Type fi
             *field_label = "kind";
             *values_hint = KIND_VALUES_CSTR;
             return Task_Kind_Strings;
-        case TATR_FILTER_FIELD_TYPE_FLOW_STEP:
-            *count = ENUM_COUNT(Flow_Step_Strings);
-            *field_label = "flow step";
-            *values_hint = FLOW_STEP_VALUES_CSTR;
-            return Flow_Step_Strings;
-        case TATR_FILTER_FIELD_TYPE_PLAN_STATUS:
-            *count = ENUM_COUNT(Plan_Status_Strings);
-            *field_label = "plan status";
-            *values_hint = PLAN_STATUS_VALUES_CSTR;
-            return Plan_Status_Strings;
+        case TATR_FILTER_FIELD_TYPE_ACTIVITY:
+            *count = ENUM_COUNT(Task_Activity_Strings);
+            *field_label = "activity";
+            *values_hint = ACTIVITY_VALUES_CSTR;
+            return Task_Activity_Strings;
+        case TATR_FILTER_FIELD_TYPE_RESOLUTION:
+            *count = ENUM_COUNT(Task_Resolution_Strings);
+            *field_label = "resolution";
+            *values_hint = RESOLUTION_VALUES_CSTR;
+            return Task_Resolution_Strings;
         default:
             return NULL;
     }
 }
 
-// The enum a task actually carries for such a field.
+// The enum a task actually carries for such a field. -1 for a nullable field
+// the record leaves unset, which no enum index equals: `:activity eq PLANNING`
+// is simply false for a task that has not started.
 static int tatr_filter_enum_value(Tatr_Filter_Field_Type field_type, const Task *task) {
     switch (field_type) {
-        case TATR_FILTER_FIELD_TYPE_STATUS: return (int)task->meta.status;
+        case TATR_FILTER_FIELD_TYPE_STATUS: return (int)task_derived_status(&task->meta);
         case TATR_FILTER_FIELD_TYPE_KIND: return (int)task->meta.kind;
-        case TATR_FILTER_FIELD_TYPE_FLOW_STEP: return (int)task->meta.flow_step;
-        case TATR_FILTER_FIELD_TYPE_PLAN_STATUS: return (int)task->meta.plan_status;
+        case TATR_FILTER_FIELD_TYPE_ACTIVITY:
+            return task->meta.has_activity ? (int)task->meta.activity : -1;
+        case TATR_FILTER_FIELD_TYPE_RESOLUTION:
+            return task->meta.has_resolution ? (int)task->meta.resolution : -1;
         default: return -1;
+    }
+}
+
+// The v0 filter spellings are refused by name with the replacement, following
+// the same precedent as the retired `new`/`edit` flags: a query that silently
+// became "unknown field" would send the caller looking for a typo.
+static boolean tatr_filter_retired_field(Tatr_Filter_Field_Type field_type,
+                                         const char **name, const char **pointer) {
+    switch (field_type) {
+        case TATR_FILTER_FIELD_TYPE_RETIRED_FLOW_STEP:
+            *name = "flow_step";
+            *pointer = "use ':activity' for the cursor, ':gates contains PLAN' for the plan gate, "
+                       "or ':resolution' for closure";
+            return true;
+        case TATR_FILTER_FIELD_TYPE_RETIRED_PLAN_STATUS:
+            *name = "plan_status";
+            *pointer = "use ':gates contains PLAN'";
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -2812,6 +3074,16 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
         tatr_filter_lexer_position_info(lexer, left->info.index, &line, &column);
         snprintf(error_msg, error_msg_size, "line %lu, col %lu: unknown field '" SS_Fmt "'",
                  line, column, SS_Arg(left->data.field.name));
+        return false;
+    }
+
+    const char *retired_name = NULL;
+    const char *retired_pointer = NULL;
+    if (tatr_filter_retired_field(field_type, &retired_name, &retired_pointer)) {
+        unsigned long line, column;
+        tatr_filter_lexer_position_info(lexer, left->info.index, &line, &column);
+        snprintf(error_msg, error_msg_size, "line %lu, col %lu: field ':%s' was retired; %s",
+                 line, column, retired_name, retired_pointer);
         return false;
     }
 
@@ -2913,13 +3185,25 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
     } else if (op == TATR_FILTER_COMPARISON_OP_CONTAINS) {
         // contains: tags/depends contains value, or title contains substring
         if (field_type == TATR_FILTER_FIELD_TYPE_TAGS ||
-            field_type == TATR_FILTER_FIELD_TYPE_DEPENDS) {
-            // Right side must be an identifier (a tag name or a task ID)
+            field_type == TATR_FILTER_FIELD_TYPE_DEPENDS ||
+            field_type == TATR_FILTER_FIELD_TYPE_GATES) {
+            // Right side must be an identifier (a tag name, a task ID or a gate)
             if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
                 snprintf(error_msg, error_msg_size, "line %lu, col %lu: " SS_Fmt " 'contains' requires an identifier",
                          line, column, SS_Arg(left->data.field.name));
+                return false;
+            }
+            // A gate name is a closed set, so a typo is a query error rather
+            // than a query that matches nothing.
+            Task_Gate gate = Task_Gate_PLAN;
+            if (field_type == TATR_FILTER_FIELD_TYPE_GATES &&
+                !task_gate_from_string(&right->data.identifier.value, &gate)) {
+                unsigned long line, column;
+                tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid gate '" SS_Fmt "' (must be %s)",
+                         line, column, SS_Arg(right->data.identifier.value), GATE_VALUES_CSTR);
                 return false;
             }
         } else if (field_type == TATR_FILTER_FIELD_TYPE_TITLE) {
@@ -3030,6 +3314,11 @@ static boolean tatr_filter_eval_comparison(Tatr_Filter_Ast_Node *node, const Tas
             return false;
         }
     } else if (op == TATR_FILTER_COMPARISON_OP_CONTAINS) {
+        if (field_type == TATR_FILTER_FIELD_TYPE_GATES) {
+            Task_Gate gate = Task_Gate_PLAN;
+            return task_gate_from_string(&right->data.identifier.value, &gate) &&
+                   (task->meta.gates & TASK_GATE_BIT(gate)) != 0;
+        }
         if (field_type == TATR_FILTER_FIELD_TYPE_TAGS ||
             field_type == TATR_FILTER_FIELD_TYPE_DEPENDS) {
             // Check if the task carries the tag / dependency
@@ -4534,16 +4823,18 @@ static void decision_record_problems(const Aids_String_Slice *tasks_dir,
 }
 
 // The record problems of a TASK.md itself: the plan gate's sections (owed only
-// from PLANNED on, since they ARE its output) and the DoD proof contracts.
+// once the PLAN gate is earned, since they ARE its output) and the DoD proof
+// contracts.
 //
-// <step> is the step the record is being judged AT, which is not always the one
-// it currently carries: `check` passes the task's own step, while `flow` passes
-// the step it is about to move to. That is what lets the plan gate refuse to
-// mint a PLANNED record the lint would immediately flag.
-static void task_record_problems(Task_Kind kind, Flow_Step step,
+// <plan_gate> is whether the record is being judged as carrying the PLAN gate,
+// which is not always what it currently carries: `check` passes the task's own
+// gate set, while `flow` passes true because it is about to record the gate.
+// That is what lets the plan gate refuse to mint an approved plan the lint
+// would immediately flag.
+static void task_record_problems(Task_Kind kind, boolean plan_gate,
                                  Aids_String_Slice task_raw,
                                  Record_Problems *problems) {
-    if (step >= Flow_Step_PLANNED && step != Flow_Step_DROPPED) {
+    if (plan_gate) {
         record_schema_problems(Record_Kind_TASK, task_raw,
                                task_required_sections(kind), problems);
     }
@@ -4572,8 +4863,10 @@ typedef struct {
     Aids_String_Slice huid;    // borrowed from the node's own owned copy
     Aids_String_Slice title;
     Task_Kind kind;
-    Task_Status status;
-    Flow_Step flow_step;
+    Task_Status status;        // derived, cached at load
+    boolean has_activity;
+    Task_Activity activity;
+    unsigned int gates;
     unsigned int priority;
     Aids_String_Slice parent;  // len 0 when unset
     Aids_Array depends_on;     /* Aids_String_Slice, borrowed from _buffer */
@@ -4659,8 +4952,10 @@ static Aids_Result task_graph_load(const Aids_String_Slice *tasks_dir, Task_Grap
                 node.parsed = true;
                 node.title = task.title;
                 node.kind = task.meta.kind;
-                node.status = task.meta.status;
-                node.flow_step = task.meta.flow_step;
+                node.status = task_derived_status(&task.meta);
+                node.has_activity = task.meta.has_activity;
+                node.activity = task.meta.activity;
+                node.gates = task.meta.gates;
                 node.priority = task.meta.priority;
                 node.parent = task.meta.parent;
                 for (size_t d = 0; d < task.meta.depends_on.count; ++d) {
@@ -5215,119 +5510,33 @@ cleanup:
 }
 
 // ---------------------------------------------------------------------------
-// flow: the guarded lifecycle. `tatr flow <ID> [--to <STEP>]` is the only
-// writer of STATUS, FLOW STEP and PLAN STATUS - `new` and `edit` cannot set
-// them - so a record can only reach a state by walking edges whose
-// preconditions were met. Every precondition is evaluated before anything is
-// mutated and all unmet ones are reported, so a refused transition leaves
-// TASK.md byte-identical. There is no --force and no repair verb: a record in
-// the wrong state is corrected by hand in TASK.md, where a reviewer sees it in
-// the diff.
+// The lifecycle commands. Between them, `flow`, `rewind`, `close` and `reopen`
+// are the only writers of ACTIVITY, GATES and RESOLUTION - `new` and `edit`
+// cannot set them - so a record can only carry a gate that was earned.
+//
+// The split is the point. `flow` moves the cursor FORWARD and is the sole
+// writer of GATES: a gate cannot be skipped because there is only one door.
+// `rewind` moves it BACKWARD, runs no gate at all, and clears the gates the
+// move invalidated: going back to fix something must never be harder than
+// going forward. `close` and `reopen` own RESOLUTION.
+//
+// Every precondition is evaluated before anything is mutated, and all unmet
+// ones are reported, so a refused command leaves TASK.md byte-identical. The
+// one deliberate exception is a `flow` whose gate passed but whose world is not
+// ready: it records the gate, holds the cursor, and says so. Atomicity is
+// preserved at the write - still a single task_save - rather than at the
+// command, because a fact about the record and a fact about the world are
+// allowed to disagree.
 // ---------------------------------------------------------------------------
 
-// STATUS is derived from the flow step, never chosen. A work task therefore
-// stays IN_PROGRESS through review and compound, and closes atomically at DONE
-// in the same write that sets FLOW STEP: DONE.
-static Task_Status flow_step_implied_status(Flow_Step step) {
-    switch (step) {
-    case Flow_Step_BACKLOG:
-    case Flow_Step_UNDERSTANDING:
-    case Flow_Step_PLANNING:
-    case Flow_Step_PLANNED:
-        return Task_Status_OPEN;
-    case Flow_Step_WORKING:
-    case Flow_Step_REVIEWING:
-    case Flow_Step_COMPOUNDING:
-        return Task_Status_IN_PROGRESS;
-    case Flow_Step_DONE:
-    case Flow_Step_DROPPED:
-        return Task_Status_CLOSED;
+// The activity a forward move from <activity> lands on. False when the cursor
+// is already at the last activity, where "forward" means closing instead.
+static boolean activity_successor(Task_Activity activity, Task_Activity *out) {
+    if ((size_t)activity + 1 >= ENUM_COUNT(Task_Activity_Strings)) {
+        return false;
     }
-    return Task_Status_OPEN; // unreachable: the enum is closed
-}
-
-typedef struct {
-    Flow_Step from;
-    Flow_Step to;
-} Flow_Transition;
-
-// The eight legal edges, and nothing else:
-//
-//   BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
-//                                                        ^           |
-//                                                        |           v
-//                                                        +-- (fix) COMPOUNDING -> DONE
-//   -> DROPPED  (from any step except DONE)
-//
-// REVIEWING is the only step with two successors. The first entry for a step
-// is its default - the target a bare `tatr flow <ID>` picks - so the review
-// loop back to WORKING must be asked for by name with `--to WORKING`.
-static const Flow_Transition FLOW_TRANSITIONS[] = {
-    {Flow_Step_BACKLOG,      Flow_Step_UNDERSTANDING},
-    {Flow_Step_UNDERSTANDING, Flow_Step_PLANNING},
-    {Flow_Step_PLANNING,     Flow_Step_PLANNED},
-    {Flow_Step_PLANNED,      Flow_Step_WORKING},
-    {Flow_Step_WORKING,      Flow_Step_REVIEWING},
-    {Flow_Step_REVIEWING,    Flow_Step_COMPOUNDING},
-    {Flow_Step_REVIEWING,    Flow_Step_WORKING},
-    {Flow_Step_COMPOUNDING,  Flow_Step_DONE},
-    {Flow_Step_BACKLOG,      Flow_Step_DROPPED},
-    {Flow_Step_UNDERSTANDING, Flow_Step_DROPPED},
-    {Flow_Step_PLANNING,     Flow_Step_DROPPED},
-    {Flow_Step_PLANNED,      Flow_Step_DROPPED},
-    {Flow_Step_WORKING,      Flow_Step_DROPPED},
-    {Flow_Step_REVIEWING,    Flow_Step_DROPPED},
-    {Flow_Step_COMPOUNDING,  Flow_Step_DROPPED},
-};
-
-// The default successor of a step: the first edge leaving it. False when the
-// step is terminal (DONE).
-static boolean flow_step_successor(Flow_Step from, Flow_Step *out) {
-    for (size_t i = 0; i < ENUM_COUNT(FLOW_TRANSITIONS); ++i) {
-        if (FLOW_TRANSITIONS[i].from == from) {
-            *out = FLOW_TRANSITIONS[i].to;
-            return true;
-        }
-    }
-    return false;
-}
-
-static boolean flow_transition_is_legal(Flow_Step from, Flow_Step to) {
-    for (size_t i = 0; i < ENUM_COUNT(FLOW_TRANSITIONS); ++i) {
-        if (FLOW_TRANSITIONS[i].from == from && FLOW_TRANSITIONS[i].to == to) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Names what a task at <from> may legally do next, so a refusal tells the
-// caller the move to make instead of only the one it rejected.
-static void flow_print_legal_moves(Flow_Step from) {
-    Flow_Step targets[ENUM_COUNT(FLOW_TRANSITIONS)];
-    size_t count = 0;
-    for (size_t i = 0; i < ENUM_COUNT(FLOW_TRANSITIONS); ++i) {
-        if (FLOW_TRANSITIONS[i].from == from) {
-            targets[count++] = FLOW_TRANSITIONS[i].to;
-        }
-    }
-    if (count == 0) {
-        fprintf(stderr, "  " SS_Fmt " is terminal: nothing follows it\n",
-                SS_Arg(Flow_Step_Strings[from]));
-        return;
-    }
-    if (count == 1) {
-        fprintf(stderr, "  the legal move from " SS_Fmt " is " SS_Fmt "\n",
-                SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[targets[0]]));
-        return;
-    }
-    fprintf(stderr, "  the legal moves from " SS_Fmt " are " SS_Fmt " (the default)",
-            SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[targets[0]]));
-    for (size_t i = 1; i < count; ++i) {
-        fprintf(stderr, " or " SS_Fmt " (--to " SS_Fmt ")",
-                SS_Arg(Flow_Step_Strings[targets[i]]), SS_Arg(Flow_Step_Strings[targets[i]]));
-    }
-    fprintf(stderr, "\n");
+    *out = (Task_Activity)(activity + 1);
+    return true;
 }
 
 // Collected preconditions a transition did not satisfy. Every one is reported,
@@ -5378,9 +5587,10 @@ static void flow_check_dependencies(const Aids_String_Slice *tasks_dir,
             continue;
         }
         dep_task._buffer = raw.str;
-        if (dep_task.meta.status != Task_Status_CLOSED) {
+        Task_Status dep_status = task_derived_status(&dep_task.meta);
+        if (dep_status != Task_Status_CLOSED) {
             flow_unmet_add(unmet, "dependency " SS_Fmt " is not CLOSED (STATUS: " SS_Fmt ")",
-                           SS_Arg(*dep), SS_Arg(Task_Status_Strings[dep_task.meta.status]));
+                           SS_Arg(*dep), SS_Arg(Task_Status_Strings[dep_status]));
         }
         task_cleanup(&dep_task);
     }
@@ -5397,64 +5607,38 @@ static void flow_unmet_add_problems(Flow_Unmet *unmet, const Record_Problems *pr
     }
 }
 
-// Evaluates every precondition the edge <from> -> <to> carries and appends one
-// message per unmet one. Four gates exist, and an edge either carries a gate
-// whole or not at all:
+// Evaluates the preconditions of ONE gate and appends a message per unmet one.
+// Each gate is the exit requirement of the activity that produces it:
 //
-//   PLANNING   -> PLANNED      the record gate: the sections the plan produces
-//   PLANNED    -> WORKING      the plan gate: an approved plan, CLOSED deps
-//   REVIEWING  -> COMPOUNDING  the review gate: an approved, well-formed
-//                              REVIEW.md
-//   COMPOUNDING-> DONE         all of the above, plus the close gate:
-//                              no unchecked Steps, a schema-clean RETRO.md,
-//                              and a valid DECISION.md when the task has one
+//   PLAN    leaving PLANNING     the sections the plan produces, their DoD
+//                                proofs, a resolvable graph position, and any
+//                                SPIKE.md held to its schema
+//   REVIEW  leaving REVIEWING    an approved, well-formed REVIEW.md
+//   RETRO   leaving COMPOUNDING  a schema-clean RETRO.md
 //
-// REVIEWING -> WORKING and the two remaining pre-plan edges carry no
-// preconditions: going back to fix something must never be harder than going
-// forward.
+// Leaving UNDERSTANDING and leaving WORKING produce no gate and cost nothing:
+// picking a task up and handing it to review are not claims about it.
 //
-// The record gate is what keeps AGENTS.md's tying invariant true: `flow` and
-// `check` ask the SAME collector functions the same questions, so no
-// transition can mint a record the lint would immediately flag. The plan-gate
-// sections are judged at the step being moved TO, because PLANNING -> PLANNED
-// is the transition that makes the record owe them.
+// This is what keeps AGENTS.md's tying invariant true: `flow` and `check` ask
+// the SAME collector functions the same questions, so no transition can mint a
+// record the lint would immediately flag.
 //
-// KIND: EPIC is exempt from exactly the four requirements it is already exempt
-// from in `tatr check` - plan approval, review presence, retro presence and
-// unchecked Steps - because an Epic container's record lives in its children.
-// Its own sections, its dependencies and its DECISION.md are checked like
-// anyone's.
-static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
-                                     const Task_Graph *graph,
-                                     const Aids_String_Slice *huid,
-                                     const Task *task,
-                                     Aids_String_Slice task_raw,
-                                     Flow_Step from,
-                                     Flow_Step to,
-                                     Flow_Unmet *unmet) {
-    boolean record_gate = false;
-    boolean plan_gate = false;
-    boolean review_gate = false;
-    boolean close_gate = false;
+// KIND: EPIC is exempt from exactly what `tatr check` exempts it from - review
+// presence, retro presence and unchecked Steps - because an Epic container's
+// record lives in its children. Its own sections, its dependencies and its
+// DECISION.md are checked like anyone's.
+static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
+                                    const Task_Graph *graph,
+                                    const Aids_String_Slice *huid,
+                                    const Task *task,
+                                    Aids_String_Slice task_raw,
+                                    Task_Gate gate,
+                                    Flow_Unmet *unmet) {
     boolean exempt = check_task_is_container(task);
 
-    if (from == Flow_Step_PLANNING && to == Flow_Step_PLANNED) {
-        record_gate = true;
-    } else if (from == Flow_Step_PLANNED && to == Flow_Step_WORKING) {
-        record_gate = true;
-        plan_gate = true;
-    } else if (from == Flow_Step_REVIEWING && to == Flow_Step_COMPOUNDING) {
-        review_gate = true;
-    } else if (from == Flow_Step_COMPOUNDING && to == Flow_Step_DONE) {
-        record_gate = true;
-        plan_gate = true;
-        review_gate = true;
-        close_gate = true;
-    }
-
-    if (record_gate) {
+    if (gate == Task_Gate_PLAN) {
         Record_Problems problems = {0};
-        task_record_problems(task->meta.kind, to, task_raw, &problems);
+        task_record_problems(task->meta.kind, true, task_raw, &problems);
         // The task's place in the graph, read from the same loader `check`
         // reads: a dependency that does not exist must be a refusal, not one
         // more thing to wait for.
@@ -5479,32 +5663,23 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
         }
     }
 
-    if (plan_gate) {
-        // A claim is how parallel sessions divide work, so starting a task
-        // another session holds is the exact collision claims exist to
-        // prevent. A claim this process took is not in its own way.
-        if (to == Flow_Step_WORKING) {
-            Claim holder = {0};
-            if (claim_read(tasks_dir, *huid, &holder) && claim_held_by_other_session(&holder)) {
-                flow_unmet_add(unmet, "the task is claimed by session '" SS_Fmt "' ("
-                               SS_Fmt "@" SS_Fmt ", since " SS_Fmt "); set TATR_SESSION to that "
-                               "id if it is yours, or release it with `tatr release " SS_Fmt
-                               " --force` if that session is gone",
-                               SS_Arg(holder.session), SS_Arg(holder.owner),
-                               SS_Arg(holder.host), SS_Arg(holder.since), SS_Arg(*huid));
+    if (gate == Task_Gate_RETRO) {
+        // Presence is the container-exempt part; a RETRO.md that IS there is
+        // held to its schema whatever the kind.
+        Aids_String_Slice retro = {0};
+        if (!task_sibling_read(tasks_dir, huid, "RETRO.md", &retro)) {
+            if (!exempt) {
+                flow_unmet_add(unmet, "there is no RETRO.md: the retro has not been written");
             }
-            claim_free(&holder);
+        } else {
+            Record_Problems problems = {0};
+            record_schema_problems(Record_Kind_RETRO, retro, NULL, &problems);
+            flow_unmet_add_problems(unmet, &problems);
+            AIDS_FREE(retro.str);
         }
-        if (!exempt && task->meta.plan_status != Plan_Status_APPROVED) {
-            flow_unmet_add(unmet, "the plan is not approved (PLAN STATUS: " SS_Fmt "); "
-                           "walk the plan gate with `tatr flow " SS_Fmt " --to PLANNED` "
-                           "once the user accepts the plan",
-                           SS_Arg(Plan_Status_Strings[task->meta.plan_status]), SS_Arg(*huid));
-        }
-        flow_check_dependencies(tasks_dir, task, unmet);
     }
 
-    if (review_gate) {
+    if (gate == Task_Gate_REVIEW) {
         Aids_String_Slice review = {0};
         if (!task_sibling_read(tasks_dir, huid, "REVIEW.md", &review)) {
             // Only the PRESENCE of the record is exempt for a container -
@@ -5539,60 +5714,114 @@ static void flow_check_preconditions(const Aids_String_Slice *tasks_dir,
         }
     }
 
-    if (close_gate) {
-        // An Epic's work is its children's: it cannot be done while any of them
-        // is not. A child that was dropped is CLOSED with the reason recorded -
-        // there is no optional-child marker, because leaving one OPEN to mean
-        // "not required" would make this guard unfalsifiable.
-        if (task->meta.kind == Task_Kind_EPIC && graph != NULL) {
-            for (size_t i = 0; i < graph->nodes.count; ++i) {
-                Graph_Node *child = NULL;
-                if (aids_array_get((Aids_Array *)&graph->nodes, i, (void **)&child) != AIDS_OK ||
-                    !child->parsed) {
-                    continue;
-                }
-                if (child->parent.len == 0 ||
-                    aids_string_slice_compare(&child->parent, huid) != 0) {
-                    continue;
-                }
-                if (child->status != Task_Status_CLOSED) {
-                    flow_unmet_add(unmet, "child " SS_Fmt " is not CLOSED (STATUS: " SS_Fmt ")",
-                                   SS_Arg(child->huid), SS_Arg(Task_Status_Strings[child->status]));
-                }
+}
+
+// The close gate, which only `--resolution DONE` runs. It asks what "done"
+// means beyond the individual gates: that all three were actually earned, that
+// nothing is left unchecked, and that any DECISION.md the task carries is one
+// the lint would accept on a record this gate had just closed.
+//
+// <gates> is the gate set the record is being judged with, which is not always
+// the one it currently carries: `tatr flow` out of COMPOUNDING passes the set
+// including the RETRO gate it is about to record.
+//
+// The other three resolutions run nothing at all. Anything can be abandoned at
+// any time, and demanding proof before letting go of a task is exactly backward.
+static void flow_close_preconditions(const Aids_String_Slice *tasks_dir,
+                                     const Task_Graph *graph,
+                                     const Aids_String_Slice *huid,
+                                     const Task *task,
+                                     Aids_String_Slice task_raw,
+                                     unsigned int gates,
+                                     Flow_Unmet *unmet) {
+    boolean exempt = check_task_is_container(task);
+
+    for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
+        if ((gates & TASK_GATE_BIT(g)) == 0) {
+            flow_unmet_add(unmet, "the " SS_Fmt " gate has not been earned; walk it with `tatr flow "
+                           SS_Fmt "`", SS_Arg(Task_Gate_Strings[g]), SS_Arg(*huid));
+        }
+    }
+
+    // An Epic's work is its children's: it cannot be done while any of them
+    // is not. A child that was abandoned is CLOSED with the resolution
+    // recorded - there is no optional-child marker, because leaving one OPEN to
+    // mean "not required" would make this guard unfalsifiable.
+    if (task->meta.kind == Task_Kind_EPIC && graph != NULL) {
+        for (size_t i = 0; i < graph->nodes.count; ++i) {
+            Graph_Node *child = NULL;
+            if (aids_array_get((Aids_Array *)&graph->nodes, i, (void **)&child) != AIDS_OK ||
+                !child->parsed) {
+                continue;
+            }
+            if (child->parent.len == 0 ||
+                aids_string_slice_compare(&child->parent, huid) != 0) {
+                continue;
+            }
+            if (child->status != Task_Status_CLOSED) {
+                flow_unmet_add(unmet, "child " SS_Fmt " is not CLOSED (STATUS: " SS_Fmt ")",
+                               SS_Arg(child->huid), SS_Arg(Task_Status_Strings[child->status]));
             }
         }
-        if (!exempt) {
-            size_t unchecked = artifact_count_unchecked_steps(task_raw);
-            if (unchecked > 0) {
-                flow_unmet_add(unmet, "%zu unchecked Steps item(s) remain", unchecked);
-            }
+    }
+    if (!exempt) {
+        size_t unchecked = artifact_count_unchecked_steps(task_raw);
+        if (unchecked > 0) {
+            flow_unmet_add(unmet, "%zu unchecked Steps item(s) remain", unchecked);
         }
-        // Presence is the container-exempt part; a RETRO.md that IS there is
-        // held to its schema whatever the kind.
-        Aids_String_Slice retro = {0};
-        if (!task_sibling_read(tasks_dir, huid, "RETRO.md", &retro)) {
-            if (!exempt) {
-                flow_unmet_add(unmet, "there is no RETRO.md: the retro has not been written");
-            }
-        } else {
-            Record_Problems problems = {0};
-            record_schema_problems(Record_Kind_RETRO, retro, NULL, &problems);
-            flow_unmet_add_problems(unmet, &problems);
-            AIDS_FREE(retro.str);
-        }
-        Aids_String_Slice decision = {0};
-        if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
-            // The whole DECISION.md rule set, not a subset of it: a supersede
-            // link that dangles or resolves only one way is exactly the kind of
-            // state the lint would flag on a record this gate had just closed.
-            Record_Problems problems = {0};
-            decision_record_problems(tasks_dir, huid, decision, &problems);
-            flow_unmet_add_problems(unmet, &problems);
-            AIDS_FREE(decision.str);
-        }
+    }
+    Aids_String_Slice decision = {0};
+    if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
+        // The whole DECISION.md rule set, not a subset of it: a supersede
+        // link that dangles or resolves only one way is exactly the kind of
+        // state the lint would flag on a record this gate had just closed.
+        Record_Problems problems = {0};
+        decision_record_problems(tasks_dir, huid, decision, &problems);
+        flow_unmet_add_problems(unmet, &problems);
+        AIDS_FREE(decision.str);
     }
 }
 
+// Whether the WORLD is ready for the cursor to enter WORKING: the dependencies
+// are finished and nobody else is holding the task. These are the only
+// preconditions that are not facts about the record, which is why they can hold
+// a cursor without withdrawing a gate.
+//
+// They apply to this one edge because it is the one that means "start". Moving
+// from UNDERSTANDING to PLANNING while a dependency is open is normal - that is
+// what planning around a blocker IS.
+static void flow_world_preconditions(const Aids_String_Slice *tasks_dir,
+                                     const Aids_String_Slice *huid,
+                                     const Task *task,
+                                     Flow_Unmet *unmet) {
+    // A claim is how parallel sessions divide work, so starting a task another
+    // session holds is the exact collision claims exist to prevent. A claim this
+    // process took is not in its own way.
+    Claim holder = {0};
+    if (claim_read(tasks_dir, *huid, &holder) && claim_held_by_other_session(&holder)) {
+        flow_unmet_add(unmet, "the task is claimed by session '" SS_Fmt "' ("
+                       SS_Fmt "@" SS_Fmt ", since " SS_Fmt "); set TATR_SESSION to that "
+                       "id if it is yours, or release it with `tatr release " SS_Fmt
+                       " --force` if that session is gone",
+                       SS_Arg(holder.session), SS_Arg(holder.owner),
+                       SS_Arg(holder.host), SS_Arg(holder.since), SS_Arg(*huid));
+    }
+    claim_free(&holder);
+    flow_check_dependencies(tasks_dir, task, unmet);
+}
+
+// Prints a collected unmet set under a heading, one indented message per line.
+static void flow_unmet_print(const Flow_Unmet *unmet) {
+    for (size_t i = 0; i < unmet->count; ++i) {
+        fprintf(stderr, "  - %s\n", unmet->messages[i]);
+    }
+}
+
+// One forward step. The activity's exit gate runs; when it passes it is
+// recorded; when the world also permits it the cursor advances. There is no
+// --to: a command that can only go forward one activity cannot skip a gate, and
+// going backward is `tatr rewind`, which is a different thing with different
+// consequences.
 static int main_flow(const Tatr_Context *ctx) {
     int result = 0;
     Argparse_Parser parser = {0};
@@ -5602,11 +5831,11 @@ static int main_flow(const Tatr_Context *ctx) {
     Aids_String_Slice task_file_path = {0};
     Aids_String_Slice raw = {0};
     Flow_Unmet unmet = {0};
+    Flow_Unmet world_unmet = {0};
     Task_Graph graph = {0};
     boolean graph_loaded = false;
-    Aids_String_Slice dropped_description = {0};
 
-    argparse_parser_init(&parser, "tatr flow", "Move a task to its next flow step", TATR_VERSION);
+    argparse_parser_init(&parser, "tatr flow", "Advance a task one activity", TATR_VERSION);
 
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'I',
@@ -5617,27 +5846,584 @@ static int main_flow(const Tatr_Context *ctx) {
     });
 
     argparse_add_argument(&parser, (Argparse_Options){
-        .short_name = 'R',
-        .long_name = "reason",
-        .description = "Why the task is being dropped (required with --to DROPPED)",
-        .type = ARGUMENT_TYPE_VALUE,
+        .short_name = 'n',
+        .long_name = "dry-run",
+        .description = "Print the edge and the gate it would run, and write nothing",
+        .type = ARGUMENT_TYPE_FLAG,
         .required = 0
     });
 
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+    boolean dry_run = argparse_get_flag(&parser, "dry-run");
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+
+    // The raw bytes come back with the parsed record: the close gate counts
+    // the unchecked Steps in the very body this task was parsed from.
+    if (task_load_raw(&task_file_path, &task, &raw) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    // A closed record has no next activity. Reopening is a decision with a
+    // verb, not something `flow` should do on the way past.
+    if (task.meta.has_resolution) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is CLOSED (RESOLUTION: " SS_Fmt "): reopen it with "
+                 "`tatr reopen " SS_Fmt "` before moving it",
+                 SS_Arg(id), SS_Arg(Task_Resolution_Strings[task.meta.resolution]), SS_Arg(id));
+        return_defer(1);
+    }
+
+    // Where the cursor goes, and which gate leaving where it is produces. An
+    // unstarted record has no gate to run: picking a task up proves nothing.
+    Aids_String_Slice from_label = field_value_or_unset(task.meta.has_activity,
+                                                        Task_Activity_Strings[task.meta.activity]);
+    Task_Activity to = Task_Activity_UNDERSTANDING;
+    boolean closes = false;
+    Task_Gate gate = Task_Gate_PLAN;
+    boolean has_gate = false;
+
+    if (!task.meta.has_activity) {
+        to = Task_Activity_UNDERSTANDING;
+    } else {
+        has_gate = activity_exit_gate(task.meta.activity, &gate);
+        if (!activity_successor(task.meta.activity, &to)) {
+            // Leaving the last activity is closing: `tatr flow` earns RETRO and
+            // records RESOLUTION: DONE in one motion, so the happy path stays
+            // one verb. `tatr close --resolution DONE` does the same thing for
+            // a caller who wants to name it.
+            closes = true;
+            to = task.meta.activity;
+        }
+    }
+
+    Aids_String_Slice to_label = closes
+        ? aids_string_slice_from_cstr("CLOSED")
+        : Task_Activity_Strings[to];
+
+    if (dry_run) {
+        printf("Task " SS_Fmt " would move " SS_Fmt " -> " SS_Fmt "\n",
+               SS_Arg(id), SS_Arg(from_label), SS_Arg(to_label));
+        if (has_gate) {
+            printf("  gate " SS_Fmt " would run\n", SS_Arg(Task_Gate_Strings[gate]));
+        } else {
+            printf("  no gate runs on this edge\n");
+        }
+        return_defer(0);
+    }
+
+    task_graph_init(&graph);
+    graph_loaded = true;
+    if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    // The record half. Everything here is a fact about the record, so an unmet
+    // one is a flat refusal: nothing is written and nothing is claimed.
+    if (has_gate) {
+        flow_gate_preconditions(&tasks_dir, &graph, &id, &task, raw, gate, &unmet);
+    }
+    if (closes) {
+        flow_close_preconditions(&tasks_dir, &graph, &id, &task, raw,
+                                 task.meta.gates | (has_gate ? TASK_GATE_BIT(gate) : 0u), &unmet);
+    }
+    if (unmet.count > 0) {
+        aids_log(AIDS_ERROR, "Refusing to advance " SS_Fmt " from " SS_Fmt ": %zu precondition(s) not met",
+                 SS_Arg(id), SS_Arg(from_label), unmet.count);
+        flow_unmet_print(&unmet);
+        fprintf(stderr, "  Record unchanged.\n");
+        return_defer(1);
+    }
+
+    // The world half. Entering WORKING is the one edge that asks anything of
+    // anyone else, and the one edge that may half-succeed.
+    if (!closes && to == Task_Activity_WORKING) {
+        flow_world_preconditions(&tasks_dir, &id, &task, &world_unmet);
+    }
+
+    if (has_gate) {
+        task.meta.gates |= TASK_GATE_BIT(gate);
+    }
+    if (world_unmet.count == 0) {
+        if (closes) {
+            task.meta.has_resolution = true;
+            task.meta.resolution = Task_Resolution_DONE;
+        } else {
+            task.meta.has_activity = true;
+            task.meta.activity = to;
+        }
+    }
+
+    // One write, whichever halves happened. A held cursor is not a failed
+    // write: the gate it did earn is on disk when the command returns.
+    if (task_save(&task_file_path, &task) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to save task"); // task_save logged the cause
+        return_defer(1);
+    }
+
+    if (has_gate) {
+        printf("gate " SS_Fmt " recorded\n", SS_Arg(Task_Gate_Strings[gate]));
+        // stdout is block-buffered when piped while stderr is not, so without
+        // this the two halves of the report arrive out of order.
+        fflush(stdout);
+    }
+    if (world_unmet.count > 0) {
+        aids_log(AIDS_ERROR, "Not advancing " SS_Fmt " to " SS_Fmt ": %zu precondition(s) not met",
+                 SS_Arg(id), SS_Arg(to_label), world_unmet.count);
+        flow_unmet_print(&world_unmet);
+        fprintf(stderr, "  Cursor held at " SS_Fmt ".\n", SS_Arg(from_label));
+        return_defer(1);
+    }
+
+    if (closes) {
+        printf("Task " SS_Fmt " moved " SS_Fmt " -> CLOSED (RESOLUTION: " SS_Fmt ")\n",
+               SS_Arg(id), SS_Arg(from_label),
+               SS_Arg(Task_Resolution_Strings[task.meta.resolution]));
+    } else {
+        printf("Task " SS_Fmt " moved " SS_Fmt " -> " SS_Fmt " (STATUS: " SS_Fmt ")\n",
+               SS_Arg(id), SS_Arg(from_label), SS_Arg(to_label),
+               SS_Arg(Task_Status_Strings[task_derived_status(&task.meta)]));
+    }
+
+defer:
+    if (graph_loaded) {
+        task_graph_free(&graph);
+    }
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// One backward step, or several. `rewind` runs no gate and asks nothing of the
+// world: the whole point is that returning to an earlier activity costs
+// nothing. What it does cost is the gates the move invalidates - replanning
+// discards the review that judged the old plan - and those are cleared, named,
+// and behind --force so an earned approval is never discarded silently.
+static int main_rewind(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+
+    argparse_parser_init(&parser, "tatr rewind", "Move a task back to an earlier activity", TATR_VERSION);
+
     argparse_add_argument(&parser, (Argparse_Options){
-        .short_name = 'S',
-        .long_name = "superseded-by",
-        .description = "Task ID that superseded this task (only with --to DROPPED)",
-        .type = ARGUMENT_TYPE_VALUE,
-        .required = 0
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
     });
 
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'o',
         .long_name = "to",
-        .description = "Target flow step (default: the next step; " FLOW_STEP_VALUES_CSTR ")",
+        .description = "Activity to rewind to (" ACTIVITY_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'F',
+        .long_name = "force",
+        .description = "Discard the gates the rewind invalidates",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    char *to_str = argparse_get_value(&parser, "to");
+    if (to_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing --to <ACTIVITY> (" ACTIVITY_VALUES_CSTR ")");
+        return_defer(1);
+    }
+    Aids_String_Slice to_slice = aids_string_slice_from_cstr(to_str);
+    Task_Activity to = Task_Activity_UNDERSTANDING;
+    if (!task_activity_from_string(&to_slice, &to)) {
+        aids_log(AIDS_ERROR, "Invalid activity '%s': expected " ACTIVITY_VALUES_CSTR, to_str);
+        return_defer(1);
+    }
+    boolean force = argparse_get_flag(&parser, "force");
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+    if (task_load(&task_file_path, &task) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    if (task.meta.has_resolution) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is CLOSED (RESOLUTION: " SS_Fmt "): reopen it with "
+                 "`tatr reopen " SS_Fmt "` before moving it",
+                 SS_Arg(id), SS_Arg(Task_Resolution_Strings[task.meta.resolution]), SS_Arg(id));
+        return_defer(1);
+    }
+    if (!task.meta.has_activity) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " has no ACTIVITY: there is nothing behind it to rewind to",
+                 SS_Arg(id));
+        return_defer(1);
+    }
+    // Backward only. A forward or equal target is `tatr flow`'s job, and it is
+    // named here rather than silently accepted: a rewind that moved forward
+    // would be a way to reach an activity without running its gate.
+    if (to >= task.meta.activity) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is at " SS_Fmt ": rewinding to " SS_Fmt
+                 " is not backward; advance with `tatr flow " SS_Fmt "`",
+                 SS_Arg(id), SS_Arg(Task_Activity_Strings[task.meta.activity]),
+                 SS_Arg(Task_Activity_Strings[to]), SS_Arg(id));
+        return_defer(1);
+    }
+
+    unsigned int cleared = task.meta.gates & activity_rewind_clear_mask(to);
+    if (cleared != 0 && !force) {
+        aids_log(AIDS_ERROR, "Rewinding " SS_Fmt " to " SS_Fmt " would discard an earned gate; "
+                 "pass --force to clear it",
+                 SS_Arg(id), SS_Arg(Task_Activity_Strings[to]));
+        for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
+            if ((cleared & TASK_GATE_BIT(g)) != 0) {
+                fprintf(stderr, "  - the " SS_Fmt " gate\n", SS_Arg(Task_Gate_Strings[g]));
+            }
+        }
+        fprintf(stderr, "  Record unchanged.\n");
+        return_defer(1);
+    }
+
+    Aids_String_Slice from_label = Task_Activity_Strings[task.meta.activity];
+    task.meta.activity = to;
+    task.meta.gates &= ~cleared;
+
+    if (task_save(&task_file_path, &task) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to save task"); // task_save logged the cause
+        return_defer(1);
+    }
+
+    printf("Task " SS_Fmt " rewound " SS_Fmt " -> " SS_Fmt, SS_Arg(id),
+           SS_Arg(from_label), SS_Arg(Task_Activity_Strings[to]));
+    if (cleared == 0) {
+        printf(" (no gates cleared)\n");
+    } else {
+        printf(" (cleared");
+        boolean first = true;
+        for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
+            if ((cleared & TASK_GATE_BIT(g)) == 0) {
+                continue;
+            }
+            printf("%s " SS_Fmt, first ? "" : ",", SS_Arg(Task_Gate_Strings[g]));
+            first = false;
+        }
+        printf(")\n");
+    }
+
+defer:
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+#define DROPPED_HEADING_CSTR "## Dropped"
+
+// The "## Dropped" block main_close appends for a WONTDO reason, cut from the
+// tail of a description. Only a block that runs to the end of the record is
+// cut: a "## Dropped" section with other sections after it is not the one
+// close wrote. Returns false when there is nothing to cut, so the caller can
+// leave the description alone.
+static boolean task_description_without_dropped(Aids_String_Slice description,
+                                                Aids_String_Slice *out) {
+    Aids_String_Slice want = aids_string_slice_from_cstr(DROPPED_HEADING_CSTR);
+    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
+    Aids_String_Slice scan = description;
+    Aids_String_Slice line = {0};
+    boolean trailing = false;
+    size_t cut = 0;
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        Aids_String_Slice l = line;
+        aids_string_slice_trim_right(&l);
+        if (!aids_string_slice_starts_with(&l, any_heading)) {
+            continue;
+        }
+        trailing = aids_string_slice_compare(&l, &want) == 0;
+        if (trailing) {
+            cut = (size_t)(line.str - description.str);
+        }
+    }
+    if (!trailing) {
+        return false;
+    }
+    Aids_String_Slice kept = description;
+    kept.len = cut;
+    aids_string_slice_trim_right(&kept);
+    *out = kept;
+    return true;
+}
+
+// Sets RESOLUTION. DONE runs the close gate; WONTDO, DUPLICATE and SUPERSEDED
+// run nothing, because anything can be abandoned at any time and from any
+// activity. The cursor is left exactly where it was: it records where the work
+// ended, and reopening restores a live position without having to invent one.
+static int main_close(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_String_Slice raw = {0};
+    Aids_String_Slice closed_description = {0};
+    Flow_Unmet unmet = {0};
+    Task_Graph graph = {0};
+    boolean graph_loaded = false;
+
+    argparse_parser_init(&parser, "tatr close", "Close a task with a resolution", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'x',
+        .long_name = "resolution",
+        .description = "Why the work stopped (" RESOLUTION_VALUES_CSTR ")",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'O',
+        .long_name = "of",
+        .description = "The task this one duplicates or was superseded by (required for DUPLICATE and SUPERSEDED)",
         .type = ARGUMENT_TYPE_VALUE,
         .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'R',
+        .long_name = "reason",
+        .description = "Why the task is being abandoned (required for WONTDO)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+
+    char *id_str = argparse_get_value(&parser, "id");
+    if (id_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing task ID");
+        return_defer(1);
+    }
+    Aids_String_Slice id = aids_string_slice_from_cstr(id_str);
+
+    char *resolution_str = argparse_get_value(&parser, "resolution");
+    if (resolution_str == NULL) {
+        aids_log(AIDS_ERROR, "Missing --resolution <R> (" RESOLUTION_VALUES_CSTR ")");
+        return_defer(1);
+    }
+    Aids_String_Slice resolution_slice = aids_string_slice_from_cstr(resolution_str);
+    Task_Resolution resolution = Task_Resolution_DONE;
+    if (!task_resolution_from_string(&resolution_slice, &resolution)) {
+        aids_log(AIDS_ERROR, "Invalid resolution '%s': expected " RESOLUTION_VALUES_CSTR, resolution_str);
+        return_defer(1);
+    }
+
+    char *of_str = argparse_get_value(&parser, "of");
+    char *reason_str = argparse_get_value(&parser, "reason");
+    boolean wants_of = resolution == Task_Resolution_DUPLICATE ||
+                       resolution == Task_Resolution_SUPERSEDED;
+    boolean wants_reason = resolution == Task_Resolution_WONTDO;
+
+    if (wants_of && (of_str == NULL || of_str[0] == '\0')) {
+        aids_log(AIDS_ERROR, "--resolution %s requires --of <ID>: a duplicate that names nothing "
+                 "records nothing", resolution_str);
+        return_defer(1);
+    }
+    if (!wants_of && of_str != NULL) {
+        aids_log(AIDS_ERROR, "--of only applies to --resolution DUPLICATE or SUPERSEDED");
+        return_defer(1);
+    }
+    if (wants_reason && (reason_str == NULL || reason_str[0] == '\0')) {
+        aids_log(AIDS_ERROR, "--resolution WONTDO requires --reason <text>");
+        return_defer(1);
+    }
+    if (!wants_reason && reason_str != NULL) {
+        aids_log(AIDS_ERROR, "--reason only applies to --resolution WONTDO");
+        return_defer(1);
+    }
+    if (reason_str != NULL &&
+        (strchr(reason_str, '\n') != NULL || strchr(reason_str, '\r') != NULL)) {
+        aids_log(AIDS_ERROR, "The reason must be one line");
+        return_defer(1);
+    }
+
+    if (task_resolve(&ctx->cwd, &id, &tasks_dir, &task_file_path) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    Aids_String_Slice of = {0};
+    if (of_str != NULL) {
+        of = aids_string_slice_from_cstr(of_str);
+        if (!ishuid(&of)) {
+            aids_log(AIDS_ERROR, "Invalid --of task ID '%s': expected format YYYYMMDD-HHMMSS", of_str);
+            return_defer(1);
+        }
+        if (aids_string_slice_compare(&id, &of) == 0 ||
+            !task_sibling_exists(&tasks_dir, &of, TASK_FILE_NAME_CSTR)) {
+            aids_log(AIDS_ERROR, "--of task '%s' does not resolve to another task", of_str);
+            return_defer(1);
+        }
+    }
+
+    task_init_empty(&task);
+    task_initialized = true;
+    if (task_load_raw(&task_file_path, &task, &raw) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    if (task.meta.has_resolution) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is already CLOSED (RESOLUTION: " SS_Fmt "); reopen it "
+                 "with `tatr reopen " SS_Fmt "` first",
+                 SS_Arg(id), SS_Arg(Task_Resolution_Strings[task.meta.resolution]), SS_Arg(id));
+        return_defer(1);
+    }
+
+    if (resolution == Task_Resolution_DONE) {
+        task_graph_init(&graph);
+        graph_loaded = true;
+        if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
+            return_defer(1);
+        }
+        flow_close_preconditions(&tasks_dir, &graph, &id, &task, raw, task.meta.gates, &unmet);
+        if (unmet.count > 0) {
+            aids_log(AIDS_ERROR, "Refusing to close " SS_Fmt " as DONE: %zu precondition(s) not met",
+                     SS_Arg(id), unmet.count);
+            flow_unmet_print(&unmet);
+            fprintf(stderr, "  Record unchanged.\n");
+            return_defer(1);
+        }
+    }
+
+    task.meta.has_resolution = true;
+    task.meta.resolution = resolution;
+    if (of.len > 0) {
+        task.meta.duplicate_of = of;
+    }
+
+    // WONTDO keeps the shape a dropped task has always had, so migrating a v0
+    // record is a header change and nothing else.
+    if (reason_str != NULL) {
+        Aids_String_Builder builder = {0};
+        aids_string_builder_init(&builder);
+        if (aids_string_builder_append_slice(&builder, task.description) != AIDS_OK ||
+            aids_string_builder_append(&builder, "\n\n" DROPPED_HEADING_CSTR "\n\n- REASON: %s\n", reason_str) != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to record the reason: %s", aids_failure_reason());
+            aids_string_builder_free(&builder);
+            return_defer(1);
+        }
+        aids_string_builder_to_slice(&builder, &closed_description);
+        task.description = closed_description;
+    }
+
+    if (task_save(&task_file_path, &task) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to save task"); // task_save logged the cause
+        return_defer(1);
+    }
+
+    printf("Task " SS_Fmt " closed (RESOLUTION: " SS_Fmt, SS_Arg(id),
+           SS_Arg(Task_Resolution_Strings[resolution]));
+    if (of.len > 0) {
+        printf(", of " SS_Fmt, SS_Arg(of));
+    }
+    printf(", STATUS: " SS_Fmt ")\n", SS_Arg(Task_Status_Strings[Task_Status_CLOSED]));
+
+defer:
+    if (closed_description.str != NULL) {
+        AIDS_FREE(closed_description.str);
+    }
+    if (graph_loaded) {
+        task_graph_free(&graph);
+    }
+    if (task_initialized) {
+        task_cleanup(&task);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    if (task_file_path.str != NULL) {
+        AIDS_FREE(task_file_path.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
+// Clears RESOLUTION and everything else `close` wrote: the `- DUPLICATE OF: `
+// pointer and the "## Dropped" reason block. The cursor and the gates do not
+// move - the gates a record earned are still earned, and the activity it
+// stopped at is still where the work is.
+static int main_reopen(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Task task = {0};
+    boolean task_initialized = false;
+    Aids_String_Slice tasks_dir = {0};
+    Aids_String_Slice task_file_path = {0};
+    Aids_String_Slice reopened_description = {0};
+
+    argparse_parser_init(&parser, "tatr reopen", "Clear a task's resolution", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'I',
+        .long_name = "id",
+        .description = "Task ID (format YYYYMMDD-HHMMSS)",
+        .type = ARGUMENT_TYPE_POSITIONAL,
+        .required = 1
     });
 
     if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
@@ -5657,106 +6443,30 @@ static int main_flow(const Tatr_Context *ctx) {
 
     task_init_empty(&task);
     task_initialized = true;
-
-    // The raw bytes come back with the parsed record: the close gate counts
-    // the unchecked Steps in the very body this task was parsed from.
-    if (task_load_raw(&task_file_path, &task, &raw) != AIDS_OK) {
+    if (task_load(&task_file_path, &task) != AIDS_OK) {
         return_defer(1);
     }
 
-    Flow_Step from = task.meta.flow_step;
-    Flow_Step to = from;
-
-    char *to_str = argparse_get_value(&parser, "to");
-    if (to_str != NULL) {
-        Aids_String_Slice to_slice = aids_string_slice_from_cstr(to_str);
-        if (!flow_step_from_string(&to_slice, &to)) {
-            aids_log(AIDS_ERROR, "Invalid flow step '%s': expected " FLOW_STEP_VALUES_CSTR, to_str);
-            return_defer(1);
-        }
-    } else if (!flow_step_successor(from, &to)) {
-        aids_log(AIDS_ERROR, "Task " SS_Fmt " is at " SS_Fmt " and has nowhere to go",
-                 SS_Arg(id), SS_Arg(Flow_Step_Strings[from]));
-        flow_print_legal_moves(from);
+    if (!task.meta.has_resolution) {
+        aids_log(AIDS_ERROR, "Task " SS_Fmt " is not closed: it carries no RESOLUTION", SS_Arg(id));
         return_defer(1);
     }
 
-    if (!flow_transition_is_legal(from, to)) {
-        aids_log(AIDS_ERROR, "Illegal transition for " SS_Fmt ": " SS_Fmt " -> " SS_Fmt,
-                 SS_Arg(id), SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[to]));
-        flow_print_legal_moves(from);
-        return_defer(1);
-    }
+    task.meta.has_resolution = false;
+    task.meta.duplicate_of = (Aids_String_Slice){0};
 
-    char *reason_str = argparse_get_value(&parser, "reason");
-    char *superseded_by_str = argparse_get_value(&parser, "superseded-by");
-    if (to == Flow_Step_DROPPED) {
-        if (reason_str == NULL || reason_str[0] == '\0') {
-            aids_log(AIDS_ERROR, "DROPPED requires --reason <text>");
-            return_defer(1);
-        }
-        if (strchr(reason_str, '\n') != NULL || strchr(reason_str, '\r') != NULL) {
-            aids_log(AIDS_ERROR, "DROPPED reason must be one line");
-            return_defer(1);
-        }
-        if (superseded_by_str != NULL) {
-            Aids_String_Slice superseded_by = aids_string_slice_from_cstr(superseded_by_str);
-            if (!ishuid(&superseded_by)) {
-                aids_log(AIDS_ERROR, "Invalid --superseded-by task ID '%s'", superseded_by_str);
-                return_defer(1);
-            }
-            if (aids_string_slice_compare(&id, &superseded_by) == 0 ||
-                !task_sibling_exists(&tasks_dir, &superseded_by, TASK_FILE_NAME_CSTR)) {
-                aids_log(AIDS_ERROR, "--superseded-by task '%s' does not resolve to another task",
-                         superseded_by_str);
-                return_defer(1);
-            }
-        }
-    } else if (reason_str != NULL || superseded_by_str != NULL) {
-        aids_log(AIDS_ERROR, "--reason and --superseded-by require --to DROPPED");
-        return_defer(1);
-    }
-
-    task_graph_init(&graph);
-    graph_loaded = true;
-    if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
-        return_defer(1);
-    }
-
-    flow_check_preconditions(&tasks_dir, &graph, &id, &task, raw, from, to, &unmet);
-    if (unmet.count > 0) {
-        aids_log(AIDS_ERROR, "Refusing to move " SS_Fmt " from " SS_Fmt " to " SS_Fmt
-                 ": %zu precondition(s) not met",
-                 SS_Arg(id), SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[to]),
-                 unmet.count);
-        for (size_t i = 0; i < unmet.count; ++i) {
-            fprintf(stderr, "  - %s\n", unmet.messages[i]);
-        }
-        return_defer(1);
-    }
-
-    // Every precondition held, so the whole transition lands in one write:
-    // the step, the status it implies, and - at the plan gate only - the plan
-    // approval it records.
-    task.meta.flow_step = to;
-    task.meta.status = flow_step_implied_status(to);
-    if (to == Flow_Step_PLANNED) {
-        task.meta.plan_status = Plan_Status_APPROVED;
-    }
-
-    if (to == Flow_Step_DROPPED) {
+    Aids_String_Slice kept = {0};
+    if (task_description_without_dropped(task.description, &kept)) {
         Aids_String_Builder builder = {0};
         aids_string_builder_init(&builder);
-        if (aids_string_builder_append_slice(&builder, task.description) != AIDS_OK ||
-            aids_string_builder_append(&builder, "\n\n## Dropped\n\n- REASON: %s\n", reason_str) != AIDS_OK ||
-            (superseded_by_str != NULL &&
-             aids_string_builder_append(&builder, "- SUPERSEDED BY: %s\n", superseded_by_str) != AIDS_OK)) {
-            aids_log(AIDS_ERROR, "Failed to record DROPPED reason: %s", aids_failure_reason());
+        if (aids_string_builder_append_slice(&builder, kept) != AIDS_OK ||
+            aids_string_builder_append(&builder, "\n") != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to clear the reason: %s", aids_failure_reason());
             aids_string_builder_free(&builder);
             return_defer(1);
         }
-        aids_string_builder_to_slice(&builder, &dropped_description);
-        task.description = dropped_description;
+        aids_string_builder_to_slice(&builder, &reopened_description);
+        task.description = reopened_description;
     }
 
     if (task_save(&task_file_path, &task) != AIDS_OK) {
@@ -5764,16 +6474,14 @@ static int main_flow(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
-    printf("Task " SS_Fmt " moved " SS_Fmt " -> " SS_Fmt " (STATUS: " SS_Fmt ")\n",
-           SS_Arg(id), SS_Arg(Flow_Step_Strings[from]), SS_Arg(Flow_Step_Strings[to]),
-           SS_Arg(Task_Status_Strings[task.meta.status]));
+    printf("Task " SS_Fmt " reopened at " SS_Fmt " (STATUS: " SS_Fmt ")\n", SS_Arg(id),
+           SS_Arg(field_value_or_unset(task.meta.has_activity,
+                                       Task_Activity_Strings[task.meta.activity])),
+           SS_Arg(Task_Status_Strings[task_derived_status(&task.meta)]));
 
 defer:
-    if (dropped_description.str != NULL) {
-        AIDS_FREE(dropped_description.str);
-    }
-    if (graph_loaded) {
-        task_graph_free(&graph);
+    if (reopened_description.str != NULL) {
+        AIDS_FREE(reopened_description.str);
     }
     if (task_initialized) {
         task_cleanup(&task);
@@ -5873,22 +6581,28 @@ static void check_exemptions_load(Check_Exemptions *ex,
             continue;
         }
         aids_string_slice_skip(&l, bullet.len);
-        Aids_String_Slice huid = {0};
-        if (!aids_string_slice_tokenize(&l, ' ', &huid)) {
+        // Split on the first ':' BEFORE deciding which form the line is. The
+        // scope is everything left of it - "<id>" for a whole-task entry,
+        // "<id> <rule>" for a rule-scoped one - so a rule-less line is not
+        // mistaken for prose by a HUID check that ran on the wrong token.
+        Aids_String_Slice scope = {0};
+        if (!aids_string_slice_tokenize(&l, ':', &scope)) {
             continue;
+        }
+        aids_string_slice_trim(&scope);
+        Aids_String_Slice huid = scope;
+        Aids_String_Slice rule = {0};
+        if (aids_string_slice_tokenize(&scope, ' ', &huid)) {
+            rule = scope;
+            aids_string_slice_trim(&rule);
         }
         aids_string_slice_trim(&huid);
         if (!ishuid(&huid)) {
             continue; // prose in the file's preamble, not an exemption line
         }
-        Aids_String_Slice rule = {0};
-        if (!aids_string_slice_tokenize(&l, ':', &rule)) {
-            continue;
-        }
-        aids_string_slice_trim(&rule);
-        if (rule.len == 0) {
-            continue;
-        }
+        // A zero-length rule is the whole-task form, and it is deliberate
+        // rather than a parse failure: check_finding matches it against every
+        // rule.
         Check_Exemption entry = { .huid = huid, .rule = rule, .used = false };
         if (aids_array_append(&ex->entries, &entry) != AIDS_OK) {
             aids_log(AIDS_WARNING, "Failed to record exemption: %s", aids_failure_reason());
@@ -5914,8 +6628,13 @@ static size_t check_finding(Check_Exemptions *ex, const Aids_String_Slice *huid,
             if (aids_array_get(&ex->entries, i, (void **)&entry) != AIDS_OK) {
                 continue;
             }
+            // An entry with no rule is the whole-task form: it suppresses
+            // every rule for that task. It is still marked used, so a blunt
+            // exemption that has stopped mattering rots as loudly as a narrow
+            // one.
             if (aids_string_slice_compare(&entry->huid, huid) == 0 &&
-                aids_string_slice_compare(&entry->rule, &rule_slice) == 0) {
+                (entry->rule.len == 0 ||
+                 aids_string_slice_compare(&entry->rule, &rule_slice) == 0)) {
                 entry->used = true;
                 return 0;
             }
@@ -5939,8 +6658,13 @@ static size_t check_exemptions_report_unused(Check_Exemptions *ex) {
         if (aids_array_get(&ex->entries, i, (void **)&entry) != AIDS_OK || entry->used) {
             continue;
         }
-        printf(SS_Fmt ": unused-exemption: '" SS_Fmt "' is exempted in %s but did not fire\n",
-               SS_Arg(entry->huid), SS_Arg(entry->rule), EXEMPTIONS_FILE_NAME_CSTR);
+        if (entry->rule.len == 0) {
+            printf(SS_Fmt ": unused-exemption: the whole task is exempted in %s but no rule fired\n",
+                   SS_Arg(entry->huid), EXEMPTIONS_FILE_NAME_CSTR);
+        } else {
+            printf(SS_Fmt ": unused-exemption: '" SS_Fmt "' is exempted in %s but did not fire\n",
+                   SS_Arg(entry->huid), SS_Arg(entry->rule), EXEMPTIONS_FILE_NAME_CSTR);
+        }
         findings++;
     }
     return findings;
@@ -5995,6 +6719,11 @@ static size_t check_task(Check_Exemptions *ex,
     boolean has_review = false;
     Task task = {0};
     boolean task_loaded = false;
+    // Declared here, not where they are computed: the malformed-record paths
+    // below jump straight to review_checks, and a `goto` past an initializer
+    // would leave these holding garbage where the closed-* rules read them.
+    boolean plan_gate = false;
+    boolean closed_done = false;
 
     if (!task_sibling_read(tasks_dir, huid, TASK_FILE_NAME_CSTR, &raw)) {
         findings += check_finding(ex, huid, "malformed-header", "TASK.md missing or unreadable");
@@ -6004,7 +6733,7 @@ static size_t check_task(Check_Exemptions *ex,
     task_init_empty(&task);
     if (task_deserialize(raw, &task) != AIDS_OK) {
         findings += check_finding(ex, huid, "malformed-header",
-                                  "TASK.md failed to parse (title and v2 metadata block)");
+                                  "TASK.md failed to parse (title and metadata block)");
         AIDS_FREE(raw.str);
         raw = (Aids_String_Slice){0};
         goto review_checks;
@@ -6012,20 +6741,22 @@ static size_t check_task(Check_Exemptions *ex,
     task._buffer = raw.str; // task now owns the buffer
     task_loaded = true;
 
-    // Metadata values no longer need a re-scan here: the v2 parser validates
-    // the exact token it consumes (trailing spaces and CRLF tails included),
-    // so an invalid STATUS, KIND, FLOW STEP or PLAN STATUS has already been
-    // reported above as a parse failure. What the parser does NOT police is the
-    // body, so the kind's required sections are checked from the schema table.
+    // Metadata values no longer need a re-scan here: the parser validates the
+    // exact token it consumes (trailing spaces and CRLF tails included), so an
+    // invalid KIND, ACTIVITY, GATES or RESOLUTION has already been reported
+    // above as a parse failure. What the parser does NOT police is the body, so
+    // the kind's required sections are checked from the schema table.
     //
-    // Only from PLANNED on, though: `## Steps` and `## Definition of Done` ARE
-    // the plan gate's output, so demanding them of a BACKLOG record would make
-    // every task `tatr new` creates a finding the moment it exists. The same
-    // reasoning covers a SPIKE task's SPIKE.md - the research doc is written
-    // during the spike, not at the instant the task is filed.
+    // Only once the PLAN gate is earned, though: `## Steps` and
+    // `## Definition of Done` ARE the plan gate's output, so demanding them of
+    // an unplanned record would make every task `tatr new` creates a finding
+    // the moment it exists. The same reasoning covers a SPIKE task's SPIKE.md -
+    // the research doc is written during the spike, not at the instant the task
+    // is filed.
+    plan_gate = (task.meta.gates & TASK_GATE_BIT(Task_Gate_PLAN)) != 0;
     {
         Record_Problems problems = {0};
-        task_record_problems(task.meta.kind, task.meta.flow_step, raw, &problems);
+        task_record_problems(task.meta.kind, plan_gate, raw, &problems);
         findings += check_report_problems(ex, huid, &problems);
     }
 
@@ -6048,9 +6779,7 @@ static size_t check_task(Check_Exemptions *ex,
     {
         Aids_String_Slice spike = {0};
         if (!task_sibling_read(tasks_dir, huid, "SPIKE.md", &spike)) {
-            if (task.meta.kind == Task_Kind_SPIKE &&
-                task.meta.flow_step != Flow_Step_DROPPED &&
-                task.meta.flow_step >= Flow_Step_PLANNED) {
+            if (task.meta.kind == Task_Kind_SPIKE && plan_gate) {
                 findings += check_finding(ex, huid, "missing-spike-record",
                                           "KIND: SPIKE task has no SPIKE.md");
             }
@@ -6062,18 +6791,32 @@ static size_t check_task(Check_Exemptions *ex,
         }
     }
 
-    if (task.meta.status == Task_Status_IN_PROGRESS &&
-        task.meta.plan_status != Plan_Status_APPROVED &&
-        !check_task_is_container(&task)) {
-        findings += check_finding(ex, huid, "unplanned-in-progress",
-                                  "IN_PROGRESS task lacks PLAN STATUS: APPROVED");
+    // inconsistent-gates: a cursor past an activity whose gate the record does
+    // not carry. This is precisely the drift the chain made unrepresentable by
+    // conflating position with proof, so it needs a rule now that the two axes
+    // are free to disagree. Work started without an approved plan - the v0
+    // `unplanned-in-progress` rule - is the PLANNING case of exactly this, so
+    // it has no rule of its own.
+    if (task.meta.has_activity && !check_task_is_container(&task)) {
+        for (size_t a = 0; a < (size_t)task.meta.activity; ++a) {
+            Task_Gate gate = Task_Gate_PLAN;
+            if (activity_exit_gate((Task_Activity)a, &gate) &&
+                (task.meta.gates & TASK_GATE_BIT(gate)) == 0) {
+                findings += check_finding(ex, huid, "inconsistent-gates",
+                                          "ACTIVITY: " SS_Fmt " is past " SS_Fmt
+                                          " but the " SS_Fmt " gate is not in GATES",
+                                          SS_Arg(Task_Activity_Strings[task.meta.activity]),
+                                          SS_Arg(Task_Activity_Strings[a]),
+                                          SS_Arg(Task_Gate_Strings[gate]));
+            }
+        }
     }
 
-    if (task.meta.flow_step == Flow_Step_DROPPED) {
+    if (task.meta.has_resolution && task.meta.resolution == Task_Resolution_WONTDO) {
         Aids_String_Slice reason = {0};
         if (!artifact_field(raw, "- REASON: ", &reason) || reason.len == 0) {
             findings += check_finding(ex, huid, "dropped-missing-reason",
-                                      "DROPPED task has no non-empty '- REASON:' line");
+                                      "WONTDO task has no non-empty '- REASON:' line");
         }
         Aids_String_Slice superseded_by = {0};
         if (artifact_field(raw, "- SUPERSEDED BY: ", &superseded_by)) {
@@ -6087,9 +6830,22 @@ static size_t check_task(Check_Exemptions *ex,
         }
     }
 
-    if (task.meta.status == Task_Status_CLOSED &&
-        task.meta.flow_step != Flow_Step_DROPPED &&
-        !check_task_is_container(&task)) {
+    // dangling-duplicate-of: DUPLICATE and SUPERSEDED point somewhere, and a
+    // pointer that does not resolve records nothing.
+    if (task.meta.duplicate_of.len > 0 &&
+        (aids_string_slice_compare(&task.meta.duplicate_of, huid) == 0 ||
+         !task_sibling_exists(tasks_dir, &task.meta.duplicate_of, TASK_FILE_NAME_CSTR))) {
+        findings += check_finding(ex, huid, "dangling-duplicate-of",
+                                  "DUPLICATE OF '" SS_Fmt "' does not resolve to another task",
+                                  SS_Arg(task.meta.duplicate_of));
+    }
+
+    // The closed-* family keys on RESOLUTION: DONE alone. A task that was
+    // abandoned owes no review and no retro - that is what abandoning it means.
+    closed_done = task.meta.has_resolution &&
+                  task.meta.resolution == Task_Resolution_DONE;
+
+    if (closed_done && !check_task_is_container(&task)) {
         size_t unchecked = artifact_count_unchecked_steps(raw);
         if (unchecked > 0) {
             findings += check_finding(ex, huid, "closed-unchecked",
@@ -6104,8 +6860,7 @@ review_checks:
         Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
         Aids_String_Slice last_verdict = {0};
         boolean has_verdict = artifact_latest_verdict(review, &last_verdict);
-        if (task_loaded && task.meta.status == Task_Status_CLOSED &&
-            task.meta.flow_step != Flow_Step_DROPPED) {
+        if (task_loaded && closed_done) {
             if (!has_verdict) {
                 findings += check_finding(ex, huid, "closed-not-approved",
                                           "REVIEW.md has no VERDICT line");
@@ -6130,9 +6885,7 @@ review_checks:
         }
     }
 
-    if (task_loaded && task.meta.status == Task_Status_CLOSED &&
-        task.meta.flow_step != Flow_Step_DROPPED &&
-        !check_task_is_container(&task)) {
+    if (task_loaded && closed_done && !check_task_is_container(&task)) {
         if (!has_review) {
             findings += check_finding(ex, huid, "closed-missing-review",
                                       "CLOSED task has no REVIEW.md");
@@ -7019,10 +7772,16 @@ static int main_frontier(const Tatr_Context *ctx) {
             continue;
         }
         if (node->status == Task_Status_CLOSED) {
-            continue; // the frontier is OPEN work
+            continue; // the frontier is unresolved work
         }
 
-        Frontier_State state = Frontier_State_READY;
+        // READY is the derived query PLANNED used to be a node for: the plan
+        // gate is earned, the cursor has not entered WORKING yet, the
+        // dependencies are finished and nobody holds it. Anything else under
+        // the epic is open work you cannot pick up, which is what BLOCKED
+        // means here - the `blocked-by` column names the dependencies when
+        // dependencies are the reason.
+        boolean deps_closed = true;
         for (size_t d = 0; d < node->depends_on.count; ++d) {
             Aids_String_Slice *dep = NULL;
             if (aids_array_get(&node->depends_on, d, (void **)&dep) != AIDS_OK) {
@@ -7032,10 +7791,15 @@ static int main_frontier(const Tatr_Context *ctx) {
             // An unresolvable or unreadable dependency blocks: it cannot be
             // shown to be CLOSED, and check reports the dangling edge itself.
             if (dep_node == NULL || !dep_node->parsed || dep_node->status != Task_Status_CLOSED) {
-                state = Frontier_State_BLOCKED;
+                deps_closed = false;
                 break;
             }
         }
+        boolean planned = (node->gates & TASK_GATE_BIT(Task_Gate_PLAN)) != 0;
+        boolean not_started = !node->has_activity || node->activity < Task_Activity_WORKING;
+        Frontier_State state = (deps_closed && planned && not_started)
+            ? Frontier_State_READY
+            : Frontier_State_BLOCKED;
         // A claim outranks readiness in the display: work someone already holds
         // is not work to pick up, whether or not its blockers cleared.
         if (task_is_claimed(&tasks_dir, node->huid)) {
@@ -7056,10 +7820,20 @@ static int main_frontier(const Tatr_Context *ctx) {
         if (aids_array_get(&rows, i, (void **)&row) != AIDS_OK) {
             continue;
         }
-        printf("%s\t" SS_Fmt "\tp%u\t" SS_Fmt "\t" SS_Fmt,
+        // The activity alone no longer separates drafting from blessed, so the
+        // gates ride in the same column: PLANNING+PLAN is a plan that was
+        // approved, PLANNING is one still being written.
+        printf("%s\t" SS_Fmt "\tp%u\t" SS_Fmt,
                FRONTIER_STATE_NAMES[row->state], SS_Arg(row->node->huid),
-               row->node->priority, SS_Arg(Flow_Step_Strings[row->node->flow_step]),
-               SS_Arg(row->node->title));
+               row->node->priority,
+               SS_Arg(field_value_or_unset(row->node->has_activity,
+                                           Task_Activity_Strings[row->node->activity])));
+        for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
+            if ((row->node->gates & TASK_GATE_BIT(g)) != 0) {
+                printf("+" SS_Fmt, SS_Arg(Task_Gate_Strings[g]));
+            }
+        }
+        printf("\t" SS_Fmt, SS_Arg(row->node->title));
         if (row->state == Frontier_State_CLAIMED) {
             // Naming the holder is what makes a CLAIMED row actionable: your
             // own claim is work you already picked up, someone else's is not
@@ -7075,8 +7849,8 @@ static int main_frontier(const Tatr_Context *ctx) {
         }
         if (row->state == Frontier_State_BLOCKED) {
             // The blockers are the actionable part of a BLOCKED row: they name
-            // what to finish first.
-            printf("\tblocked-by=");
+            // what to finish first. The column is omitted entirely when the row
+            // is not ready for some other reason, rather than printed empty.
             boolean first = true;
             for (size_t d = 0; d < row->node->depends_on.count; ++d) {
                 Aids_String_Slice *dep = NULL;
@@ -7087,7 +7861,7 @@ static int main_frontier(const Tatr_Context *ctx) {
                 if (dep_node != NULL && dep_node->parsed && dep_node->status == Task_Status_CLOSED) {
                     continue;
                 }
-                printf("%s" SS_Fmt, first ? "" : ",", SS_Arg(*dep));
+                printf("%s" SS_Fmt, first ? "\tblocked-by=" : ",", SS_Arg(*dep));
                 first = false;
             }
         }
@@ -7260,6 +8034,328 @@ defer:
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// migrate: the one place in this binary that knows the v0 record format.
+// Everything else refuses a v0 record on sight, so this command is the only
+// path from a pre-1.0 backlog to a readable one. It is quarantined here on
+// purpose and is removed again in v1.1.0.
+//
+// The mapping is record-local - it reads one task directory and writes one
+// TASK.md - so the command works unchanged in any repository, without a tatr
+// checkout and without cross-record knowledge. Only the metadata header moves:
+// no REVIEW.md or RETRO.md body is rewritten, keeping the append-only principle
+// tasks/EXEMPTIONS.md already states. A schema version bump is a different
+// thing from backfilling history.
+// ---------------------------------------------------------------------------
+
+static Aids_String_Slice V0_PLAN_STATUS_FORMAT =
+    (Aids_String_Slice) { .str = (unsigned char *)"- PLAN STATUS: ", .len = 15 };
+
+// Parses a v0 record into a v1 task, mapping as it goes. Returns false when the
+// record is not v0 at all (already migrated, or malformed in a way this command
+// must not guess at). *step and *plan receive the raw v0 values for reporting.
+static boolean migrate_parse_v0(Aids_String_Slice buffer, Task *task,
+                                Aids_String_Slice *step, Aids_String_Slice *plan) {
+    task_init_empty(task);
+
+    if (!aids_string_slice_tokenize(&buffer, '\n', &task->title)) {
+        return false;
+    }
+    if (!aids_string_slice_starts_with(&task->title, (Aids_String_Slice) { .str = (unsigned char *)"# ", .len = 2 })) {
+        return false;
+    }
+    aids_string_slice_skip(&task->title, 2);
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    // "- STATUS: " is what makes a record v0; its value is dropped, because v1
+    // derives it.
+    if (!aids_string_slice_starts_with(&buffer, STATUS_FORMAT)) {
+        return false;
+    }
+    aids_string_slice_skip(&buffer, STATUS_FORMAT.len);
+    Aids_String_Slice discard = {0};
+    if (!aids_string_slice_tokenize(&buffer, '\n', &discard)) {
+        return false;
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    if (!aids_string_slice_starts_with(&buffer, PRIORITY_FORMAT)) {
+        return false;
+    }
+    aids_string_slice_skip(&buffer, PRIORITY_FORMAT.len);
+    Aids_String_Slice priority_slice = {0};
+    long priority = 0;
+    if (!aids_string_slice_tokenize(&buffer, '\n', &priority_slice) ||
+        !aids_string_slice_atol(&priority_slice, &priority, 10)) {
+        return false;
+    }
+    task->meta.priority = (unsigned int)priority;
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    if (!aids_string_slice_starts_with(&buffer, TAGS_FORMAT)) {
+        return false;
+    }
+    aids_string_slice_skip(&buffer, TAGS_FORMAT.len);
+    Aids_String_Slice tags_slice = {0};
+    if (!aids_string_slice_tokenize(&buffer, '\n', &tags_slice) ||
+        task_parse_list_field(tags_slice, &task->meta.tags) != AIDS_OK) {
+        return false;
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    if (!aids_string_slice_starts_with(&buffer, KIND_FORMAT)) {
+        return false;
+    }
+    aids_string_slice_skip(&buffer, KIND_FORMAT.len);
+    Aids_String_Slice kind_slice = {0};
+    if (!aids_string_slice_tokenize(&buffer, '\n', &kind_slice) ||
+        !task_kind_from_string(&kind_slice, &task->meta.kind)) {
+        return false;
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    if (!aids_string_slice_starts_with(&buffer, FLOW_STEP_FORMAT)) {
+        return false;
+    }
+    aids_string_slice_skip(&buffer, FLOW_STEP_FORMAT.len);
+    if (!aids_string_slice_tokenize(&buffer, '\n', step)) {
+        return false;
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    if (!aids_string_slice_starts_with(&buffer, V0_PLAN_STATUS_FORMAT)) {
+        return false;
+    }
+    aids_string_slice_skip(&buffer, V0_PLAN_STATUS_FORMAT.len);
+    if (!aids_string_slice_tokenize(&buffer, '\n', plan)) {
+        return false;
+    }
+    aids_string_slice_skip_while(&buffer, isspace);
+
+    if (aids_string_slice_starts_with(&buffer, PARENT_FORMAT)) {
+        aids_string_slice_skip(&buffer, PARENT_FORMAT.len);
+        Aids_String_Slice parent_slice = {0};
+        if (!aids_string_slice_tokenize(&buffer, '\n', &parent_slice) || !ishuid(&parent_slice)) {
+            return false;
+        }
+        task->meta.parent = parent_slice;
+        aids_string_slice_skip_while(&buffer, isspace);
+    }
+
+    if (aids_string_slice_starts_with(&buffer, DEPENDS_ON_FORMAT)) {
+        aids_string_slice_skip(&buffer, DEPENDS_ON_FORMAT.len);
+        Aids_String_Slice depends_slice = {0};
+        if (!aids_string_slice_tokenize(&buffer, '\n', &depends_slice) ||
+            task_parse_list_field(depends_slice, &task->meta.depends_on) != AIDS_OK) {
+            return false;
+        }
+        aids_string_slice_skip_while(&buffer, isspace);
+    }
+
+    task->description = buffer;
+    return true;
+}
+
+// The v0 -> v1 mapping table, applied to an already-parsed record. Three of the
+// nine chain nodes dissolve into other axes rather than being renamed: BACKLOG
+// is the absence of an activity, DONE is a resolution, DROPPED is a different
+// resolution. PLANNED becomes PLANNING plus the gate that used to be implied by
+// standing there.
+static boolean migrate_apply_mapping(const Aids_String_Slice *tasks_dir,
+                                     const Aids_String_Slice *huid,
+                                     Aids_String_Slice step,
+                                     Aids_String_Slice plan,
+                                     Task *task) {
+    struct { const char *v0; boolean has_activity; Task_Activity activity;
+             boolean has_resolution; Task_Resolution resolution; unsigned int gates; } table[] = {
+        {"BACKLOG",       false, Task_Activity_UNDERSTANDING, false, Task_Resolution_DONE,   0},
+        {"UNDERSTANDING", true,  Task_Activity_UNDERSTANDING, false, Task_Resolution_DONE,   0},
+        {"PLANNING",      true,  Task_Activity_PLANNING,      false, Task_Resolution_DONE,   0},
+        {"PLANNED",       true,  Task_Activity_PLANNING,      false, Task_Resolution_DONE,
+                                                              TASK_GATE_BIT(Task_Gate_PLAN)},
+        {"WORKING",       true,  Task_Activity_WORKING,       false, Task_Resolution_DONE,   0},
+        {"REVIEWING",     true,  Task_Activity_REVIEWING,     false, Task_Resolution_DONE,   0},
+        {"COMPOUNDING",   true,  Task_Activity_COMPOUNDING,   false, Task_Resolution_DONE,   0},
+        {"DONE",          true,  Task_Activity_COMPOUNDING,   true,  Task_Resolution_DONE,   0},
+        // DROPPED replaced whatever activity the task was at, so there is no
+        // cursor left to recover: the record keeps its reason and no position.
+        {"DROPPED",       false, Task_Activity_UNDERSTANDING, true,  Task_Resolution_WONTDO, 0},
+    };
+
+    boolean matched = false;
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+        Aids_String_Slice name = aids_string_slice_from_cstr((char *)table[i].v0);
+        if (aids_string_slice_compare(&step, &name) != 0) {
+            continue;
+        }
+        task->meta.has_activity = table[i].has_activity;
+        task->meta.activity = table[i].activity;
+        task->meta.has_resolution = table[i].has_resolution;
+        task->meta.resolution = table[i].resolution;
+        task->meta.gates = table[i].gates;
+        matched = true;
+        break;
+    }
+    if (!matched) {
+        return false;
+    }
+
+    // PLAN STATUS: APPROVED is the same fact the PLAN gate records. DRAFT and
+    // NOT_REQUIRED both become the absence of the gate, which is what they
+    // always meant - NOT_REQUIRED does not come back as a value.
+    Aids_String_Slice approved = aids_string_slice_from_cstr("APPROVED");
+    if (aids_string_slice_compare(&plan, &approved) == 0) {
+        task->meta.gates |= TASK_GATE_BIT(Task_Gate_PLAN);
+    }
+
+    // The remaining two gates are read from the records that prove them, since
+    // v0 never wrote them down anywhere else.
+    Aids_String_Slice review = {0};
+    if (task_sibling_read(tasks_dir, huid, "REVIEW.md", &review)) {
+        Aids_String_Slice verdict = {0};
+        Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
+        if (artifact_latest_verdict(review, &verdict) &&
+            aids_string_slice_compare(&verdict, &approve) == 0) {
+            task->meta.gates |= TASK_GATE_BIT(Task_Gate_REVIEW);
+        }
+        AIDS_FREE(review.str);
+    }
+    if (task_sibling_exists(tasks_dir, huid, "RETRO.md")) {
+        task->meta.gates |= TASK_GATE_BIT(Task_Gate_RETRO);
+    }
+    return true;
+}
+
+static int main_migrate(const Tatr_Context *ctx) {
+    int result = 0;
+    Argparse_Parser parser = {0};
+    Aids_String_Slice tasks_dir = {0};
+    Aids_Array entries = {0};
+    boolean entries_initialized = false;
+    size_t migrated = 0;
+    size_t failed = 0;
+
+    argparse_parser_init(&parser, "tatr migrate", "Convert v0 task records to the v1 format", TATR_VERSION);
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'a',
+        .long_name = "apply",
+        .description = "Write the converted records (default: report what would change)",
+        .type = ARGUMENT_TYPE_FLAG,
+        .required = 0
+    });
+
+    if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
+        return_defer(1);
+    }
+    boolean apply = argparse_get_flag(&parser, "apply");
+
+    if (tasks_dir_path_build(&ctx->cwd, &tasks_dir) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    aids_array_init(&entries, sizeof(Aids_String_Slice));
+    entries_initialized = true;
+    if (aids_io_listdir(&tasks_dir, &entries) != AIDS_OK) {
+        aids_log(AIDS_ERROR, "Failed to list tasks directory: %s", aids_failure_reason());
+        return_defer(1);
+    }
+    aids_array_sort(&entries, string_slice_compare_fn);
+
+    for (size_t i = 0; i < entries.count; ++i) {
+        Aids_String_Slice *entry = NULL;
+        if (aids_array_get(&entries, i, (void **)&entry) != AIDS_OK || !ishuid(entry)) {
+            continue;
+        }
+
+        Aids_String_Slice raw = {0};
+        if (!task_sibling_read(&tasks_dir, entry, TASK_FILE_NAME_CSTR, &raw)) {
+            continue;
+        }
+
+        Task task = {0};
+        Aids_String_Slice step = {0};
+        Aids_String_Slice plan = {0};
+        if (!migrate_parse_v0(raw, &task, &step, &plan)) {
+            // Already v1, or a record this command must not guess at. Either
+            // way it is left exactly as it is; `tatr check` is what reports a
+            // record nothing can read.
+            task_cleanup(&task);
+            AIDS_FREE(raw.str);
+            continue;
+        }
+        task._buffer = raw.str; // the task now owns the bytes its slices point into
+
+        if (!migrate_apply_mapping(&tasks_dir, entry, step, plan, &task)) {
+            aids_log(AIDS_ERROR, SS_Fmt ": unknown FLOW STEP '" SS_Fmt "'; leaving it alone",
+                     SS_Arg(*entry), SS_Arg(step));
+            failed++;
+            task_cleanup(&task);
+            continue;
+        }
+
+        printf(SS_Fmt "\tFLOW STEP: " SS_Fmt ", PLAN STATUS: " SS_Fmt
+               " -> ACTIVITY: " SS_Fmt ", GATES: ",
+               SS_Arg(*entry), SS_Arg(step), SS_Arg(plan),
+               SS_Arg(field_value_or_unset(task.meta.has_activity,
+                                           Task_Activity_Strings[task.meta.activity])));
+        if (task.meta.gates == 0) {
+            printf(FIELD_UNSET_CSTR);
+        } else {
+            boolean first = true;
+            for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
+                if ((task.meta.gates & TASK_GATE_BIT(g)) == 0) {
+                    continue;
+                }
+                printf("%s" SS_Fmt, first ? "" : " ", SS_Arg(Task_Gate_Strings[g]));
+                first = false;
+            }
+        }
+        printf(", RESOLUTION: " SS_Fmt "\n",
+               SS_Arg(field_value_or_unset(task.meta.has_resolution,
+                                           Task_Resolution_Strings[task.meta.resolution])));
+        migrated++;
+
+        if (apply) {
+            Aids_String_Slice path = {0};
+            if (task_file_path_build(&tasks_dir, entry, &path) != AIDS_OK) {
+                task_cleanup(&task);
+                return_defer(1);
+            }
+            Aids_Result saved = task_save(&path, &task);
+            AIDS_FREE(path.str);
+            if (saved != AIDS_OK) {
+                aids_log(AIDS_ERROR, SS_Fmt ": failed to write the migrated record", SS_Arg(*entry));
+                task_cleanup(&task);
+                return_defer(1);
+            }
+        }
+
+        task_cleanup(&task);
+    }
+
+    if (migrated == 0) {
+        printf("No v0 records found: nothing to migrate\n");
+    } else if (!apply) {
+        printf("%zu record(s) would change; nothing was written. Re-run with --apply.\n", migrated);
+    } else {
+        printf("%zu record(s) migrated\n", migrated);
+    }
+    if (failed > 0) {
+        return_defer(1);
+    }
+
+defer:
+    if (entries_initialized) {
+        cleanup_string_slice_array(&entries);
+    }
+    if (tasks_dir.str != NULL) {
+        AIDS_FREE(tasks_dir.str);
+    }
+    argparse_parser_free(&parser);
+    return result;
+}
+
 static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "Usage: %s [-r ROOT] <subcommand> [options]\n", parser->name);
     fprintf(stderr, "\n");
@@ -7273,7 +8369,10 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  ls           List tasks\n");
     fprintf(stderr, "  show         Show a single task by ID\n");
     fprintf(stderr, "  edit         Update fields of an existing task\n");
-    fprintf(stderr, "  flow         Move a task to its next flow step\n");
+    fprintf(stderr, "  flow         Advance a task one activity\n");
+    fprintf(stderr, "  rewind       Move a task back to an earlier activity\n");
+    fprintf(stderr, "  close        Close a task with a resolution\n");
+    fprintf(stderr, "  reopen       Clear a task's resolution\n");
     fprintf(stderr, "  rm           Remove a task by ID\n");
     fprintf(stderr, "  scaffold     Create a missing sibling record from the schema\n");
     fprintf(stderr, "  proofs       List the Definition of Done proofs of a task\n");
@@ -7283,6 +8382,7 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  release      Release a claim on a task\n");
     fprintf(stderr, "  claims       List the claims in this tasks directory\n");
     fprintf(stderr, "  check        Lint task artifacts for process drift\n");
+    fprintf(stderr, "  migrate      Convert v0 task records to the v1 format\n");
     fprintf(stderr, "\n");
 }
 
@@ -7366,6 +8466,15 @@ int main(int argc, char **argv) {
     } else if (strcmp(subcommand, "flow") == 0) {
         result = main_flow(&ctx);
         return_defer(result);
+    } else if (strcmp(subcommand, "rewind") == 0) {
+        result = main_rewind(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "close") == 0) {
+        result = main_close(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "reopen") == 0) {
+        result = main_reopen(&ctx);
+        return_defer(result);
     } else if (strcmp(subcommand, "rm") == 0) {
         result = main_rm(&ctx);
         return_defer(result);
@@ -7392,6 +8501,9 @@ int main(int argc, char **argv) {
         return_defer(result);
     } else if (strcmp(subcommand, "check") == 0) {
         result = main_check(&ctx);
+        return_defer(result);
+    } else if (strcmp(subcommand, "migrate") == 0) {
+        result = main_migrate(&ctx);
         return_defer(result);
 
     } else {

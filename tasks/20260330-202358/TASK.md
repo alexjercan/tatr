@@ -1,11 +1,11 @@
 # Implement ls subcommand
 
-- STATUS: CLOSED
 - PRIORITY: 100
-- TAGS: feature,historical
+- TAGS: feature, historical
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 
 The `ls` subcommand should list all the tasks. We should be able to see the
 titles, status, priority and tags of the tasks. We should also be able to see

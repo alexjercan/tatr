@@ -1,11 +1,11 @@
 # Implement a filter system for tasks
 
-- STATUS: CLOSED
 - PRIORITY: 100
-- TAGS: feature,historical
+- TAGS: feature, historical
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 
 We need to have a way of filtering tasks by status and tags. We can imagine
 something like having `-s open, closed etc` and `-t tag1, etc` but it would be

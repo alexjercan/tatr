@@ -35,7 +35,7 @@
 
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "tatr";
-          version = "0.2.2";
+          version = "1.0.0";
           src = ./.;
 
           nativeBuildInputs = [ pkgs.clang ];
@@ -58,7 +58,7 @@
 
         packages.windows = pkgs.pkgsCross.mingwW64.stdenv.mkDerivation {
           pname = "tatr-windows";
-          version = "0.2.1";
+          version = "1.0.0";
           src = ./.;
 
           buildPhase = ''

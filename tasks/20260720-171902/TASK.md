@@ -1,11 +1,11 @@
 # Adopt flow v2: create root LESSONS.md, AGENTS.md flow section
 
-- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: chore, process
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: NOT_REQUIRED
+- ACTIVITY: COMPOUNDING
+- GATES: REVIEW RETRO
+- RESOLUTION: DONE
 
 ## Story
 

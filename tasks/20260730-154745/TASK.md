@@ -1,11 +1,11 @@
 # Scaffold and validate flow artifact schemas
 
-- STATUS: CLOSED
 - PRIORITY: 85
 - TAGS: feature, flow, schema, testing
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: APPROVED
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 - DEPENDS ON: 20260730-153325, 20260730-154657
 
 ## Story

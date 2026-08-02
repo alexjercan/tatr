@@ -1,11 +1,11 @@
 # Write the test-first-for-check-messages practice into AGENTS.md
 
-- STATUS: CLOSED
 - PRIORITY: 60
 - TAGS: docs, testing, lessons
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: APPROVED
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 
 ## Story
 

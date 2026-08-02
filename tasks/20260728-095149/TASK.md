@@ -1,11 +1,11 @@
 # Add a Windows tatr.exe build
 
-- STATUS: CLOSED
 - PRIORITY: 85
-- TAGS: feature,build,windows
+- TAGS: feature, build, windows
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: APPROVED
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 
 ## Story
 

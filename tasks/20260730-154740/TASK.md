@@ -1,11 +1,11 @@
 # Add Epic graph, frontier, claims, and phase context
 
-- STATUS: CLOSED
 - PRIORITY: 85
 - TAGS: feature, flow, epic, parallel
 - KIND: TASK
-- FLOW STEP: DONE
-- PLAN STATUS: APPROVED
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 - DEPENDS ON: 20260730-153325, 20260730-154657, 20260730-154745
 
 ## Story

@@ -2,6 +2,78 @@
 
 All notable changes to tatr are documented here.
 
+## v1.0.0 - 2026-08-02
+
+The `FLOW STEP` chain is replaced by three independent fields. This is a
+breaking change to the record format, the lifecycle commands and the filter
+language; every existing record must be migrated with `tatr migrate --apply`.
+
+### Changed (breaking)
+
+- The record format. `- STATUS: `, `- FLOW STEP: ` and `- PLAN STATUS: ` are
+  gone; `- ACTIVITY: `, `- GATES: ` and `- RESOLUTION: ` take their place, in
+  that order after `- KIND: `. A record still carrying `- FLOW STEP: ` is
+  refused by every command that loads it, with a pointer at `tatr migrate`.
+- `ACTIVITY` is a nullable cursor over `UNDERSTANDING`, `PLANNING`, `WORKING`,
+  `REVIEWING` and `COMPOUNDING`. It moves backward as freely as forward and
+  proves nothing.
+- `GATES` is the set of gates earned, over `PLAN`, `REVIEW` and `RETRO`,
+  serialized in gate order and space separated. `tatr flow` is its only writer.
+- `RESOLUTION` is nullable over `DONE`, `WONTDO`, `DUPLICATE` and `SUPERSEDED`,
+  with `- DUPLICATE OF: <ID>` for the last two.
+- `STATUS` is derived and no longer stored: `CLOSED` when `RESOLUTION` is set,
+  `OPEN` when `ACTIVITY` is unset, `IN_PROGRESS` otherwise. Every command that
+  reports still prints it.
+- `tatr flow <ID>` lost `--to`. It advances exactly one activity, runs the
+  current activity's exit gate, and records it. It may half-succeed: when the
+  gate passes but the world does not permit the advance - an open dependency, a
+  foreign claim - it records the gate, holds the cursor, and reports both
+  halves in one write.
+- `tatr flow <ID> --to DROPPED --reason <text> [--superseded-by <ID>]` became
+  `tatr close <ID> --resolution WONTDO --reason <text>`.
+- `:flow_step` and `:plan_status` are retired from the filter language; both
+  are refused by name with a pointer at the replacement.
+- `tatr frontier` computes `READY` from the derived query - the `PLAN` gate
+  earned, the cursor below `WORKING`, dependencies `CLOSED`, unclaimed - and
+  prints the row's gates next to its activity (`PLANNING+PLAN`). The
+  `blocked-by` column is unchanged.
+
+### Added
+
+- `tatr rewind <ID> --to <ACTIVITY> [--force]`: move the cursor backward. Runs
+  no gate; clears every gate produced at or after the target - a rewind to
+  `WORKING` keeps `PLAN` and clears `REVIEW` and `RETRO` - and names each one.
+  `--force` is required when the record actually carries a gate being cleared.
+- `tatr close <ID> --resolution <R> [--of <ID>] [--reason <text>]`: `DONE` runs
+  the close gate (all three gates earned, no unchecked `## Steps`, a valid
+  `DECISION.md` when present); the other three run no gate and are legal from
+  any activity. The happy path stays folded into `tatr flow` out of
+  `COMPOUNDING`.
+- `tatr reopen <ID>`: clear `RESOLUTION`, the `- DUPLICATE OF: ` pointer and a
+  trailing `## Dropped` block, leaving the cursor and the gates where they
+  were. A close, reopen and re-close leaves one closure reason, not two.
+- `tatr flow <ID> --dry-run`: print the edge and the gate it would run.
+- `tatr migrate [--apply]`: convert v0 records in place, dry-run by default.
+  The only v0-format knowledge in the binary; removed again in v1.1.0.
+- `inconsistent-gates`: a cursor past an activity whose gate the record does
+  not carry - the drift the chain made unrepresentable. It subsumes
+  `unplanned-in-progress`, which is removed.
+- `dangling-duplicate-of`: a `- DUPLICATE OF: ` that names no other task.
+- Whole-task exemptions. `- <task-id>: <reason>` with no rule token suppresses
+  every rule for that task; `- <task-id> <rule>: <reason>` keeps its meaning.
+  An unused entry of either form is still reported.
+
+### Removed
+
+- `PLANNED`, `BACKLOG`, `DONE` and `DROPPED` as lifecycle values. `BACKLOG` is
+  the absence of an activity, `PLANNED` is a query, and the other two are
+  resolutions.
+- `NOT_REQUIRED`. A record that never earned a plan simply carries no `PLAN`
+  gate.
+- `unplanned-in-progress`. Its predicate is a strict subset of
+  `inconsistent-gates`, so the two only ever fired together and a repository
+  accepting the fact had to write two exemption lines.
+
 ## v0.2.2 - 2026-08-02
 
 ### Added
