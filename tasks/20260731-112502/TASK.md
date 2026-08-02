@@ -1,11 +1,11 @@
 # Add an honest terminal state for retired tasks
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 60
 - TAGS: feature, flow, lifecycle
 - KIND: TASK
-- FLOW STEP: BACKLOG
-- PLAN STATUS: DRAFT
+- FLOW STEP: DONE
+- PLAN STATUS: APPROVED
 
 ## Story
 
@@ -15,27 +15,25 @@ OPEN forever and having a review and retro fabricated for work nobody did.
 
 ## Steps
 
-- [ ] Confirm the gap on the current build: from BACKLOG the only path to
+- [x] Confirm the gap on the current build: from BACKLOG the only path to
       `STATUS: CLOSED` is the full walk to DONE, and DONE is gated behind a
       REVIEW.md whose latest verdict is APPROVE plus the COMPOUNDING step.
       `tatr edit` has no `--status`, so `tatr rm` is the only alternative and
       it destroys the record.
-- [ ] Decide the shape with the user: a terminal `DROPPED`/`SUPERSEDED` flow
-      step reachable from any non-DONE step and requiring a reason, versus a
-      `tatr close <id> --superseded-by <id> --reason <text>` command, versus
-      keeping `tatr rm` and treating removal as the answer.
-- [ ] Implement the chosen shape in `tatr.c` with its own `checker.sh` test,
+- [x] We will use `DROPPED` as the terminal state and it will be used like
+      `tatr flow <id> --to DROPPED`.
+- [x] Implement the chosen shape in `tatr.c` with its own `checker.sh` test,
       mutation-tested per AGENTS.md before review.
-- [ ] Decide whether `tatr check` should require a retired record to name what
+- [x] Decide whether `tatr check` should require a retired record to name what
       superseded it, and whether an Epic's child gate treats a retired child as
       settled.
 
 ## Definition of Done
 
 - A task can reach a terminal retired state without a REVIEW.md or a RETRO.md
-  (test: name the `checker.sh` test once the shape is chosen).
+  (test: `test_transition_dropped`).
 - The retired state records WHY and, when applicable, what superseded it
-  (test: same).
+  (test: `test_transition_dropped`).
 - Full native and memory-check suites pass
   (cmd: `nix develop -c ./checker.sh && nix develop -c ./checker.sh --memcheck`).
 - `tatr check` is clean (cmd: `nix develop -c ./dist/tatr check`).
@@ -56,3 +54,19 @@ OPEN forever and having a review and retro fabricated for work nobody did.
   the shape lands, teach the nix.dotfiles flow-family skills when to use the
   retire path instead of `tatr rm`
   (`grep -rn "supersed" /home/alex/personal/nix.dotfiles/home/modules/agents/skills`).
+
+## Close-out
+
+- Added explicit `DROPPED` edges from every non-terminal step. Bare flow walks
+  remain unchanged; `DONE` and `DROPPED` are terminal.
+- Requires a one-line `--reason`. Optional `--superseded-by` must resolve to a
+  different existing task. Both are written atomically under `## Dropped`.
+- `tatr check` exempts dropped tasks from work-completion artifacts, requires
+  the reason, and validates an optional superseder. CLOSED graph semantics
+  make dropped dependencies and Epic children settled.
+- Chose an optional superseder: wontdo can be caused by priority or invalid
+  premises, not only replacement work.
+- Evidence: native and memcheck suites 103/103; Windows warning-clean within
+  both suites. Disabling the reason guard made only the new test fail (102/103).
+- Reflection: keeping retirement in `flow` preserves one lifecycle writer and
+  makes the reason part of the same atomic TASK.md mutation.

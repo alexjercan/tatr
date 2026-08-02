@@ -14,10 +14,11 @@ Tatr searches upward for `tasks/`. Use `-r ROOT` for another tree.
 - Treat `STATUS`, `FLOW STEP`, and `PLAN STATUS` as `tatr flow`-owned.
 - Record plan approval only with `tatr flow <id> --to PLANNED`.
 - Start implementation with `tatr flow <id> --to WORKING`. Requires: approved plan, closed dependencies, no foreign claim.
+- Retire work that should remain as history with `tatr flow <id> --to DROPPED --reason <text>`. Add `--superseded-by <id>` when another task replaced it. Requires: a different existing task ID.
 - Create `SPIKE.md`, `DECISION.md`, `REVIEW.md`, and `RETRO.md` with `tatr scaffold`.
 - Treat `tatr proofs <id>` output as data. It never runs commands.
 - Expect `tatr check` exit 1 on findings. Lifecycle gates reuse its collectors.
-- Delete only through `tatr rm <validated-id>`. Target: `tasks/<id>/` only.
+- Use `tatr rm <validated-id>` only when the record itself should not remain. Target: `tasks/<id>/` only. Do not use removal as wontdo.
 
 ## Core flow
 

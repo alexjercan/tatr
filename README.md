@@ -289,18 +289,21 @@ advances one step along the chain; with `--to` it names the target explicitly:
 ```bash
 tatr flow 20260331-144635              # advance one step
 tatr flow 20260331-144635 --to WORKING # name the target (the review fix loop)
+tatr flow 20260331-144635 --to DROPPED --reason "Duplicate work"
 ```
 
-**The transition table.** Eight edges, and nothing else:
+**The transition table.** The normal chain plus a terminal retirement edge:
 
 ```
 BACKLOG -> UNDERSTANDING -> PLANNING -> PLANNED -> WORKING -> REVIEWING
                                           ^                      |
                                           |                      v
                                           +------- (fix) --- COMPOUNDING -> DONE
+  any non-terminal step -------------------------------------> DROPPED
 ```
 
-`REVIEWING` is the only step with two successors. Its default - what a bare
+`DROPPED` is only selected explicitly, so it never changes the default walk.
+`REVIEWING` is the only normal step with two successors. Its default - what a bare
 `tatr flow` picks - is `COMPOUNDING`, so the fix loop back to `WORKING` must be
 asked for by name with `--to WORKING`. Every other step has exactly one
 successor, and `DONE` is terminal.
@@ -313,7 +316,7 @@ the same write that sets `- FLOW STEP: DONE`:
 | ----------------------------------------- | ----------- |
 | BACKLOG, UNDERSTANDING, PLANNING, PLANNED | OPEN        |
 | WORKING, REVIEWING, COMPOUNDING           | IN_PROGRESS |
-| DONE                                      | CLOSED      |
+| DONE, DROPPED                             | CLOSED      |
 
 **Preconditions.** Three edges are gates:
 
@@ -330,6 +333,11 @@ the same write that sets `- FLOW STEP: DONE`:
 
 `REVIEWING -> WORKING` and the three pre-plan edges carry no preconditions:
 going back to fix something is never harder than going forward.
+
+`DROPPED` requires `--reason <text>`. `--superseded-by <ID>` optionally names
+the existing replacement task. The transition appends a `## Dropped` record to
+TASK.md. It does not require an approved plan, completed Steps, REVIEW.md, or
+RETRO.md. `tatr check` validates the reason and optional reference.
 
 `KIND: EPIC` containers are exempt from exactly what `tatr check` already
 exempts them from - the plan-approval, review, retro and unchecked-Steps
@@ -368,6 +376,8 @@ ERROR: Refusing to move 20260730-185007 from COMPOUNDING to DONE: 2 precondition
 
 **Options:**
 - `-o, --to <STEP>`: the target flow step (default: the current step's successor)
+- `-R, --reason <TEXT>`: required reason when targeting `DROPPED`
+- `-S, --superseded-by <ID>`: optional existing replacement task
 
 There is no `--force` and no repair command. A transition may never produce a
 state `tatr check` would flag: both read the same artifacts through the same
@@ -746,7 +756,7 @@ would not parse - a newline in a title or tag is the usual cause - and a failed
 `STORY` (a unit of work under an Epic), `SPIKE` (an exploration).
 
 **Flow step values:** `BACKLOG`, `UNDERSTANDING`, `PLANNING`, `PLANNED`,
-`WORKING`, `REVIEWING`, `COMPOUNDING`, `DONE`.
+`WORKING`, `REVIEWING`, `COMPOUNDING`, `DONE`, `DROPPED`.
 
 **Plan status values:** `DRAFT`, `APPROVED` (the user accepted the plan at the
 /flow gate), `NOT_REQUIRED` (the record's cycle never carried plan state, as

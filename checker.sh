@@ -1465,6 +1465,62 @@ test_transition_start_guards() {
     fi
 }
 
+test_transition_dropped() {
+    log_test "flow (DROPPED records why and optional superseder)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local replacement=$(new_task_id "Replacement")
+    sleep 1
+    local id=$(new_task_id "Retire me")
+    local task_file="tasks/$id/TASK.md"
+    local ok=1
+
+    cp "$task_file" before.md
+    set +e
+    local missing_out
+    missing_out=$(run_tatr flow "$id" --to DROPPED 2>&1); local missing_code=$?
+    set -e
+    [ $missing_code -ne 0 ] || ok=0
+    echo "$missing_out" | grep -qx ".*ERROR.*tatr.c:[0-9]*: DROPPED requires --reason <text>" || ok=0
+    cmp -s before.md "$task_file" || ok=0
+
+    run_tatr flow "$id" --to DROPPED --reason "Duplicate work" \
+        --superseded-by "$replacement" > /dev/null 2>&1 || ok=0
+    grep -qx -- "- STATUS: CLOSED" "$task_file" || ok=0
+    grep -qx -- "- FLOW STEP: DROPPED" "$task_file" || ok=0
+    grep -qx -- "- REASON: Duplicate work" "$task_file" || ok=0
+    grep -qx -- "- SUPERSEDED BY: $replacement" "$task_file" || ok=0
+    [ ! -f "tasks/$id/REVIEW.md" ] || ok=0
+    [ ! -f "tasks/$id/RETRO.md" ] || ok=0
+
+    set +e
+    local check_out terminal_out
+    check_out=$(run_tatr check 2>&1); local check_code=$?
+    terminal_out=$(run_tatr flow "$id" 2>&1); local terminal_code=$?
+    set -e
+    [ $check_code -eq 0 ] || ok=0
+    [ $terminal_code -ne 0 ] || ok=0
+    echo "$terminal_out" | grep -q "terminal" || ok=0
+
+    sed -i 's/^- REASON: Duplicate work$/- REASON:/' "$task_file"
+    set +e
+    local bad_record_out
+    bad_record_out=$(run_tatr check "$id" 2>&1); local bad_record_code=$?
+    set -e
+    [ $bad_record_code -ne 0 ] || ok=0
+    echo "$bad_record_out" | grep -qx "$id: dropped-missing-reason: DROPPED task has no non-empty '- REASON:' line" || ok=0
+    sed -i 's/^- REASON:$/- REASON: Duplicate work/' "$task_file"
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "missing($missing_code): $missing_out | check($check_code): $check_out | terminal($terminal_code): $terminal_out | bad-record($bad_record_code): $bad_record_out"
+    fi
+}
+
 test_transition_close_is_atomic() {
     log_test "flow (a refused close reports everything and writes nothing)"
 
@@ -4414,6 +4470,7 @@ test_v2_new_and_edit_fields
 test_v2_plan_status_not_required
 test_v2_filter_fields
 test_transition_state_machine
+test_transition_dropped
 test_transition_start_guards
 test_transition_close_is_atomic
 test_transition_epic_exemptions

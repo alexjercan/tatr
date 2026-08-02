@@ -134,7 +134,8 @@ typedef enum {
     Flow_Step_WORKING,
     Flow_Step_REVIEWING,
     Flow_Step_COMPOUNDING,
-    Flow_Step_DONE
+    Flow_Step_DONE,
+    Flow_Step_DROPPED
 } Flow_Step;
 
 static Aids_String_Slice Flow_Step_Strings[] = {
@@ -145,11 +146,12 @@ static Aids_String_Slice Flow_Step_Strings[] = {
     [Flow_Step_WORKING] = (Aids_String_Slice) { .str = (unsigned char *)"WORKING", .len = 7 },
     [Flow_Step_REVIEWING] = (Aids_String_Slice) { .str = (unsigned char *)"REVIEWING", .len = 9 },
     [Flow_Step_COMPOUNDING] = (Aids_String_Slice) { .str = (unsigned char *)"COMPOUNDING", .len = 11 },
-    [Flow_Step_DONE] = (Aids_String_Slice) { .str = (unsigned char *)"DONE", .len = 4 }
+    [Flow_Step_DONE] = (Aids_String_Slice) { .str = (unsigned char *)"DONE", .len = 4 },
+    [Flow_Step_DROPPED] = (Aids_String_Slice) { .str = (unsigned char *)"DROPPED", .len = 7 }
 };
 
 #define FLOW_STEP_VALUES_CSTR \
-    "BACKLOG, UNDERSTANDING, PLANNING, PLANNED, WORKING, REVIEWING, COMPOUNDING or DONE"
+    "BACKLOG, UNDERSTANDING, PLANNING, PLANNED, WORKING, REVIEWING, COMPOUNDING, DONE or DROPPED"
 
 static boolean flow_step_from_string(const Aids_String_Slice *slice, Flow_Step *out) {
     int value = 0;
@@ -4541,7 +4543,7 @@ static void decision_record_problems(const Aids_String_Slice *tasks_dir,
 static void task_record_problems(Task_Kind kind, Flow_Step step,
                                  Aids_String_Slice task_raw,
                                  Record_Problems *problems) {
-    if (step >= Flow_Step_PLANNED) {
+    if (step >= Flow_Step_PLANNED && step != Flow_Step_DROPPED) {
         record_schema_problems(Record_Kind_TASK, task_raw,
                                task_required_sections(kind), problems);
     }
@@ -5238,6 +5240,7 @@ static Task_Status flow_step_implied_status(Flow_Step step) {
     case Flow_Step_COMPOUNDING:
         return Task_Status_IN_PROGRESS;
     case Flow_Step_DONE:
+    case Flow_Step_DROPPED:
         return Task_Status_CLOSED;
     }
     return Task_Status_OPEN; // unreachable: the enum is closed
@@ -5254,6 +5257,7 @@ typedef struct {
 //                                                        ^           |
 //                                                        |           v
 //                                                        +-- (fix) COMPOUNDING -> DONE
+//   -> DROPPED  (from any step except DONE)
 //
 // REVIEWING is the only step with two successors. The first entry for a step
 // is its default - the target a bare `tatr flow <ID>` picks - so the review
@@ -5267,6 +5271,13 @@ static const Flow_Transition FLOW_TRANSITIONS[] = {
     {Flow_Step_REVIEWING,    Flow_Step_COMPOUNDING},
     {Flow_Step_REVIEWING,    Flow_Step_WORKING},
     {Flow_Step_COMPOUNDING,  Flow_Step_DONE},
+    {Flow_Step_BACKLOG,      Flow_Step_DROPPED},
+    {Flow_Step_UNDERSTANDING, Flow_Step_DROPPED},
+    {Flow_Step_PLANNING,     Flow_Step_DROPPED},
+    {Flow_Step_PLANNED,      Flow_Step_DROPPED},
+    {Flow_Step_WORKING,      Flow_Step_DROPPED},
+    {Flow_Step_REVIEWING,    Flow_Step_DROPPED},
+    {Flow_Step_COMPOUNDING,  Flow_Step_DROPPED},
 };
 
 // The default successor of a step: the first edge leaving it. False when the
@@ -5593,6 +5604,7 @@ static int main_flow(const Tatr_Context *ctx) {
     Flow_Unmet unmet = {0};
     Task_Graph graph = {0};
     boolean graph_loaded = false;
+    Aids_String_Slice dropped_description = {0};
 
     argparse_parser_init(&parser, "tatr flow", "Move a task to its next flow step", TATR_VERSION);
 
@@ -5602,6 +5614,22 @@ static int main_flow(const Tatr_Context *ctx) {
         .description = "Task ID (format YYYYMMDD-HHMMSS)",
         .type = ARGUMENT_TYPE_POSITIONAL,
         .required = 1
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'R',
+        .long_name = "reason",
+        .description = "Why the task is being dropped (required with --to DROPPED)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'S',
+        .long_name = "superseded-by",
+        .description = "Task ID that superseded this task (only with --to DROPPED)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
     });
 
     argparse_add_argument(&parser, (Argparse_Options){
@@ -5660,6 +5688,35 @@ static int main_flow(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
+    char *reason_str = argparse_get_value(&parser, "reason");
+    char *superseded_by_str = argparse_get_value(&parser, "superseded-by");
+    if (to == Flow_Step_DROPPED) {
+        if (reason_str == NULL || reason_str[0] == '\0') {
+            aids_log(AIDS_ERROR, "DROPPED requires --reason <text>");
+            return_defer(1);
+        }
+        if (strchr(reason_str, '\n') != NULL || strchr(reason_str, '\r') != NULL) {
+            aids_log(AIDS_ERROR, "DROPPED reason must be one line");
+            return_defer(1);
+        }
+        if (superseded_by_str != NULL) {
+            Aids_String_Slice superseded_by = aids_string_slice_from_cstr(superseded_by_str);
+            if (!ishuid(&superseded_by)) {
+                aids_log(AIDS_ERROR, "Invalid --superseded-by task ID '%s'", superseded_by_str);
+                return_defer(1);
+            }
+            if (aids_string_slice_compare(&id, &superseded_by) == 0 ||
+                !task_sibling_exists(&tasks_dir, &superseded_by, TASK_FILE_NAME_CSTR)) {
+                aids_log(AIDS_ERROR, "--superseded-by task '%s' does not resolve to another task",
+                         superseded_by_str);
+                return_defer(1);
+            }
+        }
+    } else if (reason_str != NULL || superseded_by_str != NULL) {
+        aids_log(AIDS_ERROR, "--reason and --superseded-by require --to DROPPED");
+        return_defer(1);
+    }
+
     task_graph_init(&graph);
     graph_loaded = true;
     if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
@@ -5687,6 +5744,21 @@ static int main_flow(const Tatr_Context *ctx) {
         task.meta.plan_status = Plan_Status_APPROVED;
     }
 
+    if (to == Flow_Step_DROPPED) {
+        Aids_String_Builder builder = {0};
+        aids_string_builder_init(&builder);
+        if (aids_string_builder_append_slice(&builder, task.description) != AIDS_OK ||
+            aids_string_builder_append(&builder, "\n\n## Dropped\n\n- REASON: %s\n", reason_str) != AIDS_OK ||
+            (superseded_by_str != NULL &&
+             aids_string_builder_append(&builder, "- SUPERSEDED BY: %s\n", superseded_by_str) != AIDS_OK)) {
+            aids_log(AIDS_ERROR, "Failed to record DROPPED reason: %s", aids_failure_reason());
+            aids_string_builder_free(&builder);
+            return_defer(1);
+        }
+        aids_string_builder_to_slice(&builder, &dropped_description);
+        task.description = dropped_description;
+    }
+
     if (task_save(&task_file_path, &task) != AIDS_OK) {
         aids_log(AIDS_ERROR, "Failed to save task"); // task_save logged the cause
         return_defer(1);
@@ -5697,6 +5769,9 @@ static int main_flow(const Tatr_Context *ctx) {
            SS_Arg(Task_Status_Strings[task.meta.status]));
 
 defer:
+    if (dropped_description.str != NULL) {
+        AIDS_FREE(dropped_description.str);
+    }
     if (graph_loaded) {
         task_graph_free(&graph);
     }
@@ -5974,6 +6049,7 @@ static size_t check_task(Check_Exemptions *ex,
         Aids_String_Slice spike = {0};
         if (!task_sibling_read(tasks_dir, huid, "SPIKE.md", &spike)) {
             if (task.meta.kind == Task_Kind_SPIKE &&
+                task.meta.flow_step != Flow_Step_DROPPED &&
                 task.meta.flow_step >= Flow_Step_PLANNED) {
                 findings += check_finding(ex, huid, "missing-spike-record",
                                           "KIND: SPIKE task has no SPIKE.md");
@@ -5993,7 +6069,27 @@ static size_t check_task(Check_Exemptions *ex,
                                   "IN_PROGRESS task lacks PLAN STATUS: APPROVED");
     }
 
-    if (task.meta.status == Task_Status_CLOSED && !check_task_is_container(&task)) {
+    if (task.meta.flow_step == Flow_Step_DROPPED) {
+        Aids_String_Slice reason = {0};
+        if (!artifact_field(raw, "- REASON: ", &reason) || reason.len == 0) {
+            findings += check_finding(ex, huid, "dropped-missing-reason",
+                                      "DROPPED task has no non-empty '- REASON:' line");
+        }
+        Aids_String_Slice superseded_by = {0};
+        if (artifact_field(raw, "- SUPERSEDED BY: ", &superseded_by)) {
+            if (!ishuid(&superseded_by) ||
+                aids_string_slice_compare(&superseded_by, huid) == 0 ||
+                !task_sibling_exists(tasks_dir, &superseded_by, TASK_FILE_NAME_CSTR)) {
+                findings += check_finding(ex, huid, "dropped-bad-superseder",
+                                          "SUPERSEDED BY '" SS_Fmt "' does not resolve to another task",
+                                          SS_Arg(superseded_by));
+            }
+        }
+    }
+
+    if (task.meta.status == Task_Status_CLOSED &&
+        task.meta.flow_step != Flow_Step_DROPPED &&
+        !check_task_is_container(&task)) {
         size_t unchecked = artifact_count_unchecked_steps(raw);
         if (unchecked > 0) {
             findings += check_finding(ex, huid, "closed-unchecked",
@@ -6008,7 +6104,8 @@ review_checks:
         Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
         Aids_String_Slice last_verdict = {0};
         boolean has_verdict = artifact_latest_verdict(review, &last_verdict);
-        if (task_loaded && task.meta.status == Task_Status_CLOSED) {
+        if (task_loaded && task.meta.status == Task_Status_CLOSED &&
+            task.meta.flow_step != Flow_Step_DROPPED) {
             if (!has_verdict) {
                 findings += check_finding(ex, huid, "closed-not-approved",
                                           "REVIEW.md has no VERDICT line");
@@ -6034,6 +6131,7 @@ review_checks:
     }
 
     if (task_loaded && task.meta.status == Task_Status_CLOSED &&
+        task.meta.flow_step != Flow_Step_DROPPED &&
         !check_task_is_container(&task)) {
         if (!has_review) {
             findings += check_finding(ex, huid, "closed-missing-review",

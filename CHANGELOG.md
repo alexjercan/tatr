@@ -2,6 +2,14 @@
 
 All notable changes to tatr are documented here.
 
+## v0.2.2 - 2026-08-02
+
+### Added
+
+- `tatr flow <ID> --to DROPPED --reason <text> [--superseded-by <ID>]`: retire a
+  task without a REVIEW.md or RETRO.md, recording the reason and optionally what
+  superseded it. A retired task is terminal and cannot be reopened.
+
 ## v0.2.1 - 2026-08-01
 
 ### Removed
