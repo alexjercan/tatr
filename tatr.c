@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#define TATR_VERSION "0.2.1"
+#define TATR_VERSION "0.2.2"
 
 // Format-checks a vararg reporter, so a message built with SS_Fmt but missing
 // its SS_Arg is a compile error rather than a garbage finding. MinGW's default
