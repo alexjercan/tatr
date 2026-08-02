@@ -5,7 +5,7 @@
 `tatr frontier <epic-id>` prints open children:
 
 ```text
-<READY|BLOCKED|CLAIMED><TAB><id><TAB>p<priority><TAB><flow-step><TAB><title>
+<READY|BLOCKED|CLAIMED><TAB><id><TAB>p<priority><TAB><activity>[+<gates>]<TAB><title>
 ```
 
 BLOCKED rows add `blocked-by=<ids>`. Order: state, priority descending, ID
@@ -21,7 +21,8 @@ ascending. Closed children and non-children are absent.
 - Ownership: `TATR_SESSION`; default working directory. Never a PID.
 - Storage: `TATR_CLAIMS_DIR`; default `<tasks-dir>/.claims`.
 
-`tatr flow <id> --to WORKING` refuses a foreign claim.
+`tatr flow <id>` into `WORKING` refuses a foreign claim: it records the `PLAN`
+gate and holds the cursor.
 
 Parallel worktrees require one shared `TATR_CLAIMS_DIR`; per-tree defaults do
 not coordinate. Create the worktree before `tatr new` so the task starts on its
