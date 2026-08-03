@@ -18,7 +18,7 @@ RESOLUTION: - | DONE | WONTDO | DUPLICATE | SUPERSEDED
 
 | Command | Does | Gates |
 |---|---|---|
-| `tatr flow <id>` | Advance one activity. `--dry-run` prints the edge. | Runs and records the current activity's exit gate; forward only. |
+| `tatr flow <id>` | Advance one activity. `--dry-run` probes it: same preconditions, writes nothing, non-zero when the advance would not complete. | Runs and records the current activity's exit gate; forward only. |
 | `tatr rewind <id> --to <ACTIVITY> [--force]` | Move backward. | None. Clears per the table below and names each one. |
 | `tatr close <id> --resolution <R> [--of <ID>] [--reason <text>]` | Set RESOLUTION. | `DONE` runs the close gate; the others run nothing. |
 | `tatr reopen <id>` | Clear RESOLUTION, `- DUPLICATE OF:` and a trailing `## Dropped` block. | None. Cursor and gates stay. |

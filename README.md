@@ -311,7 +311,7 @@ Four commands write them, and between them they are the only writers:
 
 ```bash
 tatr flow 20260331-144635                  # advance one activity, run its exit gate
-tatr flow 20260331-144635 --dry-run        # print the edge and the gate, write nothing
+tatr flow 20260331-144635 --dry-run        # would the line above succeed? exit status answers
 tatr rewind 20260331-144635 --to WORKING   # move back; clears the gates that invalidates
 tatr close 20260331-144635 --resolution WONTDO --reason "Duplicate work"
 tatr reopen 20260331-144635                # clear the resolution, keep the cursor
@@ -364,7 +364,9 @@ before the container may be.
 
 **A refused gate writes nothing.** Every precondition is evaluated before
 anything is mutated, and all unmet ones are reported rather than one per round
-trip:
+trip. `--dry-run` runs the same evaluation and stops before the write, so its
+exit status is the answer to "would this advance succeed?" and its output is the
+refusal it predicts, tensed:
 
 ```console
 $ tatr flow 20260802-211009
@@ -379,6 +381,18 @@ ERROR: Refusing to advance 20260802-211009 from PLANNING: 2 precondition(s) not 
 $ tatr flow 20260802-211009 --dry-run
 Task 20260802-211009 would move PLANNING -> WORKING
   gate PLAN would run
+ERROR: Would refuse to advance 20260802-211009 from PLANNING: 2 precondition(s) not met
+  - bad-record-schema: TASK.md has no '## Steps' section
+  - bad-record-schema: TASK.md has no '## Definition of Done' section
+  Record unchanged.
+$ echo $?
+1
+$ $EDITOR tasks/20260802-211009/TASK.md   # write the two missing sections
+$ tatr flow 20260802-211009 --dry-run
+Task 20260802-211009 would move PLANNING -> WORKING
+  gate PLAN would run
+$ echo $?
+0
 $ tatr flow 20260802-211009
 gate PLAN recorded
 Task 20260802-211009 moved PLANNING -> WORKING (STATUS: IN_PROGRESS)
@@ -482,7 +496,9 @@ READY == GATES contains PLAN and ACTIVITY < WORKING and deps CLOSED and unclaime
 [`tatr frontier`](#working-an-epic-in-parallel) answers that query.
 
 **Options:**
-- `flow`: `-n, --dry-run` prints the edge and the gate and writes nothing
+- `flow`: `-n, --dry-run` probes the advance - it evaluates every precondition
+  the real call evaluates, prints the edge, the gate and the same unmet report,
+  writes nothing, and exits non-zero when the advance would not complete
 - `rewind`: `-o, --to <ACTIVITY>` (required), `-F, --force`
 - `close`: `-x, --resolution <R>` (required), `-O, --of <ID>`, `-R, --reason <TEXT>`
 

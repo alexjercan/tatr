@@ -5848,7 +5848,7 @@ static int main_flow(const Tatr_Context *ctx) {
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'n',
         .long_name = "dry-run",
-        .description = "Print the edge and the gate it would run, and write nothing",
+        .description = "Probe the advance: same preconditions, no write, non-zero if it would not complete",
         .type = ARGUMENT_TYPE_FLAG,
         .required = 0
     });
@@ -5914,6 +5914,15 @@ static int main_flow(const Tatr_Context *ctx) {
         ? aids_string_slice_from_cstr("CLOSED")
         : Task_Activity_Strings[to];
 
+    task_graph_init(&graph);
+    graph_loaded = true;
+    if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
+        return_defer(1);
+    }
+
+    // A dry run is a probe: it evaluates every precondition the real call
+    // evaluates and answers with its exit status, so the header comes first and
+    // whatever follows is the refusal being predicted.
     if (dry_run) {
         printf("Task " SS_Fmt " would move " SS_Fmt " -> " SS_Fmt "\n",
                SS_Arg(id), SS_Arg(from_label), SS_Arg(to_label));
@@ -5922,13 +5931,9 @@ static int main_flow(const Tatr_Context *ctx) {
         } else {
             printf("  no gate runs on this edge\n");
         }
-        return_defer(0);
-    }
-
-    task_graph_init(&graph);
-    graph_loaded = true;
-    if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
-        return_defer(1);
+        // stdout is block-buffered when piped while stderr is not, so without
+        // this the header lands after the unmet report it introduces.
+        fflush(stdout);
     }
 
     // The record half. Everything here is a fact about the record, so an unmet
@@ -5941,7 +5946,8 @@ static int main_flow(const Tatr_Context *ctx) {
                                  task.meta.gates | (has_gate ? TASK_GATE_BIT(gate) : 0u), &unmet);
     }
     if (unmet.count > 0) {
-        aids_log(AIDS_ERROR, "Refusing to advance " SS_Fmt " from " SS_Fmt ": %zu precondition(s) not met",
+        aids_log(AIDS_ERROR, "%s to advance " SS_Fmt " from " SS_Fmt ": %zu precondition(s) not met",
+                 dry_run ? "Would refuse" : "Refusing",
                  SS_Arg(id), SS_Arg(from_label), unmet.count);
         flow_unmet_print(&unmet);
         fprintf(stderr, "  Record unchanged.\n");
@@ -5952,6 +5958,19 @@ static int main_flow(const Tatr_Context *ctx) {
     // anyone else, and the one edge that may half-succeed.
     if (!closes && to == Task_Activity_WORKING) {
         flow_world_preconditions(&tasks_dir, &id, &task, &world_unmet);
+    }
+
+    // Every dry run returns here, before anything is claimed: that is the
+    // structural guarantee that no probe reaches `task_save`.
+    if (dry_run) {
+        if (world_unmet.count == 0) {
+            return_defer(0);
+        }
+        aids_log(AIDS_ERROR, "Would not advance " SS_Fmt " to " SS_Fmt ": %zu precondition(s) not met",
+                 SS_Arg(id), SS_Arg(to_label), world_unmet.count);
+        flow_unmet_print(&world_unmet);
+        fprintf(stderr, "  Cursor would be held at " SS_Fmt ".\n", SS_Arg(from_label));
+        return_defer(1);
     }
 
     if (has_gate) {

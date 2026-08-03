@@ -3,9 +3,9 @@
 - PRIORITY: 70
 - TAGS: tatr, flow, cli
 - KIND: TASK
-- ACTIVITY: WORKING
-- GATES: PLAN
-- RESOLUTION: -
+- ACTIVITY: COMPOUNDING
+- GATES: PLAN REVIEW RETRO
+- RESOLUTION: DONE
 
 `tatr flow --dry-run` currently returns before any precondition is evaluated
 (`tatr.c:5917`, right after the edge and gate are computed). It prints the edge
@@ -39,7 +39,7 @@ two tensed messages, one non-zero exit status for both.
 
 ## Steps
 
-- [ ] `checker.sh`: add `test_flow_dry_run_probes_preconditions` next to
+- [x] `checker.sh`: add `test_flow_dry_run_probes_preconditions` next to
   `test_flow_half_succeeds_when_blocked` (~1545) and register it in the runner
   list at the tail, near `test_flow_advances_and_records_gates`. Three cases in
   one walk, each asserting exit status, exact message text, and that
@@ -54,30 +54,30 @@ two tensed messages, one non-zero exit status for both.
   `GATES: -`; both halves clear (blocker driven to DONE) exits 0 and prints only
   the header lines. Use the `set +e` / split-declaration pattern for every
   expected-failure call.
-- [ ] `checker.sh`: tighten the existing dry-run assertion inside
+- [x] `checker.sh`: tighten the existing dry-run assertion inside
   `test_flow_advances_and_records_gates` (~1473) to capture and require exit
   status 0, so the passing edge is covered by the same contract.
-- [ ] `tatr.c` `main_flow`: delete the `if (dry_run) { ... return_defer(0); }`
+- [x] `tatr.c` `main_flow`: delete the `if (dry_run) { ... return_defer(0); }`
   block at ~5913-5924 and re-emit the same header after `task_graph_load`
   succeeds (~5930), followed by `fflush(stdout)` so the header cannot land after
   stderr when stdout is piped.
-- [ ] `tatr.c` `main_flow`: tense the record-half refusal at ~5938 to
+- [x] `tatr.c` `main_flow`: tense the record-half refusal at ~5938 to
   `dry_run ? "Would refuse" : "Refusing"` while keeping `flow_unmet_print`,
   `Record unchanged.` and `return_defer(1)` unchanged.
-- [ ] `tatr.c` `main_flow`: after `flow_world_preconditions` runs (~5951) and
+- [x] `tatr.c` `main_flow`: after `flow_world_preconditions` runs (~5951) and
   before `task.meta.gates |= ...`, return for a dry run: `return_defer(0)` when
   `world_unmet.count == 0`, otherwise log
   `Would not advance <id> to <to_label>`, `flow_unmet_print(&world_unmet)`,
   `Cursor would be held at <from_label>.` and `return_defer(1)`. This is the
   structural guarantee that no dry run reaches `task_save`.
-- [ ] `README.md`: replace the `--dry-run` one-liners at ~314 and ~485 with the
+- [x] `README.md`: replace the `--dry-run` one-liners at ~314 and ~485 with the
   probe contract (evaluates every precondition, writes nothing, exit status is
   the answer), and extend the flow transcript at ~379 with a refused dry run
   showing `Would refuse to advance` and its non-zero status.
-- [ ] `skills/tatr/lifecycle.md:21`: the table cell still reads "`--dry-run`
+- [x] `skills/tatr/lifecycle.md:21`: the table cell still reads "`--dry-run`
   prints the edge"; restate it as the probe (evaluates the same preconditions,
   writes nothing, non-zero when the advance would not complete).
-- [ ] `nix develop -c make` clean under `-Wall -Wextra`, then
+- [x] `nix develop -c make` clean under `-Wall -Wextra`, then
   `nix develop -c ./checker.sh` and `nix develop -c ./checker.sh --memcheck`
   green. Sabotage each new assertion once (drop the `fflush`, drop the world-half
   dry return) and confirm the new test alone turns red.
@@ -123,3 +123,42 @@ two tensed messages, one non-zero exit status for both.
   `checker.sh`.
 - Out of scope, still open: whether `tatr close --resolution DONE`
   (`tatr.c:6343`) should grow the same probe. The consumer only drives `flow`.
+
+## Close-out
+
+**What and why.** `--dry-run` returned before `task_graph_load`, so it always
+exited 0 and answered a question nobody asked ("what edge is next") instead of
+the one the afk runner asks ("would this advance complete?"). The early return
+moved down past the graph load, and a second return went in after
+`flow_world_preconditions` and before `task.meta.gates |= ...`. Both refusal
+messages are tensed by the same `dry_run` flag that already gated the header, so
+the probe prints the text the subsequent real call prints, verbatim.
+
+**Alternatives.** The exit-status shape was already settled in DECISION.md (two
+messages, one non-zero status). The implementation choice left open was where
+the dry run returns. Returning inside `if (world_unmet.count > 0)` alongside the
+real report would have shared the message-building code, but it puts the dry-run
+exit *after* `task.meta.gates |= TASK_GATE_BIT(gate)` - correct today only
+because nothing between there and `task_save` observes the mutation. Returning
+before any mutation makes "no probe reaches `task_save`" structural rather than
+incidental, at the cost of duplicating two log lines.
+
+**Difficulties.** The `fflush(stdout)` after the dry-run header was in the plan
+but the test as first written did not cover it: the assertions grepped the
+combined capture line by line and never checked order. Sabotage caught this -
+dropping the `fflush` left the suite 113/113 green. Confirmed against the
+sabotaged binary that the header really does land *after* the whole stderr
+report when stdout is a pipe, then added `head -1` ordering assertions to both
+refusal cases. Re-run of the same sabotage turns exactly the new test red.
+
+**Evidence.** `nix develop -c make` clean under `-Wall -Wextra`; `./checker.sh`
+and `./checker.sh --memcheck` both 113/113. Both `cmd:` proofs exit 0.
+`tatr check 20260803-105225` exits 0. Sabotage: dropping the world-half dry
+return fails the new test (and the forward walk, since a dry run then writes);
+dropping the `fflush` fails the new test alone.
+
+**Reflection.** A precondition-probe assertion is only as good as its weakest
+clause, and "greps the output" is weaker than it reads - ordering, exit status
+and byte-identity are three separate contracts and each needs its own line. The
+sabotage step is what turned that from a guess into a finding; it should stay
+mandatory for any Step that names a buffering or flush concern.

@@ -1470,10 +1470,14 @@ test_flow_advances_and_records_gates() {
         [ "$(gates_of "$id")" = "-" ] || ok=0
     done
 
-    # --dry-run names the edge and the gate and writes nothing.
+    # --dry-run names the edge and the gate, writes nothing, and exits 0 because
+    # this is an edge the real call below completes.
     cp "$task_file" before.md
+    set +e
     local dry_out
-    dry_out=$(run_tatr flow "$id" --dry-run 2>&1)
+    dry_out=$(run_tatr flow "$id" --dry-run 2>&1); local dry_code=$?
+    set -e
+    [ $dry_code -eq 0 ] || ok=0
     echo "$dry_out" | grep -q "would move PLANNING -> WORKING" || ok=0
     echo "$dry_out" | grep -q "gate PLAN would run" || ok=0
     cmp -s before.md "$task_file" || ok=0
@@ -1539,7 +1543,7 @@ ROUNDS
     if [ $ok -eq 1 ]; then
         pass_test
     else
-        fail_test "walk:$seen | dry: $dry_out | plan: $plan_out | close: $close_out | terminal($terminal_code): $terminal_out | check($check_code): $check_out"
+        fail_test "walk:$seen | dry($dry_code): $dry_out | plan: $plan_out | close: $close_out | terminal($terminal_code): $terminal_out | check($check_code): $check_out"
     fi
 }
 
@@ -1618,6 +1622,97 @@ test_flow_half_succeeds_when_blocked() {
         pass_test
     else
         fail_test "dep($dep_code): $dep_out | dangling($dangling_code): $dangling_out"
+    fi
+}
+
+# --dry-run is a probe, not an edge printer: it evaluates everything the real
+# call evaluates, writes nothing, and answers with its exit status. The two
+# halves stay two messages - tensed into the conditional so the text is the one
+# the subsequent real call prints - and both collapse to a non-zero status,
+# because the question is "would this advance complete?".
+test_flow_dry_run_probes_preconditions() {
+    log_test "flow --dry-run (probes both precondition halves and writes nothing)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local blocker=$(new_task_id "Blocker")
+    sleep 1
+    local id=$(new_task_id "Probe me" -d "$blocker")
+    local task_file="tasks/$id/TASK.md"
+    local ok=1
+
+    drive_task_to "$id" PLANNING || ok=0
+
+    # Record half unmet: the plan sections are missing, so the probe predicts a
+    # flat refusal and the record it read is untouched.
+    cp "$task_file" record_before.md
+    set +e
+    local record_out
+    record_out=$(run_tatr flow "$id" --dry-run 2>&1); local record_code=$?
+    set -e
+    [ $record_code -ne 0 ] || ok=0
+    echo "$record_out" | grep -qx "Task $id would move PLANNING -> WORKING" || ok=0
+    echo "$record_out" | grep -qx "  gate PLAN would run" || ok=0
+    echo "$record_out" | grep -q "Would refuse to advance $id from PLANNING" || ok=0
+    echo "$record_out" | grep -q "bad-record-schema: TASK.md has no '## Steps' section" || ok=0
+    echo "$record_out" | grep -q "bad-record-schema: TASK.md has no '## Definition of Done' section" || ok=0
+    echo "$record_out" | grep -q "Record unchanged." || ok=0
+    # The header introduces the report, so it has to arrive first even though
+    # stdout is a pipe here and stderr is not.
+    echo "$record_out" | head -1 | grep -qx "Task $id would move PLANNING -> WORKING" || ok=0
+    cmp -s record_before.md "$task_file" || ok=0
+
+    # World half unmet: the record is now plannable but the blocker is open, so
+    # the real call would record PLAN and hold the cursor. The probe says so
+    # without earning the gate - GATES stays "-".
+    drive_write_plan_sections "$id" 0
+    cp "$task_file" world_before.md
+    set +e
+    local world_out
+    world_out=$(run_tatr flow "$id" --dry-run 2>&1); local world_code=$?
+    set -e
+    [ $world_code -ne 0 ] || ok=0
+    echo "$world_out" | grep -qx "Task $id would move PLANNING -> WORKING" || ok=0
+    echo "$world_out" | grep -qx "  gate PLAN would run" || ok=0
+    echo "$world_out" | grep -q "Would not advance $id to WORKING" || ok=0
+    echo "$world_out" | grep -q "$blocker is not CLOSED" || ok=0
+    echo "$world_out" | grep -q "Cursor would be held at PLANNING" || ok=0
+    # The record half short-circuits the world half, so a clear record half
+    # never reprints it.
+    echo "$world_out" | grep -q "Would refuse to advance" && ok=0
+    echo "$world_out" | head -1 | grep -qx "Task $id would move PLANNING -> WORKING" || ok=0
+    [ "$(activity_of "$id")" = "PLANNING" ] || ok=0
+    [ "$(gates_of "$id")" = "-" ] || ok=0
+    cmp -s world_before.md "$task_file" || ok=0
+
+    # Both halves clear: exit 0, only the header, and still no write.
+    drive_task_to "$blocker" DONE || ok=0
+    cp "$task_file" clear_before.md
+    set +e
+    local clear_out
+    clear_out=$(run_tatr flow "$id" --dry-run 2>&1); local clear_code=$?
+    set -e
+    [ $clear_code -eq 0 ] || ok=0
+    echo "$clear_out" | grep -qx "Task $id would move PLANNING -> WORKING" || ok=0
+    echo "$clear_out" | grep -qx "  gate PLAN would run" || ok=0
+    echo "$clear_out" | grep -q "Would refuse to advance" && ok=0
+    echo "$clear_out" | grep -q "Would not advance" && ok=0
+    # "only the edge header and gate line": two lines, so an extra one fails.
+    [ "$(printf '%s\n' "$clear_out" | wc -l)" -eq 2 ] || ok=0
+    [ "$(gates_of "$id")" = "-" ] || ok=0
+    cmp -s clear_before.md "$task_file" || ok=0
+
+    # And the probe told the truth: the real call it predicted completes.
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    [ "$(activity_of "$id")" = "WORKING" ] || ok=0
+    [ "$(gates_of "$id")" = "PLAN" ] || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "record($record_code): $record_out | world($world_code): $world_out | clear($clear_code): $clear_out"
     fi
 }
 
@@ -5162,6 +5257,7 @@ test_status_is_derived
 test_filter_lifecycle_fields
 test_flow_advances_and_records_gates
 test_flow_half_succeeds_when_blocked
+test_flow_dry_run_probes_preconditions
 test_rewind_clear_table
 test_rewind_force_guard
 test_close_resolutions
