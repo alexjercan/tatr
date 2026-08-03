@@ -2,6 +2,19 @@
 
 All notable changes to tatr are documented here.
 
+## v1.0.1 - 2026-08-03
+
+### Changed
+
+- `tatr flow <ID> --dry-run` is a real precondition probe. It evaluates every
+  precondition the real call evaluates, in the same order through the same
+  collectors, and exits non-zero when the advance would not complete; it
+  previously returned before the task graph was loaded and always exited 0.
+  A refusal prints the text the subsequent real call prints, verbatim, so the
+  output is hand-offable to a consumer unedited. It still writes nothing, and
+  it now requires a loadable task graph, so it can no longer report the next
+  edge for an unreadable or unresolvable one.
+
 ## v1.0.0 - 2026-08-02
 
 The `FLOW STEP` chain is replaced by three independent fields. This is a
