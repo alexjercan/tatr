@@ -1,9 +1,9 @@
 # Make tatr flow --dry-run a real precondition probe
 
 - PRIORITY: 70
-- TAGS: tatr,flow,cli
+- TAGS: tatr, flow, cli
 - KIND: TASK
-- ACTIVITY: -
+- ACTIVITY: PLANNING
 - GATES: -
 - RESOLUTION: -
 
