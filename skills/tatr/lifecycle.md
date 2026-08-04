@@ -41,14 +41,14 @@ Never stored. Every command that reports prints it.
 
 | Leaving | Earns | Requires |
 |---|---|---|
-| UNDERSTANDING | - | - |
-| PLANNING | PLAN | `## Steps` and `## Definition of Done` well-formed, DoD proofs parseable, graph position resolvable, any `SPIKE.md` schema-clean. |
+| UNDERSTANDING | - | Schema-clean `DECISION.md`. No gate records it, so the edge asks again every time. |
+| PLANNING | PLAN | `## Steps` and `## Definition of Done` well-formed, DoD proofs parseable, graph position resolvable. |
 | WORKING | - | - |
 | REVIEWING | REVIEW | Schema-clean `REVIEW.md`; latest verdict APPROVE; no open BLOCKER or MAJOR. |
 | COMPOUNDING | RETRO | Schema-clean `RETRO.md`, plus the close gate below. |
 
 Close gate (`DONE` only): all three gates earned, no unchecked `## Steps`, valid
-`DECISION.md` when present, every EPIC child CLOSED.
+`DECISION.md` when present, every child CLOSED.
 
 ## World preconditions
 
@@ -76,10 +76,10 @@ is what a planned-but-blocked task is.
 READY == GATES contains PLAN and ACTIVITY < WORKING and deps CLOSED and unclaimed
 ```
 
-`tatr frontier <epic>` answers it.
+`tatr frontier <id>` answers it.
 
-## EPIC exemptions
+## Containers
 
-Exempt: `REVIEW.md` presence, `RETRO.md` presence, unchecked Steps,
-`inconsistent-gates`. Still enforced: its own sections, dependencies, any
-present `REVIEW.md`/`DECISION.md`, and every child CLOSED before it closes.
+No exemptions. A task others name as PARENT owes the same records as any task,
+plus one more rule: it cannot close while a child is open. Waivers go in
+`tasks/EXEMPTIONS.md`, per rule, per task.

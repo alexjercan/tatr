@@ -1,7 +1,7 @@
 # Records
 
-Sibling records: `SPIKE.md`, `DECISION.md`, `REVIEW.md`, `RETRO.md`; optional
-free-form notes such as `NOTES.md`.
+Sibling records: `DECISION.md`, `REVIEW.md`, `RETRO.md`; optional free-form
+notes such as `NOTES.md` or `SPIKE.md` (unschema'd, untouched by `check`).
 
 Create schema records with `tatr scaffold <id> <kind>`. The same table powers
 `tatr scaffold`, `tatr check`, and lifecycle gates. Existing file: edit by hand;
@@ -11,14 +11,13 @@ no overwrite flag.
 
 | Record | Header | Sections |
 |---|---|---|
-| `TASK.md` | `# title`; typed metadata from `format.md` | TASK/STORY: Steps, Definition of Done. EPIC: Done Means, Child Tasks. SPIKE: Question. |
-| `SPIKE.md` | `# Spike:`; DATE, STATUS, TAGS | Question, Context, Options considered, Recommendation, Open questions, Next steps |
+| `TASK.md` | `# title`; typed metadata from `format.md` | Steps, Definition of Done (once PLAN is earned) |
 | `DECISION.md` | `# Decision:`; DATE, STATUS, TASK, TAGS | Context, Decision, Alternatives considered, Consequences |
 | `REVIEW.md` | `# Review:`; TASK, BRANCH | Sequential `## Round N`; REVIEWER; VERDICT; findings |
 | `RETRO.md` | `# Retro:`; TASK, BRANCH, REVIEW ROUNDS | What went well, What went wrong, What to improve next time, Action items |
 
-Required fields and sections need non-empty content. Defaults: SPIKE status
-`RECOMMENDED`; DECISION status `ACCEPTED`.
+Required fields and sections need non-empty content. Default DECISION status:
+`ACCEPTED`.
 
 Review values:
 

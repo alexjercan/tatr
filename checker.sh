@@ -148,7 +148,7 @@ test_task_features_survive_ledger_removal() {
         && echo "$output" | grep -qx "  rewind       Move a task back to an earlier activity" \
         && echo "$output" | grep -qx "  close        Close a task with a resolution" \
         && echo "$output" | grep -qx "  reopen       Clear a task's resolution" \
-        && echo "$output" | grep -qx "  migrate      Convert v0 task records to the v1 format" \
+        && echo "$output" | grep -qx "  migrate      Convert legacy task records to the current format" \
         && echo "$output" | grep -qx "  scaffold     Create a missing sibling record from the schema"; then
         pass_test
     else
@@ -627,30 +627,28 @@ has_gate() {
 #   DONE     RESOLUTION: DONE, which `flow` writes on the way out of
 #            COMPOUNDING.
 #
-# EPIC containers are exempt from the review, retro and Steps requirements, so
-# those are not scaffolded for them - but NOT from the plan gate, so their own
-# container sections are. Dependencies are NOT handled here: a blocker must
-# already be CLOSED before its dependant can enter WORKING, so drive the blocker
-# first. Returns non-zero when the walk is refused.
+# Nothing is exempt from anything: every task owes the same records, so the
+# walk scaffolds the same ones for every fixture. Dependencies are NOT handled
+# here: a blocker must already be CLOSED before its dependant can enter WORKING,
+# so drive the blocker first. Returns non-zero when the walk is refused.
 #
 # The sibling records go through `tatr scaffold`, so every fixture that walks
 # the lifecycle also exercises the scaffolder against the schema the gates read.
-# Helper: write whatever the PLAN gate demands of this kind of record. Split
-# out because both the ordinary walk and the PLANNED fixture need it, and the
-# two must not drift apart.
+# Helper: write whatever the PLAN gate demands. Split out because both the
+# ordinary walk and the PLANNED fixture need it, and the two must not drift
+# apart.
 drive_write_plan_sections() {
     local dir="tasks/$1"
-    if [ "$2" -eq 1 ]; then
-        grep -q '^## Done Means' "$dir/TASK.md" \
-            || printf '\n## Done Means\n\n1. The children land (manual: the user confirms).\n' >> "$dir/TASK.md"
-        grep -q '^## Child Tasks' "$dir/TASK.md" \
-            || printf '\n## Child Tasks\n\n- [ ] a child\n' >> "$dir/TASK.md"
-    else
-        grep -q '^## Steps' "$dir/TASK.md" \
-            || printf '\n## Steps\n\n- [ ] the work itself\n' >> "$dir/TASK.md"
-        grep -q '^## Definition of Done' "$dir/TASK.md" \
-            || printf '\n## Definition of Done\n\n- The work is done (test: `test_the_work`).\n' >> "$dir/TASK.md"
-    fi
+    grep -q '^## Steps' "$dir/TASK.md" \
+        || printf '\n## Steps\n\n- [ ] the work itself\n' >> "$dir/TASK.md"
+    grep -q '^## Definition of Done' "$dir/TASK.md" \
+        || printf '\n## Definition of Done\n\n- The work is done (test: `test_the_work`).\n' >> "$dir/TASK.md"
+}
+
+# Helper: write the DECISION.md leaving UNDERSTANDING demands. The scaffold is
+# already schema-clean, so nothing has to be patched into it.
+drive_write_decision() {
+    [ -f "tasks/$1/DECISION.md" ] || run_tatr scaffold "$1" DECISION > /dev/null 2>&1
 }
 
 drive_task_to() {
@@ -658,12 +656,10 @@ drive_task_to() {
     local target=$2
     local dir="tasks/$id"
     local step
-    local is_epic=0
-    grep -q '^- KIND: EPIC' "$dir/TASK.md" && is_epic=1
 
     if [ "$target" = "PLANNED" ]; then
         drive_task_to "$id" PLANNING || return 1
-        drive_write_plan_sections "$id" "$is_epic"
+        drive_write_plan_sections "$id"
         TATR_SESSION=drive-fixture run_tatr claim "$id" > /dev/null 2>&1 || return 1
         # Expected to exit non-zero: the gate is recorded and the cursor is
         # held. Split from `set -e` deliberately (AGENTS.md, checker.sh gotcha).
@@ -683,11 +679,14 @@ drive_task_to() {
             return 0
         fi
         case "$step" in
+            UNDERSTANDING)
+                drive_write_decision "$id"
+                ;;
             PLANNING)
-                drive_write_plan_sections "$id" "$is_epic"
+                drive_write_plan_sections "$id"
                 ;;
             REVIEWING)
-                if [ $is_epic -eq 0 ] && [ ! -f "$dir/REVIEW.md" ]; then
+                if [ ! -f "$dir/REVIEW.md" ]; then
                     run_tatr scaffold "$id" REVIEW > /dev/null 2>&1
                     # The scaffold opens a round at REQUEST_CHANGES with one
                     # open MAJOR, which is what a fresh review looks like;
@@ -700,15 +699,13 @@ drive_task_to() {
                 fi
                 ;;
             COMPOUNDING)
-                if [ $is_epic -eq 0 ]; then
-                    if [ ! -f "$dir/RETRO.md" ]; then
-                        run_tatr scaffold "$id" RETRO > /dev/null 2>&1
-                        sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/' "$dir/RETRO.md"
-                    fi
-                    # Ticks every "- [ ]": the close gate counts the ones under
-                    # "## Steps", and a fixture body carries no others.
-                    sed -i 's/^- \[ \]/- [x]/' "$dir/TASK.md"
+                if [ ! -f "$dir/RETRO.md" ]; then
+                    run_tatr scaffold "$id" RETRO > /dev/null 2>&1
+                    sed -i 's/^- BRANCH: TODO$/- BRANCH: test\/fixture/' "$dir/RETRO.md"
                 fi
+                # Ticks every "- [ ]": the close gate counts the ones under
+                # "## Steps", and a fixture body carries no others.
+                sed -i 's/^- \[ \]/- [x]/' "$dir/TASK.md"
                 ;;
         esac
         if ! run_tatr flow "$id" > /dev/null 2>&1; then
@@ -956,10 +953,11 @@ reject_bad_value() {
 }
 
 # --- record schema tests ---
-# The v1 record is one flat metadata block: PRIORITY, TAGS, KIND, ACTIVITY,
-# GATES, RESOLUTION, then the optional DUPLICATE OF, PARENT and DEPENDS ON.
-# STATUS is not in it at all - it is derived. A v0 record is not read; it is
-# refused with a pointer at `tatr migrate`.
+# The record is one flat metadata block: PRIORITY, TAGS, ACTIVITY, GATES,
+# RESOLUTION, then the optional DUPLICATE OF, PARENT and DEPENDS ON. STATUS is
+# not in it at all - it is derived, and KIND is not in it at all - there is one
+# kind of record. A legacy record is not read; it is refused with a pointer at
+# `tatr migrate`.
 
 test_record_v3_roundtrip() {
     log_test "record (round trip preserves every field and the body)"
@@ -974,10 +972,10 @@ test_record_v3_roundtrip() {
     # and then rejected by every later read.)
     printf -- '- NOTE: a bullet may open the body\n\n## Story\n\nMentions "- KIND: EPIC" in prose.\n\n## Steps\n\n- [ ] one\n\n## Definition of Done\n\n- One is done (test: `test_one`).\n' > body.md
 
-    # The relationships are real records: a Story's parent must be an existing
-    # Epic and a task cannot reach WORKING over an open blocker, so the
-    # round-trip fixture earns every field it then asserts round-trips.
-    local epic=$(new_task_id "The container" -k EPIC)
+    # The relationships are real records: a PARENT must name an existing task
+    # and a task cannot reach WORKING over an open blocker, so the round-trip
+    # fixture earns every field it then asserts round-trips.
+    local parent=$(new_task_id "The container")
     sleep 1
     local dep_one=$(new_task_id "Blocker one")
     sleep 1
@@ -987,7 +985,7 @@ test_record_v3_roundtrip() {
     drive_task_to "$dep_two" DONE
 
     local full_id=$(new_task_id "Every field" -p 42 -t alpha -t beta \
-        -k STORY -P "$epic" \
+        -P "$parent" \
         -d "$dep_one" -d "$dep_two" -b body.md)
     drive_task_to "$full_id" WORKING
     sleep 1 # IDs have second resolution and `new` refuses a same-second collision
@@ -1006,14 +1004,14 @@ test_record_v3_roundtrip() {
     if ! grep -q "^- STATUS: " "$full_file" \
         && grep -q "^- PRIORITY: 42$" "$full_file" \
         && grep -q "^- TAGS: alpha, beta$" "$full_file" \
-        && grep -q "^- KIND: STORY$" "$full_file" \
+        && ! grep -q "^- KIND: " "$full_file" \
         && grep -qx -- "- ACTIVITY: WORKING" "$full_file" \
         && grep -qx -- "- GATES: PLAN" "$full_file" \
         && grep -qx -- "- RESOLUTION: -" "$full_file" \
-        && grep -q "^- PARENT: $epic$" "$full_file" \
+        && grep -q "^- PARENT: $parent$" "$full_file" \
         && grep -q "^- DEPENDS ON: $dep_one, $dep_two$" "$full_file" \
         && cmp -s full_before.md "$full_file" \
-        && grep -q "^- KIND: TASK$" "$bare_file" \
+        && ! grep -q "^- KIND: " "$bare_file" \
         && grep -qx -- "- ACTIVITY: -" "$bare_file" \
         && grep -qx -- "- GATES: -" "$bare_file" \
         && grep -qx -- "- RESOLUTION: -" "$bare_file" \
@@ -1103,7 +1101,7 @@ test_ls_skips_unreadable_records() {
 }
 
 test_record_rejects_malformed_header() {
-    log_test "record (a header that is not v1 is rejected, naming file and field)"
+    log_test "record (a header that is not current is rejected, naming file and field)"
 
     local test_dir=$(create_test_dir)
     cd "$test_dir"
@@ -1122,7 +1120,7 @@ test_record_rejects_malformed_header() {
 
     if [ $exit_code -ne 0 ] \
         && echo "$output" | grep -q "tasks/20260101-090000/TASK.md" \
-        && echo "$output" | grep -q "expected '- KIND: '" \
+        && echo "$output" | grep -q "expected '- ACTIVITY: '" \
         && echo "$output" | grep -q "correct the record by hand" \
         && cmp -s broken_before.md tasks/20260101-090000/TASK.md; then
         pass_test
@@ -1175,11 +1173,11 @@ test_record_rejects_invalid_metadata_atomically() {
     cd "$test_dir"
     mkdir -p tasks
 
-    local epic=$(new_task_id "The container" -k EPIC)
+    local parent=$(new_task_id "The container")
     sleep 1
     local dep=$(new_task_id "The blocker")
     sleep 1
-    local id=$(new_task_id "Valid" -k TASK -P "$epic" -d "$dep")
+    local id=$(new_task_id "Valid" -P "$parent" -d "$dep")
     local task_file="tasks/$id/TASK.md"
 
     cp "$task_file" pristine.md
@@ -1187,7 +1185,6 @@ test_record_rejects_invalid_metadata_atomically() {
     bad_ok=1
     bad_detail=""
 
-    reject_bad_value "KIND" "EPICS" "TASK, EPIC, STORY or SPIKE"
     reject_bad_value "ACTIVITY" "PLANNED" "UNDERSTANDING, PLANNING, WORKING"
     reject_bad_value "RESOLUTION" "MAYBE" "DONE, WONTDO, DUPLICATE or SUPERSEDED"
     reject_bad_value "PARENT" "not-an-id" "task ID"
@@ -1210,7 +1207,7 @@ test_record_rejects_invalid_metadata_atomically() {
 
     # A trailing space is part of the token the parser consumes, not noise.
     cp pristine.md "$task_file"
-    sed -i 's/^- KIND: TASK$/- KIND: TASK /' "$task_file"
+    sed -i 's/^- ACTIVITY: -$/- ACTIVITY: - /' "$task_file"
     cp "$task_file" tampered.md
     set +e
     local output
@@ -1269,62 +1266,61 @@ test_record_rejects_invalid_metadata_atomically() {
 }
 
 test_new_and_edit_fields() {
-    log_test "edit (sets kind and relationships; clears the optional ones)"
+    log_test "edit (sets relationships; clears the optional ones; refuses -k)"
 
     local test_dir=$(create_test_dir)
     cd "$test_dir"
     mkdir -p tasks
 
-    local epic=$(new_task_id "The container" -k EPIC)
+    local parent=$(new_task_id "The container")
     sleep 1
     local dep=$(new_task_id "The blocker")
     sleep 1
-    local other_epic=$(new_task_id "Another container" -k EPIC)
+    local other_parent=$(new_task_id "Another container")
     sleep 1
     local dep_two=$(new_task_id "Another blocker")
     sleep 1
     local dep_three=$(new_task_id "A third blocker")
     sleep 1
-    local id=$(new_task_id "Wire me" -k EPIC -P "$epic" -d "$dep")
+    local id=$(new_task_id "Wire me" -P "$parent" -d "$dep")
     local task_file="tasks/$id/TASK.md"
 
-    run_tatr edit "$id" -k STORY \
-        -P "$other_epic" -d "$dep_two" -d "$dep_three" > /dev/null 2>&1
+    run_tatr edit "$id" \
+        -P "$other_parent" -d "$dep_two" -d "$dep_three" > /dev/null 2>&1
     local set_ok=0
-    # Kind and relationships are `edit`'s to set; the workflow fields are not,
-    # and an edit must leave them exactly where `tatr flow` put them.
-    if grep -q "^- KIND: STORY$" "$task_file" \
-        && grep -qx -- "- ACTIVITY: -" "$task_file" \
+    # Relationships are `edit`'s to set; the workflow fields are not, and an
+    # edit must leave them exactly where `tatr flow` put them.
+    if grep -qx -- "- ACTIVITY: -" "$task_file" \
         && grep -qx -- "- GATES: -" "$task_file" \
         && grep -qx -- "- RESOLUTION: -" "$task_file" \
-        && grep -q "^- PARENT: $other_epic$" "$task_file" \
+        && grep -q "^- PARENT: $other_parent$" "$task_file" \
         && grep -q "^- DEPENDS ON: $dep_two, $dep_three$" "$task_file"; then
         set_ok=1
     fi
 
-    # Clearing a STORY's parent is refused: a Story belongs to an Epic, and
-    # `edit` will not write the relationship the lint rejects on sight.
+    # KIND is not a field any more, and `-k` says so by name rather than as a
+    # generic unknown-argument error.
     set +e
-    local orphan_out
-    orphan_out=$(run_tatr edit "$id" -P "" 2>&1); local orphan_code=$?
+    local kind_out
+    kind_out=$(run_tatr edit "$id" -k STORY 2>&1); local kind_code=$?
     set -e
-    local orphan_ok=0
-    if [ $orphan_code -ne 0 ] && echo "$orphan_out" | grep -q "KIND: STORY belongs to an Epic"; then
-        orphan_ok=1
+    local kind_ok=0
+    if [ $kind_code -ne 0 ] \
+        && echo "$kind_out" | grep -q "'-k' was removed: KIND is not a field" \
+        && ! grep -q "^- KIND: " "$task_file"; then
+        kind_ok=1
     fi
-    grep -q "^- PARENT: $other_epic$" "$task_file" || orphan_ok=0
 
-    # An empty value clears an optional relationship field on a kind that may
-    # stand alone.
-    run_tatr edit "$id" -k TASK -P "" -d "" > /dev/null 2>&1
+    # An empty value clears an optional relationship field. Every task may
+    # stand alone: nothing declares itself as owing a parent.
+    run_tatr edit "$id" -P "" -d "" > /dev/null 2>&1
 
-    if [ $set_ok -eq 1 ] && [ $orphan_ok -eq 1 ] \
+    if [ $set_ok -eq 1 ] && [ $kind_ok -eq 1 ] \
         && ! grep -q "^- PARENT:" "$task_file" \
-        && ! grep -q "^- DEPENDS ON:" "$task_file" \
-        && grep -q "^- KIND: TASK$" "$task_file"; then
+        && ! grep -q "^- DEPENDS ON:" "$task_file"; then
         pass_test
     else
-        fail_test "set_ok=$set_ok, orphan_ok=$orphan_ok ($orphan_code: $orphan_out), file: $(cat "$task_file")"
+        fail_test "set_ok=$set_ok, kind_ok=$kind_ok ($kind_code: $kind_out), file: $(cat "$task_file")"
     fi
 }
 
@@ -1375,59 +1371,54 @@ test_filter_lifecycle_fields() {
     cd "$test_dir"
     mkdir -p tasks
 
-    local epic_id=$(new_task_id "Epic container" -k EPIC)
+    local parent_id=$(new_task_id "Parent container")
     sleep 1
-    local blocker_id=$(new_task_id "Blocking task" -k TASK)
+    local blocker_id=$(new_task_id "Blocking task")
     sleep 1
-    local draft_id=$(new_task_id "Draft task" -k TASK)
+    local draft_id=$(new_task_id "Draft task")
     sleep 1
-    # A real parent/child pair, so ":parent eq" is answered by the Epic's own
+    # A real parent/child pair, so ":parent eq" is answered by the parent's own
     # generated ID rather than by an ID that happens to match nothing. The
     # blocker is driven to DONE first: the child cannot enter WORKING over an
     # open dependency.
-    local story_id=$(new_task_id "Child story" -k STORY \
-        -P "$epic_id" -d "$blocker_id")
+    local child_id=$(new_task_id "Child task" \
+        -P "$parent_id" -d "$blocker_id")
 
-    drive_task_to "$epic_id" PLANNED
+    drive_task_to "$parent_id" PLANNED
     drive_task_to "$blocker_id" DONE
-    drive_task_to "$story_id" WORKING
+    drive_task_to "$child_id" WORKING
 
-    local by_kind=$(run_tatr ls -f ':kind eq EPIC' 2>&1)
-    local by_kind_list=$(run_tatr ls -f ':kind in [STORY, TASK]' 2>&1)
     local by_activity=$(run_tatr ls -f ':activity eq WORKING' 2>&1)
     local by_unstarted=$(run_tatr ls -f ':status eq OPEN' 2>&1)
     local by_resolution=$(run_tatr ls -f ':resolution eq DONE' 2>&1)
     local by_gate=$(run_tatr ls -f ':gates contains PLAN' 2>&1)
-    local by_parent=$(run_tatr ls -f ":parent eq $epic_id" 2>&1)
+    local by_parent=$(run_tatr ls -f ":parent eq $parent_id" 2>&1)
     local by_depends=$(run_tatr ls -f ":depends contains $blocker_id" 2>&1)
 
     set +e
-    local bad retired_step retired_plan bad_gate
-    bad=$(run_tatr ls -f ':kind eq NOPE' 2>&1); local bad_code=$?
+    local retired_kind retired_step retired_plan bad_gate
+    retired_kind=$(run_tatr ls -f ':kind eq EPIC' 2>&1); local kind_code=$?
     retired_step=$(run_tatr ls -f ':flow_step eq WORKING' 2>&1); local step_code=$?
     retired_plan=$(run_tatr ls -f ':plan_status eq APPROVED' 2>&1); local plan_code=$?
     bad_gate=$(run_tatr ls -f ':gates contains NOPE' 2>&1); local gate_code=$?
     set -e
 
-    if [ "$(echo "$by_kind" | grep -c 'Epic container')" -eq 1 ] \
-        && [ "$(echo "$by_kind" | wc -l)" -eq 1 ] \
-        && [ "$(echo "$by_kind_list" | grep -c 'Child story')" -eq 1 ] \
-        && [ "$(echo "$by_kind_list" | grep -c 'Epic container')" -eq 0 ] \
-        && [ "$(echo "$by_activity" | grep -c 'Child story')" -eq 1 ] \
+    if [ "$(echo "$by_activity" | grep -c 'Child task')" -eq 1 ] \
         && [ "$(echo "$by_activity" | wc -l)" -eq 1 ] \
         && [ "$(echo "$by_unstarted" | grep -c 'Draft task')" -eq 1 ] \
         && [ "$(echo "$by_unstarted" | wc -l)" -eq 1 ] \
         && [ "$(echo "$by_resolution" | grep -c 'Blocking task')" -eq 1 ] \
         && [ "$(echo "$by_resolution" | wc -l)" -eq 1 ] \
-        && [ "$(echo "$by_gate" | grep -c 'Epic container')" -eq 1 ] \
-        && [ "$(echo "$by_gate" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_gate" | grep -c 'Parent container')" -eq 1 ] \
+        && [ "$(echo "$by_gate" | grep -c 'Child task')" -eq 1 ] \
         && [ "$(echo "$by_gate" | grep -c 'Draft task')" -eq 0 ] \
-        && [ "$(echo "$by_parent" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_parent" | grep -c 'Child task')" -eq 1 ] \
         && [ "$(echo "$by_parent" | wc -l)" -eq 1 ] \
-        && [ "$(echo "$by_depends" | grep -c 'Child story')" -eq 1 ] \
+        && [ "$(echo "$by_depends" | grep -c 'Child task')" -eq 1 ] \
         && [ "$(echo "$by_depends" | wc -l)" -eq 1 ] \
-        && [ $bad_code -ne 0 ] \
-        && echo "$bad" | grep -q "invalid kind value 'NOPE'" \
+        && [ $kind_code -ne 0 ] \
+        && echo "$retired_kind" | grep -q "field ':kind' was retired" \
+        && echo "$retired_kind" | grep -q "every task is a task" \
         && [ $step_code -ne 0 ] \
         && echo "$retired_step" | grep -q "field ':flow_step' was retired" \
         && echo "$retired_step" | grep -q ":activity" \
@@ -1438,13 +1429,10 @@ test_filter_lifecycle_fields() {
         && echo "$bad_gate" | grep -q "invalid gate 'NOPE'"; then
         pass_test
     else
-        fail_test "kind: $by_kind | activity: $by_activity | resolution: $by_resolution | gates: $by_gate | retired($step_code): $retired_step / ($plan_code) $retired_plan"
+        fail_test "activity: $by_activity | resolution: $by_resolution | gates: $by_gate | retired kind($kind_code): $retired_kind | ($step_code): $retired_step / ($plan_code) $retired_plan"
     fi
 }
 
-# The whole forward machine in one walk: `tatr flow` advances exactly one
-# activity, records the exit gate of the one it leaves, and refuses to run at
-# all once a RESOLUTION is set.
 test_flow_advances_and_records_gates() {
     log_test "flow (advances one activity, records the exit gate, stops at CLOSED)"
 
@@ -1459,16 +1447,21 @@ test_flow_advances_and_records_gates() {
 
     printf '\n## Steps\n\n- [ ] the work itself\n\n## Definition of Done\n\n- It works (test: `test_it`).\n' >> "$task_file"
 
-    # Picking a task up and moving into planning prove nothing, so no gate runs
-    # and none is recorded.
-    local want
-    for want in UNDERSTANDING PLANNING; do
-        run_tatr flow "$id" > /dev/null 2>&1 || ok=0
-        local got=$(activity_of "$id")
-        seen="$seen $got"
-        [ "$got" = "$want" ] || ok=0
-        [ "$(gates_of "$id")" = "-" ] || ok=0
-    done
+    # Picking a task up and moving into planning earn no gate. Leaving
+    # UNDERSTANDING does have a precondition - the DECISION.md that records
+    # what the work is for - so the record is written before the walk reaches
+    # it; see test_flow_understanding_requires_a_decision for the refusal.
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    [ "$(activity_of "$id")" = "UNDERSTANDING" ] || ok=0
+    run_tatr scaffold "$id" DECISION > /dev/null 2>&1 || ok=0
+
+    seen="$seen $(activity_of "$id")"
+    [ "$(gates_of "$id")" = "-" ] || ok=0
+
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    seen="$seen $(activity_of "$id")"
+    [ "$(activity_of "$id")" = "PLANNING" ] || ok=0
+    [ "$(gates_of "$id")" = "-" ] || ok=0
 
     # --dry-run names the edge and the gate, writes nothing, and exits 0 because
     # this is an edge the real call below completes.
@@ -1547,6 +1540,83 @@ ROUNDS
     fi
 }
 
+# Leaving UNDERSTANDING is the one edge with a precondition and no gate: the
+# task cannot be planned before a DECISION.md records what it is for. Nothing
+# is written down about having met it, so the edge asks again every time.
+test_flow_understanding_requires_a_decision() {
+    log_test "flow (leaving UNDERSTANDING needs a schema-clean DECISION.md)"
+
+    local test_dir=$(create_test_dir)
+    cd "$test_dir"
+    mkdir -p tasks
+
+    local id=$(new_task_id "Understand me")
+    local task_file="tasks/$id/TASK.md"
+    local ok=1
+
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    [ "$(activity_of "$id")" = "UNDERSTANDING" ] || ok=0
+
+    # No DECISION.md: refused flat, and nothing is written.
+    cp "$task_file" before.md
+    set +e
+    local missing_out
+    missing_out=$(run_tatr flow "$id" 2>&1); local missing_code=$?
+    set -e
+    [ $missing_code -ne 0 ] || ok=0
+    echo "$missing_out" | grep -q "there is no DECISION.md" || ok=0
+    echo "$missing_out" | grep -q "tatr scaffold $id DECISION" || ok=0
+    [ "$(activity_of "$id")" = "UNDERSTANDING" ] || ok=0
+    cmp -s before.md "$task_file" || ok=0
+
+    # The probe predicts the same refusal with the same text, tensed.
+    set +e
+    local dry_out
+    dry_out=$(run_tatr flow "$id" --dry-run 2>&1); local dry_code=$?
+    set -e
+    [ $dry_code -ne 0 ] || ok=0
+    echo "$dry_out" | grep -q "Would refuse to advance $id from UNDERSTANDING" || ok=0
+    echo "$dry_out" | grep -q "there is no DECISION.md" || ok=0
+
+    # A DECISION.md that exists but breaks its own schema is no better: the
+    # edge reads the whole rule set `tatr check` reads.
+    printf '# Decision: nope\n\n- DATE: 20260101-000000\n- STATUS: MAYBE\n- TASK: %s\n- TAGS: x\n' "$id" \
+        > "tasks/$id/DECISION.md"
+    set +e
+    local bad_out
+    bad_out=$(run_tatr flow "$id" 2>&1); local bad_code=$?
+    set -e
+    [ $bad_code -ne 0 ] || ok=0
+    echo "$bad_out" | grep -q "bad-decision-status" || ok=0
+    echo "$bad_out" | grep -q "bad-record-schema: DECISION.md has no '## Context' section" || ok=0
+    [ "$(activity_of "$id")" = "UNDERSTANDING" ] || ok=0
+
+    # A scaffolded one is schema-clean, so the edge opens.
+    rm -f "tasks/$id/DECISION.md"
+    run_tatr scaffold "$id" DECISION > /dev/null 2>&1 || ok=0
+    run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    [ "$(activity_of "$id")" = "PLANNING" ] || ok=0
+    # No gate was earned for it: GATES is still empty.
+    [ "$(gates_of "$id")" = "-" ] || ok=0
+
+    # Rewinding back and forward asks again rather than trusting a memory
+    # nothing recorded.
+    run_tatr rewind "$id" --to UNDERSTANDING > /dev/null 2>&1 || ok=0
+    rm -f "tasks/$id/DECISION.md"
+    set +e
+    local again_out
+    again_out=$(run_tatr flow "$id" 2>&1); local again_code=$?
+    set -e
+    [ $again_code -ne 0 ] || ok=0
+    echo "$again_out" | grep -q "there is no DECISION.md" || ok=0
+
+    if [ $ok -eq 1 ]; then
+        pass_test
+    else
+        fail_test "missing($missing_code): $missing_out | dry($dry_code): $dry_out | bad($bad_code): $bad_out | again($again_code): $again_out"
+    fi
+}
+
 # The case the redesign exists for. The plan is a fact about the record; the
 # advance is a fact about the world; they are allowed to disagree. The gate is
 # recorded, the cursor is held, and both halves are reported.
@@ -1571,7 +1641,7 @@ test_flow_half_succeeds_when_blocked() {
     local ok=1
 
     drive_task_to "$id" PLANNING || ok=0
-    drive_write_plan_sections "$id" 0
+    drive_write_plan_sections "$id"
     drive_task_to "$dangling" PLANNING || ok=0
 
     # The gate is recorded and the cursor holds, in one write. Everything else
@@ -1599,7 +1669,7 @@ test_flow_half_succeeds_when_blocked() {
     # A dependency that does not resolve at all is a broken graph rather than a
     # blocker to wait for, so it is refused by the GATE, not held by the world:
     # nothing is written at all.
-    drive_write_plan_sections "$dangling" 0
+    drive_write_plan_sections "$dangling"
     cp "tasks/$dangling/TASK.md" dangling_before.md
     set +e
     local dangling_out
@@ -1667,7 +1737,7 @@ test_flow_dry_run_probes_preconditions() {
     # World half unmet: the record is now plannable but the blocker is open, so
     # the real call would record PLAN and hold the cursor. The probe says so
     # without earning the gate - GATES stays "-".
-    drive_write_plan_sections "$id" 0
+    drive_write_plan_sections "$id"
     cp "$task_file" world_before.md
     set +e
     local world_out
@@ -2109,70 +2179,60 @@ ROUNDS
     fi
 }
 
-test_transition_epic_exemptions() {
-    log_test "flow (EPIC is exempt from review, retro and Steps)"
+test_transition_container_is_not_exempt() {
+    log_test "flow (a task with children owes the same records as anyone)"
 
     local test_dir=$(create_test_dir)
     cd "$test_dir"
     mkdir -p tasks
 
-    local epic=$(new_task_id "Epic container" -k EPIC)
+    local container=$(new_task_id "The container")
     sleep 1
     local blocker=$(new_task_id "Blocker")
     sleep 1
-    local blocked_epic=$(new_task_id "Blocked epic" -k EPIC -d "$blocker")
+    local blocked=$(new_task_id "Blocked container" -d "$blocker")
     sleep 1
-    local epic_file="tasks/$epic/TASK.md"
+    local child=$(new_task_id "A child" -P "$container")
+    local container_file="tasks/$container/TASK.md"
     local ok=1
 
-    # A frozen container's step boxes stay verbatim: a dropped child is honest
-    # history, not something to tick to satisfy a gate.
-    printf '\n## Done Means\n\n1. The children land (manual: the user confirms at Finish).\n\n## Child Tasks\n\n- [ ] 20260101-000000 dropped as superseded\n\n## Steps\n\n- [ ] a child that was dropped\n' >> "$epic_file"
-
-    # It walks the whole lifecycle with no REVIEW.md, no RETRO.md and an
-    # unchecked step, exactly as `tatr check` exempts it afterwards. The gates
-    # are still recorded: the exemption is from proving them, not from earning
-    # them.
-    drive_task_to "$epic" DONE || ok=0
-    [ "$(resolution_of "$epic")" = "DONE" ] || ok=0
-    [ "$(gates_of "$epic")" = "PLAN REVIEW RETRO" ] || ok=0
-    grep -q "^- \[ \] a child that was dropped$" "$epic_file" || ok=0
-    [ ! -f "tasks/$epic/REVIEW.md" ] || ok=0
-    [ ! -f "tasks/$epic/RETRO.md" ] || ok=0
-
-    # Only the PRESENCE of a REVIEW.md is exempt. One an Epic does carry is
-    # held to the same verdict as anyone's, or the transition would produce
-    # exactly the `closed-not-approved` state the lint flags.
-    local reviewed_epic=$(new_task_id "Reviewed epic" -k EPIC)
-    printf -- '- VERDICT: REQUEST_CHANGES\n' > "tasks/$reviewed_epic/REVIEW.md"
-    drive_task_to "$reviewed_epic" REVIEWING || ok=0
+    # Being somebody's PARENT buys nothing: the review gate still wants a
+    # REVIEW.md and the retro gate still wants a RETRO.md.
+    drive_task_to "$container" REVIEWING || ok=0
+    rm -f "tasks/$container/REVIEW.md"
     set +e
-    local verdict_out
-    verdict_out=$(run_tatr flow "$reviewed_epic" 2>&1); local verdict_code=$?
+    local review_out
+    review_out=$(run_tatr flow "$container" 2>&1); local review_code=$?
     set -e
-    [ $verdict_code -ne 0 ] || ok=0
-    echo "$verdict_out" | grep -q "verdict is 'REQUEST_CHANGES'" || ok=0
+    [ $review_code -ne 0 ] || ok=0
+    echo "$review_out" | grep -q "there is no REVIEW.md" || ok=0
 
-    # Dependencies are not among the exemptions: an Epic waits for its blockers
-    # like anyone else.
-    drive_task_to "$blocked_epic" PLANNED || ok=0
+    # And the unchecked Steps box is counted on the way out, container or not.
+    drive_task_to "$container" COMPOUNDING || ok=0
+    printf -- '\n- [ ] a box nobody ticked\n' >> "$container_file"
+    set +e
+    local steps_out
+    steps_out=$(run_tatr flow "$container" 2>&1); local steps_code=$?
+    set -e
+    [ $steps_code -ne 0 ] || ok=0
+    echo "$steps_out" | grep -q "unchecked Steps item(s) remain" || ok=0
+
+    # Dependencies apply to a container like anyone else.
+    drive_task_to "$blocked" PLANNED || ok=0
     set +e
     local dep_out
-    dep_out=$(run_tatr flow "$blocked_epic" 2>&1); local dep_code=$?
+    dep_out=$(run_tatr flow "$blocked" 2>&1); local dep_code=$?
     set -e
     [ $dep_code -ne 0 ] || ok=0
     echo "$dep_out" | grep -q "$blocker is not CLOSED" || ok=0
 
-    set +e
-    local check_out
-    check_out=$(run_tatr check "$epic" 2>&1); local check_code=$?
-    set -e
-    [ $check_code -eq 0 ] || ok=0
+    # The child exists only so the container really is one.
+    [ "$(sed -n 's/^- PARENT: //p' "tasks/$child/TASK.md")" = "$container" ] || ok=0
 
     if [ $ok -eq 1 ]; then
         pass_test
     else
-        fail_test "dep($dep_code): $dep_out | verdict($verdict_code): $verdict_out | check($check_code): $check_out"
+        fail_test "review($review_code): $review_out | steps($steps_code): $steps_out | dep($dep_code): $dep_out"
     fi
 }
 
@@ -2743,18 +2803,17 @@ fi
 # --- check subcommand tests ---
 
 # Writes a TASK.md for check tests: dir, id, activity, then the optional
-# kind / gates / resolution; body from stdin. "-" is how each nullable field
-# says it is unset, exactly as on disk.
+# gates / resolution; body from stdin. "-" is how each nullable field says it
+# is unset, exactly as on disk.
 write_check_task() {
     local dir=$1 id=$2 activity=$3
-    local kind=${4:-TASK} gates=${5:--} resolution=${6:--}
+    local gates=${4:--} resolution=${5:--}
     mkdir -p "$dir/tasks/$id"
     {
         echo "# Task $id"
         echo
         echo "- PRIORITY: 10"
         echo "- TAGS: feature"
-        echo "- KIND: $kind"
         echo "- ACTIVITY: $activity"
         echo "- GATES: $gates"
         echo "- RESOLUTION: $resolution"
@@ -2829,7 +2888,7 @@ test_check_clean() {
 
 - [ ] open tasks may have unchecked steps
 BODY
-    write_check_task "$test_dir" "20260101-100001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-100001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] all ticked
@@ -2864,7 +2923,7 @@ ROUNDS
 test_check_closed_unchecked() {
     log_test "check (closed-unchecked fires on CLOSED Steps boxes)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-110000" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-110000" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] done
@@ -2888,7 +2947,7 @@ BODY
 test_check_closed_not_approved() {
     log_test "check (closed-not-approved; later APPROVE round clears it)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-120000" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-120000" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] done
@@ -2977,12 +3036,12 @@ BODY
 test_check_per_id() {
     log_test "check (per-ID scopes to one task)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-160000" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-160000" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [ ] dirty
 BODY
-    write_check_task "$test_dir" "20260101-160001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-160001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] clean
@@ -3021,7 +3080,7 @@ BODY
     local clean_code=$?
     set -e
 
-    write_check_task "$test_dir" "20260101-170001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-170001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [ ] left open
@@ -3049,7 +3108,7 @@ test_check_scanner_edges() {
     printf '# Trailing space\n\n- PRIORITY: 1\n- TAGS: x\n- KIND: TASK\n- ACTIVITY: COMPOUNDING\n- GATES: PLAN REVIEW RETRO\n- RESOLUTION: DONE \n\n## Steps\n\n- [ ] never done\n' > "$test_dir/tasks/20260101-180000/TASK.md"
     # Prose checkbox starting with R must not be a severity finding; verdict
     # with a tail must still read APPROVE.
-    write_check_task "$test_dir" "20260101-180001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-180001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] done
@@ -3085,7 +3144,7 @@ test_check_missing_artifacts() {
     local test_dir=$(create_test_dir)
     mkdir -p "$test_dir/tasks/20260101-190000"
     printf '# R\n\nno verdict here\n' > "$test_dir/tasks/20260101-190000/REVIEW.md"
-    write_check_task "$test_dir" "20260101-190001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-190001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] done
@@ -3107,7 +3166,7 @@ BODY
     fi
 }
 
-# --- Flow-state checks (missing plan gate / EPIC exemptions) ---
+# --- Lifecycle-state checks (missing plan gate, containers) ---
 
 # Work started without an approved plan is the PLANNING case of
 # inconsistent-gates and has no rule of its own, so the record must draw
@@ -3115,7 +3174,7 @@ BODY
 test_check_working_without_plan_gate() {
     log_test "check (work past PLANNING without the PLAN gate draws one finding)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-195000" "WORKING" TASK "PLAN" <<'BODY'
+    write_check_task "$test_dir" "20260101-195000" "WORKING" "PLAN" <<'BODY'
 ## Steps
 
 - [ ] planned work may be in progress
@@ -3124,7 +3183,7 @@ test_check_working_without_plan_gate() {
 
 - The work is done (test: `test_something`).
 BODY
-    write_check_task "$test_dir" "20260101-195001" "WORKING" TASK "-" <<'BODY'
+    write_check_task "$test_dir" "20260101-195001" "WORKING" "-" <<'BODY'
 ## Steps
 
 - [ ] checkbox alone is not an approved plan
@@ -3155,43 +3214,27 @@ BODY
     fi
 }
 
-test_check_epic_exemptions() {
-    log_test "check (KIND: EPIC is exempt from the record-completeness rules)"
+test_check_container_is_not_exempt() {
+    log_test "check (a task with children is held to every rule anyway)"
     local test_dir=$(create_test_dir)
 
-    # An EPIC container: its aggregate record lives in its own TASK.md, its
-    # child tasks carry review/retro, and its frozen step boxes stay verbatim.
-    write_check_task "$test_dir" "20260101-196000" "COMPOUNDING" EPIC "PLAN REVIEW RETRO" DONE <<'BODY'
-## Done Means
-
-1. The children land (manual: the user confirms at Finish).
-
-## Child Tasks
+    # A closed container with an open step box, no review and no retro. Nothing
+    # about having children waives any of the three.
+    write_check_task "$test_dir" "20260101-196000" "COMPOUNDING" "PLAN REVIEW RETRO" DONE <<'BODY'
+## Steps
 
 - [x] 20260101-196001 shipped
 - [ ] 20260101-196002 dropped as superseded
 BODY
-    # An EPIC may also sit IN_PROGRESS without an approved plan of its own.
-    write_check_task "$test_dir" "20260101-196003" "WORKING" EPIC "-" <<'BODY'
-## Done Means
-
-1. The children land (manual: the user confirms at Finish).
-
-## Child Tasks
-
-- [ ] 20260101-196004 in flight
-BODY
-    # The identical shape on an ordinary TASK is still a finding, three times
-    # over: no review, no retro, and an unchecked step on a CLOSED task.
-    write_check_task "$test_dir" "20260101-196005" "COMPOUNDING" TASK "PLAN REVIEW RETRO" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-196001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [x] done
-- [ ] not done
 BODY
-    # The exemption keys on KIND alone. A `goal` tag used to grant it and must
-    # not any more, or a task could still exempt itself by editing a tag.
-    write_check_task "$test_dir" "20260101-196006" "COMPOUNDING" TASK "PLAN REVIEW RETRO" DONE <<'BODY'
+    sed -i 's/^- RESOLUTION: DONE$/- RESOLUTION: DONE\n- PARENT: 20260101-196000/' \
+        "$test_dir/tasks/20260101-196001/TASK.md"
+    # A `goal` tag grants nothing either: no tag has ever been load-bearing.
+    write_check_task "$test_dir" "20260101-196006" "COMPOUNDING" "PLAN REVIEW RETRO" DONE <<'BODY'
 ## Steps
 
 - [ ] not done
@@ -3205,11 +3248,9 @@ BODY
     set -e
 
     if [ $exit_code -eq 1 ] \
-        && ! echo "$output" | grep -q "20260101-196000" \
-        && ! echo "$output" | grep -q "20260101-196003" \
-        && echo "$output" | grep -q "20260101-196005: closed-unchecked: 1 unchecked" \
-        && echo "$output" | grep -q "20260101-196005: closed-missing-review" \
-        && echo "$output" | grep -q "20260101-196005: closed-missing-retro" \
+        && echo "$output" | grep -q "20260101-196000: closed-unchecked: 1 unchecked" \
+        && echo "$output" | grep -q "20260101-196000: closed-missing-review" \
+        && echo "$output" | grep -q "20260101-196000: closed-missing-retro" \
         && echo "$output" | grep -q "20260101-196006: closed-unchecked: 1 unchecked" \
         && echo "$output" | grep -q "20260101-196006: closed-missing-review"; then
         pass_test
@@ -3483,7 +3524,7 @@ BODY
     fi
 }
 
-# --- record schema checks (one table, five record kinds) ---
+# --- record schema checks (one table, four record kinds) ---
 
 test_record_scaffolds() {
     log_test "scaffold (every kind renders schema-clean and refuses to clobber)"
@@ -3500,7 +3541,7 @@ test_record_scaffolds() {
     list_out=$(run_tatr -r "$test_dir" scaffold "$id" --list 2>&1)
     echo "$list_out" | grep -q "^TASK	.*/tasks/$id/TASK.md	present$" || ok=0
     echo "$list_out" | grep -q "^REVIEW	.*/tasks/$id/REVIEW.md	missing$" || ok=0
-    [ "$(echo "$list_out" | wc -l)" -eq 5 ] || ok=0
+    [ "$(echo "$list_out" | wc -l)" -eq 4 ] || ok=0
 
     # --dry-run reports the path it WOULD write and writes nothing.
     local dry_out
@@ -3511,17 +3552,15 @@ test_record_scaffolds() {
     # Each kind renders its own title, its own header fields and its own
     # sections - all from the one table `check` validates against.
     local kind
-    for kind in SPIKE DECISION REVIEW RETRO; do
+    for kind in DECISION REVIEW RETRO; do
         run_tatr -r "$test_dir" scaffold "$id" "$kind" > /dev/null 2>&1 || ok=0
     done
-    grep -q "^# Spike: A scaffolded task$" "$test_dir/tasks/$id/SPIKE.md" || ok=0
     grep -q "^# Decision: A scaffolded task$" "$test_dir/tasks/$id/DECISION.md" || ok=0
     grep -q "^# Review: A scaffolded task$" "$test_dir/tasks/$id/REVIEW.md" || ok=0
     grep -q "^# Retro: A scaffolded task$" "$test_dir/tasks/$id/RETRO.md" || ok=0
     grep -q "^- TASK: $id$" "$test_dir/tasks/$id/RETRO.md" || ok=0
     grep -q "^## Round 1$" "$test_dir/tasks/$id/REVIEW.md" || ok=0
     grep -q "^## Alternatives considered$" "$test_dir/tasks/$id/DECISION.md" || ok=0
-    grep -q "^## Next steps$" "$test_dir/tasks/$id/SPIKE.md" || ok=0
 
     # The scaffolded records pass the lint with their placeholders still in
     # place: an author fills them in, they do not have to guess the shape.
@@ -3561,20 +3600,21 @@ test_record_scaffolds() {
 }
 
 test_check_record_schemas() {
-    log_test "check (bad-record-schema: title, header fields and sections per kind)"
+    log_test "check (bad-record-schema: title, header fields and sections)"
     local test_dir=$(create_test_dir)
 
     # A planned task owes the plan gate's sections; this one has neither.
-    write_check_task "$test_dir" "20260101-250000" "PLANNING" TASK "PLAN" <<'BODY'
+    write_check_task "$test_dir" "20260101-250000" "PLANNING" "PLAN" <<'BODY'
 ## Notes
 
 - planned, but nothing to build and nothing to prove
 BODY
-    # An Epic container owes the container sections instead.
-    write_check_task "$test_dir" "20260101-250001" "PLANNING" EPIC "PLAN" <<'BODY'
+    # Every planned task owes the same two sections, container or not: this
+    # one has the Steps and not the proofs.
+    write_check_task "$test_dir" "20260101-250001" "PLANNING" "PLAN" <<'BODY'
 ## Steps
 
-- [ ] an Epic's record is its done definition and its child queue
+- [ ] having children buys no different schema
 BODY
     # A REVIEW.md with the wrong title and no pointers; a RETRO.md missing one
     # required section and carrying another one empty.
@@ -3616,8 +3656,7 @@ RETRO
     if [ $exit_code -eq 1 ] \
         && echo "$output" | grep -q "20260101-250000: bad-record-schema: TASK.md has no '## Steps' section" \
         && echo "$output" | grep -q "20260101-250000: bad-record-schema: TASK.md has no '## Definition of Done' section" \
-        && echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Done Means' section" \
-        && echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Child Tasks' section" \
+        && echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Definition of Done' section" \
         && ! echo "$output" | grep -q "20260101-250001: bad-record-schema: TASK.md has no '## Steps'" \
         && echo "$output" | grep -q "20260101-250002: bad-record-schema: REVIEW.md does not open with '# Review: <title>'" \
         && echo "$output" | grep -q "20260101-250002: bad-record-schema: REVIEW.md has no '- TASK: ' line" \
@@ -3648,7 +3687,7 @@ test_check_backlog_owes_no_plan_sections() {
     [ -z "$fresh_out" ] || ok=0
 
     # The same body once the PLAN gate is earned is a finding.
-    write_check_task "$test_dir" "20260101-260000" "PLANNING" TASK "PLAN" <<'BODY'
+    write_check_task "$test_dir" "20260101-260000" "PLANNING" "PLAN" <<'BODY'
 Nothing but prose.
 BODY
     set +e
@@ -3754,7 +3793,7 @@ ROUNDS
 test_check_dod_proof_syntax() {
     log_test "check (bad-proof-syntax: every DoD item names a proof)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-280000" "PLANNING" TASK "PLAN" <<'BODY'
+    write_check_task "$test_dir" "20260101-280000" "PLANNING" "PLAN" <<'BODY'
 ## Steps
 
 - [ ] build it
@@ -3784,114 +3823,15 @@ BODY
     fi
 }
 
-test_check_spike_records() {
-    log_test "check (SPIKE.md presence, status vocabulary and seeded pointers)"
-    local test_dir=$(create_test_dir)
-
-    # A planned SPIKE task with no research doc.
-    write_check_task "$test_dir" "20260101-290000" "PLANNING" SPIKE "PLAN" <<'BODY'
-## Question
-
-- is it worth it?
-BODY
-    # One with a doc, but an invented status and a seeded pointer to nothing.
-    write_check_task "$test_dir" "20260101-290001" "PLANNING" SPIKE "PLAN" <<'BODY'
-## Question
-
-- is the other thing worth it?
-BODY
-    cat > "$test_dir/tasks/20260101-290001/SPIKE.md" <<'SPIKE'
-# Spike: is the other thing worth it?
-
-- DATE: 20260101-290001
-- STATUS: EXPLORING
-- TAGS: spike
-
-## Question
-
-what we set out to reduce
-
-## Context
-
-what already exists
-
-## Options considered
-
-- one, and the other
-
-## Recommendation
-
-the one
-
-## Open questions
-
-- none
-
-## Next steps
-
-- tatr 20260101-999999: build the thing
-SPIKE
-
-    set +e
-    local output
-    output=$(run_tatr -r "$test_dir" check 2>&1)
-    local exit_code=$?
-    set -e
-
-    # A SPIKE.md on a KIND: TASK record is still validated: the CONTENT rules
-    # are presence-gated, and `tatr scaffold <id> SPIKE` will write one for any
-    # task. Only missing-spike-record keys on the task's kind.
-    write_check_task "$test_dir" "20260101-290002" "PLANNING" TASK "PLAN" <<'BODY'
-## Steps
-
-- [ ] an ordinary task
-
-## Definition of Done
-
-- It works (test: `test_it`).
-BODY
-    printf '# Spike: a spike doc on an ordinary task\n\n- DATE: 20260101-290002\n- STATUS: MAYBE\n- TAGS: spike\n' \
-        > "$test_dir/tasks/20260101-290002/SPIKE.md"
-    # ... while a task with no SPIKE.md and no SPIKE kind is never asked for one.
-    write_check_task "$test_dir" "20260101-290003" "PLANNING" TASK "PLAN" <<'BODY'
-## Steps
-
-- [ ] no spike here
-
-## Definition of Done
-
-- It works (test: `test_it`).
-BODY
-
-    set +e
-    output=$(run_tatr -r "$test_dir" check 2>&1)
-    exit_code=$?
-    set -e
-
-    if [ $exit_code -eq 1 ] \
-        && echo "$output" | grep -q "20260101-290000: missing-spike-record: KIND: SPIKE task has no SPIKE.md" \
-        && echo "$output" | grep -q "20260101-290001: bad-spike-status: invalid SPIKE.md STATUS 'EXPLORING'" \
-        && echo "$output" | grep -q "20260101-290001: dangling-seeded-task: SPIKE.md seeds '20260101-999999' which has no TASK.md" \
-        && ! echo "$output" | grep -q "20260101-290001: bad-record-schema" \
-        && echo "$output" | grep -q "20260101-290002: bad-spike-status: invalid SPIKE.md STATUS 'MAYBE'" \
-        && echo "$output" | grep -q "20260101-290002: bad-record-schema: SPIKE.md has no '## Question' section" \
-        && ! echo "$output" | grep -q "20260101-290002: missing-spike-record" \
-        && ! echo "$output" | grep -q "20260101-290003"; then
-        pass_test
-    else
-        fail_test "Exit: $exit_code, output: $output"
-    fi
-}
-
 test_check_exemptions() {
     log_test "check (EXEMPTIONS.md suppresses a rule; a stale entry is a finding)"
     local test_dir=$(create_test_dir)
-    write_check_task "$test_dir" "20260101-300000" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-300000" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [ ] a historical record, kept verbatim
 BODY
-    write_check_task "$test_dir" "20260101-300001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-300001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [ ] not exempted
@@ -3946,12 +3886,12 @@ test_exemption_whole_task() {
     # A historical record whose body cannot satisfy the current schema without
     # fabrication: several rules fire on it at once, which is exactly when
     # listing them one per line stops being worth the diff.
-    write_check_task "$test_dir" "20260101-305000" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-305000" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [ ] a historical record, kept verbatim
 BODY
-    write_check_task "$test_dir" "20260101-305001" "-" TASK "-" DONE <<'BODY'
+    write_check_task "$test_dir" "20260101-305001" "-" "-" DONE <<'BODY'
 ## Steps
 
 - [ ] a rule-scoped exemption covers only its own rule
@@ -3991,7 +3931,7 @@ test_check_inconsistent_gates() {
 
     # REVIEWING is past PLANNING, whose exit gate is PLAN, and the record does
     # not carry it.
-    write_check_task "$test_dir" "20260101-306000" "REVIEWING" TASK "-" <<'BODY'
+    write_check_task "$test_dir" "20260101-306000" "REVIEWING" "-" <<'BODY'
 ## Steps
 
 - [ ] the work
@@ -4002,7 +3942,7 @@ test_check_inconsistent_gates() {
 BODY
     # Consistent: the cursor is past PLANNING and the gate is there. RETRO is
     # not owed, because the cursor has not left COMPOUNDING.
-    write_check_task "$test_dir" "20260101-306001" "COMPOUNDING" TASK "PLAN REVIEW" <<'BODY'
+    write_check_task "$test_dir" "20260101-306001" "COMPOUNDING" "PLAN REVIEW" <<'BODY'
 ## Steps
 
 - [ ] the work
@@ -4034,6 +3974,25 @@ BODY
     fi
 }
 
+# Writes a v1 record: current in every respect except the "- KIND: " line,
+# which `tatr migrate` deletes and every other command refuses.
+write_v1_task() {
+    local dir=$1 id=$2 kind=$3
+    mkdir -p "$dir/tasks/$id"
+    {
+        echo "# Kinded $id"
+        echo
+        echo "- PRIORITY: 10"
+        echo "- TAGS: legacy"
+        echo "- KIND: $kind"
+        echo "- ACTIVITY: PLANNING"
+        echo "- GATES: PLAN"
+        echo "- RESOLUTION: -"
+        echo
+        cat
+    } > "$dir/tasks/$id/TASK.md"
+}
+
 # Writes a v0 record: the format `tatr migrate` exists to read and nothing else
 # in the binary will touch.
 write_v0_task() {
@@ -4063,14 +4022,21 @@ test_migrate_dry_run_writes_nothing() {
 
 - [ ] one
 BODY
-    # A record already in the v1 format is not a change and is not reported.
-    write_check_task "$test_dir" "20260101-320001" "PLANNING" TASK "PLAN" <<'BODY'
+    # A record already in the current format is not a change and is not
+    # reported; a v1 one carrying a KIND line is.
+    write_check_task "$test_dir" "20260101-320001" "PLANNING" "PLAN" <<'BODY'
 ## Steps
 
 - [ ] already migrated
 BODY
+    write_v1_task "$test_dir" "20260101-320002" "SPIKE" <<'BODY'
+## Steps
+
+- [ ] still kinded
+BODY
     cp "$test_dir/tasks/20260101-320000/TASK.md" "$test_dir/v0_before.md"
-    cp "$test_dir/tasks/20260101-320001/TASK.md" "$test_dir/v1_before.md"
+    cp "$test_dir/tasks/20260101-320001/TASK.md" "$test_dir/current_before.md"
+    cp "$test_dir/tasks/20260101-320002/TASK.md" "$test_dir/v1_before.md"
 
     set +e
     local output
@@ -4080,10 +4046,12 @@ BODY
 
     [ $exit_code -eq 0 ] || ok=0
     echo "$output" | grep -q "20260101-320000	FLOW STEP: PLANNED, PLAN STATUS: APPROVED -> ACTIVITY: PLANNING, GATES: PLAN, RESOLUTION: -" || ok=0
-    echo "$output" | grep -q "1 record(s) would change; nothing was written" || ok=0
+    echo "$output" | grep -q "20260101-320002	KIND: SPIKE -> dropped" || ok=0
+    echo "$output" | grep -q "2 record(s) would change; nothing was written" || ok=0
     echo "$output" | grep -q "20260101-320001" && ok=0
     cmp -s "$test_dir/v0_before.md" "$test_dir/tasks/20260101-320000/TASK.md" || ok=0
-    cmp -s "$test_dir/v1_before.md" "$test_dir/tasks/20260101-320001/TASK.md" || ok=0
+    cmp -s "$test_dir/current_before.md" "$test_dir/tasks/20260101-320001/TASK.md" || ok=0
+    cmp -s "$test_dir/v1_before.md" "$test_dir/tasks/20260101-320002/TASK.md" || ok=0
 
     if [ $ok -eq 1 ]; then
         pass_test
@@ -4131,6 +4099,17 @@ BODY
     write_v0_task "$test_dir" "20260101-330005" "IN_PROGRESS" "WORKING" "NOT_REQUIRED" <<'BODY'
 body
 BODY
+    # A v1 record: only the KIND line goes, and the rest survives byte for byte.
+    write_v1_task "$test_dir" "20260101-330006" "EPIC" <<'BODY'
+## Steps
+
+- [ ] one
+
+## Definition of Done
+
+- It works (test: `test_it`).
+BODY
+    cp "$test_dir/tasks/20260101-330006/TASK.md" "$test_dir/kinded_before.md"
     # The REVIEW and RETRO gates are read from the records that prove them,
     # because v0 never wrote them down anywhere else.
     write_approved_review "$test_dir" "20260101-330003"
@@ -4144,7 +4123,11 @@ BODY
     local exit_code=$?
     set -e
     [ $exit_code -eq 0 ] || ok=0
-    echo "$output" | grep -q "6 record(s) migrated" || ok=0
+    echo "$output" | grep -q "7 record(s) migrated" || ok=0
+    echo "$output" | grep -q "20260101-330006	KIND: EPIC -> dropped" || ok=0
+    # Everything but the KIND line is untouched.
+    grep -v '^- KIND: ' "$test_dir/kinded_before.md" \
+        | diff -q - "$test_dir/tasks/20260101-330006/TASK.md" > /dev/null || ok=0
 
     field_of() { sed -n "s/^- $2: //p" "$test_dir/tasks/$1/TASK.md" | head -1; }
 
@@ -4167,9 +4150,11 @@ BODY
     [ "$(field_of 20260101-330005 ACTIVITY)" = "WORKING" ] || ok=0
     [ "$(field_of 20260101-330005 GATES)" = "-" ] || ok=0
 
-    # STATUS is gone from every record, and no body was rewritten.
+    # STATUS, FLOW STEP and KIND are gone from every record, and no body was
+    # rewritten.
     ! grep -rq '^- STATUS: ' "$test_dir/tasks"/*/TASK.md || ok=0
     ! grep -rq '^- FLOW STEP: ' "$test_dir/tasks"/*/TASK.md || ok=0
+    ! grep -rq '^- KIND: ' "$test_dir/tasks"/*/TASK.md || ok=0
     grep -qFx -- "- [x] one" "$test_dir/tasks/20260101-330003/TASK.md" || ok=0
     grep -q 'VERDICT: REQUEST_CHANGES' "$test_dir/tasks/20260101-330002/REVIEW.md" || ok=0
 
@@ -4180,13 +4165,14 @@ BODY
     set -e
     [ $ls_code -eq 0 ] || ok=0
     [ "$(echo "$ls_out" | grep -c 'Legacy 2026')" -eq 6 ] || ok=0
+    [ "$(echo "$ls_out" | grep -c 'Kinded 2026')" -eq 1 ] || ok=0
 
     # A second run has nothing left to do.
     set +e
     local again
     again=$(run_tatr -r "$test_dir" migrate 2>&1)
     set -e
-    echo "$again" | grep -q "No v0 records found" || ok=0
+    echo "$again" | grep -q "No legacy records found" || ok=0
 
     unset -f field_of
     if [ $ok -eq 1 ]; then
@@ -4207,7 +4193,7 @@ test_proof_listing_does_not_execute() {
 
     # The cmd: proof holds live shell text - a command substitution, a
     # redirection and a chained rm. Listing it must print it, not run it.
-    write_check_task "$test_dir" "20260101-310000" "PLANNING" TASK "PLAN" <<BODY
+    write_check_task "$test_dir" "20260101-310000" "PLANNING" "PLAN" <<BODY
 ## Steps
 
 - [ ] build it
@@ -4264,15 +4250,15 @@ BODY
     fi
 }
 
-# --- Epic graph, frontier, claims and phase context ---
+# --- Task graph, frontier, claims and phase context ---
 
 # Writes a TASK.md with graph fields, for tests about the relationships rather
-# than the body. Args: dir id resolution kind activity priority title, then the
+# than the body. Args: dir id resolution activity priority title, then the
 # optional PARENT / DEPENDS ON lines on stdin. A fixture that sits at an
 # activity has earned the PLAN gate, which is what every caller here wants: a
 # graph fixture is a task somebody already planned.
 write_graph_task() {
-    local dir=$1 id=$2 resolution=$3 kind=$4 activity=$5 priority=$6 title=$7
+    local dir=$1 id=$2 resolution=$3 activity=$4 priority=$5 title=$6
     local gates="-"
     [ "$activity" = "-" ] || gates="PLAN"
     mkdir -p "$dir/tasks/$id"
@@ -4281,7 +4267,6 @@ write_graph_task() {
         echo
         echo "- PRIORITY: $priority"
         echo "- TAGS: x"
-        echo "- KIND: $kind"
         echo "- ACTIVITY: $activity"
         echo "- GATES: $gates"
         echo "- RESOLUTION: $resolution"
@@ -4289,23 +4274,13 @@ write_graph_task() {
         echo
         # The plan-gate sections, so a graph fixture can also walk the
         # lifecycle without the record gate having an opinion about its body.
-        if [ "$kind" = "EPIC" ]; then
-            echo "## Done Means"
-            echo
-            echo "1. The children land (manual: the user confirms)."
-            echo
-            echo "## Child Tasks"
-            echo
-            echo "- [ ] the children"
-        else
-            echo "## Steps"
-            echo
-            echo "- [ ] the work itself"
-            echo
-            echo "## Definition of Done"
-            echo
-            echo "- The work is done (test: \`test_the_work\`)."
-        fi
+        echo "## Steps"
+        echo
+        echo "- [ ] the work itself"
+        echo
+        echo "## Definition of Done"
+        echo
+        echo "- The work is done (test: \`test_the_work\`)."
         echo
         echo "## Notes"
         echo
@@ -4313,49 +4288,49 @@ write_graph_task() {
     } > "$dir/tasks/$id/TASK.md"
 }
 
-test_epic_graph_validation() {
-    log_test "check (graph: missing links, duplicates, self-links, cycles, Epic relationships)"
+test_task_graph_validation() {
+    log_test "check (graph: missing links, duplicates, self-links, cycles)"
     local test_dir=$(create_test_dir)
 
     # A parent that does not exist, a self-dependency, and the same dependency
     # listed twice.
-    write_graph_task "$test_dir" "20260101-400000" "-" "TASK" "-" 10 "Broken edges" <<'META'
+    write_graph_task "$test_dir" "20260101-400000" "-" "-" 10 "Broken edges" <<'META'
 - PARENT: 20260101-499999
 - DEPENDS ON: 20260101-400000, 20260101-400001, 20260101-400001
 META
-    # A Story with no parent at all.
-    write_graph_task "$test_dir" "20260101-400001" "-" "STORY" "-" 10 "Orphan story" <<'META'
+    # A task with no parent at all: every task may stand alone.
+    write_graph_task "$test_dir" "20260101-400001" "-" "-" 10 "No parent" <<'META'
 META
-    # A two-node PARENT cycle, whose members are also not Epics.
-    write_graph_task "$test_dir" "20260101-400002" "-" "TASK" "-" 10 "Parent cycle A" <<'META'
+    # A two-node PARENT cycle.
+    write_graph_task "$test_dir" "20260101-400002" "-" "-" 10 "Parent cycle A" <<'META'
 - PARENT: 20260101-400003
 META
-    write_graph_task "$test_dir" "20260101-400003" "-" "TASK" "-" 10 "Parent cycle B" <<'META'
+    write_graph_task "$test_dir" "20260101-400003" "-" "-" 10 "Parent cycle B" <<'META'
 - PARENT: 20260101-400002
 META
     # A three-node DEPENDS ON cycle, plus an acyclic dependant that must stay
     # silent - a cycle detector that reports everything reachable from a cycle
     # is not a cycle detector.
-    write_graph_task "$test_dir" "20260101-400004" "-" "TASK" "-" 10 "Dep cycle A" <<'META'
+    write_graph_task "$test_dir" "20260101-400004" "-" "-" 10 "Dep cycle A" <<'META'
 - DEPENDS ON: 20260101-400005
 META
-    write_graph_task "$test_dir" "20260101-400005" "-" "TASK" "-" 10 "Dep cycle B" <<'META'
+    write_graph_task "$test_dir" "20260101-400005" "-" "-" 10 "Dep cycle B" <<'META'
 - DEPENDS ON: 20260101-400006
 META
-    write_graph_task "$test_dir" "20260101-400006" "-" "TASK" "-" 10 "Dep cycle C" <<'META'
+    write_graph_task "$test_dir" "20260101-400006" "-" "-" 10 "Dep cycle C" <<'META'
 - DEPENDS ON: 20260101-400004
 META
-    write_graph_task "$test_dir" "20260101-400007" "-" "TASK" "-" 10 "Downstream of a cycle" <<'META'
+    write_graph_task "$test_dir" "20260101-400007" "-" "-" 10 "Downstream of a cycle" <<'META'
 - DEPENDS ON: 20260101-400004
 META
     # A task naming itself as its own parent.
-    write_graph_task "$test_dir" "20260101-400008" "-" "TASK" "-" 10 "Its own parent" <<'META'
+    write_graph_task "$test_dir" "20260101-400008" "-" "-" 10 "Its own parent" <<'META'
 - PARENT: 20260101-400008
 META
-    # A well-formed Epic and Story: neither may be flagged.
-    write_graph_task "$test_dir" "20260101-400009" "-" "EPIC" "-" 10 "A real container" <<'META'
+    # A well-formed parent and child: neither may be flagged.
+    write_graph_task "$test_dir" "20260101-400009" "-" "-" 10 "A real container" <<'META'
 META
-    write_graph_task "$test_dir" "20260101-400010" "-" "STORY" "-" 10 "A real story" <<'META'
+    write_graph_task "$test_dir" "20260101-400010" "-" "-" 10 "A real child" <<'META'
 - PARENT: 20260101-400009
 - DEPENDS ON: 20260101-400009
 META
@@ -4370,8 +4345,7 @@ META
         && echo "$output" | grep -q "20260101-400000: missing-parent: PARENT '20260101-499999' does not exist" \
         && echo "$output" | grep -q "20260101-400000: self-dependency: DEPENDS ON lists the task itself" \
         && echo "$output" | grep -q "20260101-400000: duplicate-dependency: DEPENDS ON lists '20260101-400001' more than once" \
-        && echo "$output" | grep -q "20260101-400001: bad-epic-relationship: KIND: STORY has no PARENT" \
-        && echo "$output" | grep -q "20260101-400002: bad-epic-relationship: PARENT '20260101-400003' is KIND: TASK, not EPIC" \
+        && ! echo "$output" | grep -q "^20260101-400001:" \
         && echo "$output" | grep -q "20260101-400002: parent-cycle:" \
         && echo "$output" | grep -q "20260101-400003: parent-cycle:" \
         && echo "$output" | grep -q "20260101-400004: dependency-cycle:" \
@@ -4379,8 +4353,8 @@ META
         && echo "$output" | grep -q "20260101-400006: dependency-cycle:" \
         && ! echo "$output" | grep -q "20260101-400007" \
         && echo "$output" | grep -q "20260101-400008: self-parent: PARENT names the task itself" \
-        && ! echo "$output" | grep -q "20260101-400009" \
-        && ! echo "$output" | grep -q "20260101-400010"; then
+        && ! echo "$output" | grep -q "^20260101-400009:" \
+        && ! echo "$output" | grep -q "^20260101-400010:"; then
         pass_test
     else
         fail_test "Exit: $exit_code, output: $output"
@@ -4398,35 +4372,28 @@ test_new_refuses_broken_relationships() {
     # Every one of these would be an instant finding on a record that had just
     # been created, which makes it the producer's bug rather than the linter's.
     set +e
-    local orphan_out parent_out dep_out kind_out
-    orphan_out=$(run_tatr new "orphan" -k STORY 2>&1);            local orphan_code=$?
+    local kind_out parent_out dep_out
+    kind_out=$(run_tatr new "kinded" -k STORY 2>&1);              local kind_code=$?
     parent_out=$(run_tatr new "bad parent" -P 20260101-999999 2>&1); local parent_code=$?
     dep_out=$(run_tatr new "bad dep" -d 20260101-999999 2>&1);    local dep_code=$?
     set -e
-    [ $orphan_code -ne 0 ] || ok=0
+    [ $kind_code -ne 0 ] || ok=0
     [ $parent_code -ne 0 ] || ok=0
     [ $dep_code -ne 0 ] || ok=0
-    echo "$orphan_out" | grep -q "KIND: STORY belongs to an Epic" || ok=0
+    echo "$kind_out" | grep -q "'-k' was removed: KIND is not a field" || ok=0
     echo "$parent_out" | grep -q "Parent '20260101-999999' does not exist" || ok=0
     echo "$dep_out" | grep -q "Dependency '20260101-999999' does not exist" || ok=0
     # A refused create creates nothing at all.
     [ "$(ls tasks | wc -l)" -eq 0 ] || ok=0
 
-    # A parent that exists but is not a container is refused too: only an Epic
-    # has children.
+    # Any task may parent any task: a plain task is a container the moment
+    # something names it.
     local plain=$(new_task_id "Not a container")
     sleep 1
-    set +e
-    kind_out=$(run_tatr new "child of a task" -P "$plain" 2>&1); local kind_code=$?
-    set -e
-    [ $kind_code -ne 0 ] || ok=0
-    echo "$kind_out" | grep -q "is KIND: TASK, not EPIC" || ok=0
-
-    # The real shapes go through, and the backlog stays clean.
-    local epic=$(new_task_id "The container" -k EPIC)
+    local parent=$(new_task_id "The container")
     sleep 1
-    local story=$(new_task_id "The story" -k STORY -P "$epic" -d "$plain")
-    [ -n "$story" ] || ok=0
+    local child=$(new_task_id "The child" -P "$parent" -d "$plain")
+    [ -n "$child" ] || ok=0
     set +e
     local check_out
     check_out=$(run_tatr check 2>&1); local check_code=$?
@@ -4437,18 +4404,18 @@ test_new_refuses_broken_relationships() {
     # `edit` is held to the same rule for the references it SETS...
     set +e
     local edit_out
-    edit_out=$(run_tatr edit "$story" -d 20260101-999999 2>&1); local edit_code=$?
+    edit_out=$(run_tatr edit "$child" -d 20260101-999999 2>&1); local edit_code=$?
     set -e
     [ $edit_code -ne 0 ] || ok=0
     echo "$edit_out" | grep -q "Dependency '20260101-999999' does not exist" || ok=0
 
     # ... and an edit that touches something else is not blocked by it. A
     # dangling edge still gets in by hand, which is how one really appears.
-    sed -i "s|^- DEPENDS ON: .*|- DEPENDS ON: 20260101-999999|" "tasks/$story/TASK.md"
-    before=$(grep -c '' "tasks/$story/TASK.md")
-    run_tatr edit "$story" -p 42 > /dev/null 2>&1 || ok=0
-    grep -q "^- PRIORITY: 42$" "tasks/$story/TASK.md" || ok=0
-    grep -q "^- DEPENDS ON: 20260101-999999$" "tasks/$story/TASK.md" || ok=0
+    sed -i "s|^- DEPENDS ON: .*|- DEPENDS ON: 20260101-999999|" "tasks/$child/TASK.md"
+    before=$(grep -c '' "tasks/$child/TASK.md")
+    run_tatr edit "$child" -p 42 > /dev/null 2>&1 || ok=0
+    grep -q "^- PRIORITY: 42$" "tasks/$child/TASK.md" || ok=0
+    grep -q "^- DEPENDS ON: 20260101-999999$" "tasks/$child/TASK.md" || ok=0
     # ... and the lint is what reports it.
     set +e
     local dangling_check
@@ -4459,7 +4426,7 @@ test_new_refuses_broken_relationships() {
     if [ $ok -eq 1 ]; then
         pass_test
     else
-        fail_test "orphan($orphan_code): $orphan_out | parent($parent_code): $parent_out | dep($dep_code): $dep_out | kind($kind_code): $kind_out | edit($edit_code): $edit_out | check($check_code): $check_out"
+        fail_test "kind($kind_code): $kind_out | parent($parent_code): $parent_out | dep($dep_code): $dep_out | edit($edit_code): $edit_out | check($check_code): $check_out"
     fi
 }
 
@@ -4468,7 +4435,7 @@ test_frontier_ready_query() {
     local test_dir=$(create_test_dir)
     local ok=1
 
-    write_graph_task "$test_dir" "20260101-410000" "-" "EPIC" "-" 0 "The container" <<'META'
+    write_graph_task "$test_dir" "20260101-410000" "-" "-" 0 "The container" <<'META'
 META
     # The IDs are deliberately laid out so that directory order (which is ID
     # order) is NOT the expected output order: the CLAIMED row sorts last but
@@ -4477,26 +4444,26 @@ META
     # frontier from an unsorted one.
     #
     # A CLOSED child is not open work.
-    write_graph_task "$test_dir" "20260101-410001" "DONE" "STORY" "-" 50 "Landed already" <<'META'
+    write_graph_task "$test_dir" "20260101-410001" "DONE" "-" 50 "Landed already" <<'META'
 - PARENT: 20260101-410000
 META
-    write_graph_task "$test_dir" "20260101-410002" "-" "STORY" "PLANNING" 70 "Someone has it" <<'META'
+    write_graph_task "$test_dir" "20260101-410002" "-" "PLANNING" 70 "Someone has it" <<'META'
 - PARENT: 20260101-410000
 META
     # Blocked on one open and one CLOSED dependency: only the open one is a
     # blocker, so only it may appear in blocked-by.
-    write_graph_task "$test_dir" "20260101-410003" "-" "STORY" "PLANNING" 80 "Blocked on one of two" <<'META'
+    write_graph_task "$test_dir" "20260101-410003" "-" "PLANNING" 80 "Blocked on one of two" <<'META'
 - PARENT: 20260101-410000
 - DEPENDS ON: 20260101-410005, 20260101-410001
 META
-    write_graph_task "$test_dir" "20260101-410004" "-" "STORY" "PLANNING" 10 "Ready, low priority" <<'META'
+    write_graph_task "$test_dir" "20260101-410004" "-" "PLANNING" 10 "Ready, low priority" <<'META'
 - PARENT: 20260101-410000
 META
-    write_graph_task "$test_dir" "20260101-410005" "-" "STORY" "PLANNING" 90 "Ready, high priority" <<'META'
+    write_graph_task "$test_dir" "20260101-410005" "-" "PLANNING" 90 "Ready, high priority" <<'META'
 - PARENT: 20260101-410000
 META
-    # A task that is not a child of this Epic must not appear at all.
-    write_graph_task "$test_dir" "20260101-410006" "-" "TASK" "-" 99 "Not a child" <<'META'
+    # A task that is not a child of this one must not appear at all.
+    write_graph_task "$test_dir" "20260101-410006" "-" "-" 99 "Not a child" <<'META'
 META
 
     TATR_SESSION=agent-x run_tatr -r "$test_dir" claim 20260101-410002 > /dev/null 2>&1 || ok=0
@@ -4536,11 +4503,11 @@ EXPECTED
     # READY is the whole query, not just the dependency half: a child whose
     # plan was never approved, and one whose cursor already entered WORKING,
     # are both work you cannot pick up.
-    write_graph_task "$test_dir" "20260101-410007" "-" "STORY" "-" 95 "Never planned" <<'META'
+    write_graph_task "$test_dir" "20260101-410007" "-" "-" 95 "Never planned" <<'META'
 - PARENT: 20260101-410000
 META
     sed -i 's/^- GATES: -$/- GATES: -/' "$test_dir/tasks/20260101-410007/TASK.md"
-    write_graph_task "$test_dir" "20260101-410008" "-" "STORY" "WORKING" 94 "Already started" <<'META'
+    write_graph_task "$test_dir" "20260101-410008" "-" "WORKING" 94 "Already started" <<'META'
 - PARENT: 20260101-410000
 META
     set +e
@@ -4550,19 +4517,27 @@ META
     echo "$widened" | grep -q "^BLOCKED	20260101-410007	p95	-	Never planned$" || ok=0
     echo "$widened" | grep -q "^BLOCKED	20260101-410008	p94	WORKING+PLAN	Already started$" || ok=0
 
-    # A frontier is the open work under a CONTAINER; asking a plain task is an
-    # error rather than an empty list that looks like "nothing to do".
+    # Any task may have children, so any task may be asked for a frontier. One
+    # nothing names prints nothing and succeeds - an empty frontier is the
+    # honest answer, not an error.
     set +e
-    local not_epic
-    not_epic=$(run_tatr -r "$test_dir" frontier 20260101-410006 2>&1); local not_epic_code=$?
+    local childless
+    childless=$(run_tatr -r "$test_dir" frontier 20260101-410006 2>&1); local childless_code=$?
     set -e
-    [ $not_epic_code -eq 1 ] || ok=0
-    echo "$not_epic" | grep -q "is KIND: TASK, not EPIC" || ok=0
+    [ $childless_code -eq 0 ] || ok=0
+    [ -z "$childless" ] || ok=0
+
+    # A task that does not exist is still an error.
+    set +e
+    local missing
+    missing=$(run_tatr -r "$test_dir" frontier 20260101-499999 2>&1); local missing_code=$?
+    set -e
+    [ $missing_code -ne 0 ] || ok=0
 
     if [ $ok -eq 1 ]; then
         pass_test
     else
-        fail_test "Exit: $exit_code, output: [$output] | not-epic($not_epic_code): $not_epic"
+        fail_test "Exit: $exit_code, output: [$output] | childless($childless_code): $childless | missing($missing_code): $missing"
     fi
 }
 
@@ -4571,11 +4546,11 @@ test_atomic_claim() {
     local test_dir=$(create_test_dir)
     local ok=1
 
-    write_graph_task "$test_dir" "20260101-420000" "-" "TASK" "PLANNING" 10 "Contended" <<'META'
+    write_graph_task "$test_dir" "20260101-420000" "-" "PLANNING" 10 "Contended" <<'META'
 META
     # A second task at PLANNED, so the unattributable-claim case is tested on a
     # start that is legal rather than on one the state machine refuses anyway.
-    write_graph_task "$test_dir" "20260101-420001" "-" "TASK" "PLANNING" 10 "Ghost-claimed" <<'META'
+    write_graph_task "$test_dir" "20260101-420001" "-" "PLANNING" 10 "Ghost-claimed" <<'META'
 META
 
     # Contention: many claimants race for one task and exactly one may win.
@@ -4714,7 +4689,7 @@ test_claim_session_identity() {
     local test_dir=$(create_test_dir)
     local ok=1
 
-    write_graph_task "$test_dir" "20260101-450000" "-" "TASK" "PLANNING" 10 "Subdir claim" <<'META'
+    write_graph_task "$test_dir" "20260101-450000" "-" "PLANNING" 10 "Subdir claim" <<'META'
 META
     mkdir -p "$test_dir/deep/nested"
 
@@ -4771,7 +4746,7 @@ test_claims_across_worktrees() {
     # never fire - a claim taken in one would simply be invisible in the other.
     local dir
     for dir in "$shared" "$worktree"; do
-        write_graph_task "$dir" "20260101-440000" "-" "TASK" "PLANNING" 10 "Shared work" <<'META'
+        write_graph_task "$dir" "20260101-440000" "-" "PLANNING" 10 "Shared work" <<'META'
 META
     done
     export TATR_CLAIMS_DIR="$shared/tasks/.claims"
@@ -4814,34 +4789,34 @@ META
     fi
 }
 
-test_epic_lifecycle_guards() {
-    log_test "flow (blocked starts and open-child Epic closes are refused)"
+test_parent_lifecycle_guards() {
+    log_test "flow (blocked starts and open-child parent closes are refused)"
     local test_dir=$(create_test_dir)
     cd "$test_dir"
     mkdir -p tasks
     local ok=1
 
-    local epic=$(new_task_id "The container" -k EPIC)
+    local parent=$(new_task_id "The container")
     sleep 1
-    local child=$(new_task_id "The child" -k STORY -P "$epic")
+    local child=$(new_task_id "The child" -P "$parent")
     sleep 1
-    local blocked=$(new_task_id "Blocked child" -k STORY -P "$epic" -d "$child")
+    local blocked=$(new_task_id "Blocked child" -P "$parent" -d "$child")
 
-    drive_task_to "$epic" COMPOUNDING || ok=0
+    drive_task_to "$parent" COMPOUNDING || ok=0
 
-    # An Epic's work is its children's: it cannot close while any is open, and
+    # A parent's work is its children's: it cannot close while any is open, and
     # the refusal names every one of them rather than the first.
     set +e
     local close_out
-    close_out=$(run_tatr flow "$epic" 2>&1); local close_code=$?
+    close_out=$(run_tatr flow "$parent" 2>&1); local close_code=$?
     set -e
     [ $close_code -ne 0 ] || ok=0
     echo "$close_out" | grep -q "child $child is not CLOSED" || ok=0
     echo "$close_out" | grep -q "child $blocked is not CLOSED" || ok=0
-    [ "$(activity_of "$epic")" = "COMPOUNDING" ] || ok=0
-    [ "$(resolution_of "$epic")" = "-" ] || ok=0
+    [ "$(activity_of "$parent")" = "COMPOUNDING" ] || ok=0
+    [ "$(resolution_of "$parent")" = "-" ] || ok=0
 
-    # A blocked Story cannot enter WORKING over its open blocker.
+    # A blocked child cannot enter WORKING over its open blocker.
     drive_task_to "$blocked" PLANNED || ok=0
     set +e
     local start_out
@@ -4850,11 +4825,12 @@ test_epic_lifecycle_guards() {
     [ $start_code -ne 0 ] || ok=0
     echo "$start_out" | grep -q "dependency $child is not CLOSED" || ok=0
 
-    # With every child CLOSED, the Epic closes.
+    # With every child CLOSED, the parent closes - once it has written the
+    # records the close gate asks of every task.
     drive_task_to "$child" DONE || ok=0
     drive_task_to "$blocked" DONE || ok=0
-    run_tatr flow "$epic" > /dev/null 2>&1 || ok=0
-    [ "$(resolution_of "$epic")" = "DONE" ] || ok=0
+    drive_task_to "$parent" DONE || ok=0
+    [ "$(resolution_of "$parent")" = "DONE" ] || ok=0
 
     # And the state the lifecycle produced is one the lint calls clean.
     set +e
@@ -4876,9 +4852,9 @@ test_phase_context_selection() {
     local test_dir=$(create_test_dir)
     local ok=1
 
-    write_graph_task "$test_dir" "20260101-430000" "-" "EPIC" "-" 0 "The container" <<'META'
+    write_graph_task "$test_dir" "20260101-430000" "-" "-" 0 "The container" <<'META'
 META
-    write_graph_task "$test_dir" "20260101-430001" "-" "STORY" "WORKING" 10 "The story" <<'META'
+    write_graph_task "$test_dir" "20260101-430001" "-" "WORKING" 10 "The child" <<'META'
 - PARENT: 20260101-430000
 META
     run_tatr -r "$test_dir" scaffold 20260101-430001 REVIEW > /dev/null 2>&1 || ok=0
@@ -4894,10 +4870,10 @@ META
     [ "$(phase_paths compound | tr '\n' ' ')" = "TASK.md REVIEW.md RETRO.md " ] || ok=0
     [ "$(phase_paths landing | tr '\n' ' ')" = "TASK.md REVIEW.md RETRO.md " ] || ok=0
     [ "$(phase_paths work | tr '\n' ' ')" = "TASK.md DECISION.md REVIEW.md " ] || ok=0
-    # Understanding looks outward: a Story cannot be understood without the
-    # Epic that gave it its shape, so the parent's record is in the set.
-    [ "$(phase_paths understand | tr '\n' ' ')" = "TASK.md SPIKE.md DECISION.md TASK.md " ] || ok=0
-    [ "$(phase_paths resume | tr '\n' ' ')" = "TASK.md SPIKE.md DECISION.md REVIEW.md RETRO.md TASK.md " ] || ok=0
+    # Understanding looks outward: a child cannot be understood without the
+    # task that gave it its shape, so the parent's record is in the set.
+    [ "$(phase_paths understand | tr '\n' ' ')" = "TASK.md DECISION.md TASK.md " ] || ok=0
+    [ "$(phase_paths resume | tr '\n' ' ')" = "TASK.md DECISION.md REVIEW.md RETRO.md TASK.md " ] || ok=0
 
     # Presence is reported, and a record the phase owns is listed whether or
     # not it exists yet - the caller needs the path in order to create it.
@@ -4918,7 +4894,7 @@ META
     if echo "$review_out" | grep -q "^# "; then ok=0; fi
 
     # A task with no parent does not get a phantom parent row.
-    [ "$(run_tatr -r "$test_dir" context 20260101-430000 --phase understand 2>/dev/null | wc -l)" -eq 3 ] || ok=0
+    [ "$(run_tatr -r "$test_dir" context 20260101-430000 --phase understand 2>/dev/null | wc -l)" -eq 2 ] || ok=0
 
     # An unknown phase is refused by name.
     set +e
@@ -4984,6 +4960,7 @@ test_transition_cannot_mint_a_flagged_record() {
     # not later, when `check` would already be flagging a gated record the tool
     # itself minted.
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0
+    run_tatr scaffold "$id" DECISION > /dev/null 2>&1 || ok=0
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0
     [ "$(activity_of "$id")" = "PLANNING" ] || ok=0
     set +e
@@ -5043,8 +5020,8 @@ test_transition_cannot_mint_a_flagged_record() {
     run_tatr flow "$id" > /dev/null 2>&1 || ok=0   # COMPOUNDING
 
     # ... and likewise every DECISION.md rule, not only its STATUS value: a
-    # supersede link that resolves nowhere is `dangling-supersede` on both sides.
-    run_tatr scaffold "$id" DECISION > /dev/null 2>&1 || ok=0
+    # supersede link that resolves nowhere is `dangling-supersede` on both
+    # sides. The record itself has been there since leaving UNDERSTANDING.
     sed -i 's|^- STATUS: ACCEPTED$|- STATUS: SUPERSEDED by tasks/19990101-000000/DECISION.md|' \
         "$dir/DECISION.md"
 
@@ -5256,6 +5233,7 @@ test_new_and_edit_fields
 test_status_is_derived
 test_filter_lifecycle_fields
 test_flow_advances_and_records_gates
+test_flow_understanding_requires_a_decision
 test_flow_half_succeeds_when_blocked
 test_flow_dry_run_probes_preconditions
 test_rewind_clear_table
@@ -5264,7 +5242,7 @@ test_close_resolutions
 test_reopen_restores_cursor
 test_reopen_clears_dropped_reason
 test_transition_close_is_atomic
-test_transition_epic_exemptions
+test_transition_container_is_not_exempt
 test_rm_existing
 test_rm_nonempty_dir
 test_rm_preserves_siblings
@@ -5296,7 +5274,7 @@ test_check_exit_codes
 test_check_scanner_edges
 test_check_missing_artifacts
 test_check_working_without_plan_gate
-test_check_epic_exemptions
+test_check_container_is_not_exempt
 test_check_bad_decision_status
 test_check_good_decision_status
 test_check_dangling_supersede
@@ -5308,20 +5286,19 @@ test_check_record_schemas
 test_check_backlog_owes_no_plan_sections
 test_check_review_approval_consistency
 test_check_dod_proof_syntax
-test_check_spike_records
 test_check_exemptions
 test_exemption_whole_task
 test_check_inconsistent_gates
 test_migrate_dry_run_writes_nothing
 test_migrate_maps_every_legacy_value
 test_proof_listing_does_not_execute
-test_epic_graph_validation
+test_task_graph_validation
 test_new_refuses_broken_relationships
 test_frontier_ready_query
 test_atomic_claim
 test_claim_session_identity
 test_claims_across_worktrees
-test_epic_lifecycle_guards
+test_parent_lifecycle_guards
 test_phase_context_selection
 test_existing_artifacts_are_classified
 test_transition_cannot_mint_a_flagged_record

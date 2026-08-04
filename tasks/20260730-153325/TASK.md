@@ -2,7 +2,6 @@
 
 - PRIORITY: 100
 - TAGS: feature, flow, schema, breaking
-- KIND: TASK
 - ACTIVITY: COMPOUNDING
 - GATES: PLAN REVIEW RETRO
 - RESOLUTION: DONE

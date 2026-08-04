@@ -2,7 +2,6 @@
 
 - PRIORITY: 70
 - TAGS: tatr, knowledge, lessons, migration, tooling
-- KIND: TASK
 - ACTIVITY: COMPOUNDING
 - GATES: PLAN REVIEW RETRO
 - RESOLUTION: DONE

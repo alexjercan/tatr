@@ -66,9 +66,9 @@ nix develop -c ./checker.sh --memcheck
 
 ## Agent workflow
 
-- Tracker/epics: `tasks/`; usage in `skills/tatr/SKILL.md`.
+- Tracker: `tasks/`; usage in `skills/tatr/SKILL.md`. Every record is a task; a container is a task others name as `PARENT`.
 - Examples/retention: `checker.sh`; retain task-specific evidence in `tasks/<id>/`.
 - Domain docs: `README.md`; implementation truth in `tatr.c`.
-- Research/network: offline-first; task research belongs in its scaffolded `SPIKE.md`.
+- Research/network: offline-first; task research belongs in the task's own `NOTES.md` and the decision it produced in `DECISION.md`.
 - Checks/records: `checker.sh`, `tatr check`, and scaffolded task records.
 - Knowledge: central repo `/home/alex/personal/agent-knowledge`; project=tatr; tags=tasks,c,workflow,agents. Advisory only; failed writes stay in RETRO.

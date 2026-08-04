@@ -2,7 +2,6 @@
 
 - PRIORITY: 95
 - TAGS: feature, lifecycle, breaking
-- KIND: TASK
 - ACTIVITY: COMPOUNDING
 - GATES: PLAN REVIEW RETRO
 - RESOLUTION: DONE

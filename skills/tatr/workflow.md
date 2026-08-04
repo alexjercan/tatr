@@ -3,7 +3,7 @@
 ## Plan
 
 - One cohesive request -> one task.
-- Split only for independently implementable work or explicit EPIC/release scope.
+- Split only for independently implementable work or an explicit container/release scope. A container is a task others name as PARENT, not a type.
 - Match project tags and relative priorities.
 - Record non-trivial follow-up work as tasks, not TODO comments.
 - Approval marker: the PLAN gate, recorded by `tatr flow <id>` out of PLANNING.
@@ -14,6 +14,7 @@
 2. `tatr show <id>`; read the task and relevant siblings.
 3. `tatr context <id> --phase <phase>`; read listed artifacts.
 4. `tatr flow <id>` until ACTIVITY is WORKING; resolve any named gate failure.
+   Leaving UNDERSTANDING needs `tatr scaffold <id> DECISION`, filled in.
 5. Record useful implementation notes in task artifacts.
 
 ## Finish
@@ -31,4 +32,4 @@
 - IDs: local-time seconds; same-second `new` fails. Retry after the second changes.
 - Impossible historical state: repair `TASK.md` by hand, then run `check`.
 - No repair command. `rewind --force` clears earned gates and nothing else does.
-- v0 record (`- FLOW STEP: `): every command refuses it; `tatr migrate --apply`.
+- Legacy record (`- STATUS: `, `- FLOW STEP: `, `- KIND: `): every command refuses it; `tatr migrate --apply`.

@@ -2,6 +2,57 @@
 
 All notable changes to tatr are documented here.
 
+## v1.1.0 - 2026-08-05
+
+`KIND` is removed. Every record under `tasks/` is a task: an epic, a story and
+a spike differ in what their title says and in how they are linked, not in what
+the tool does with them. This is a breaking change to the record format, the
+filter language, `new`/`edit` and the check rules; every existing record must be
+migrated with `tatr migrate --apply`.
+
+### Changed (breaking)
+
+- The record format. `- KIND: ` is gone, so a record reads `- PRIORITY: `,
+  `- TAGS: `, `- ACTIVITY: `, `- GATES: `, `- RESOLUTION: `, then the optional
+  `- DUPLICATE OF: `, `- PARENT: ` and `- DEPENDS ON: `. A record still
+  carrying `- KIND: ` is refused by every command that loads it, with a pointer
+  at `tatr migrate`.
+- `-k/--kind` is gone from `new` and `edit`. Both refuse the flag by name -
+  `'-k' was removed: KIND is not a field` - rather than as an unknown argument.
+- `:kind` is retired from the filter language and refused by name, following
+  `:flow_step` and `:plan_status`.
+- `tatr ls` no longer prints a `KIND: ` column.
+- `PARENT` is a plain hierarchy link: any task may parent any task. The
+  `bad-epic-relationship` rule is gone, and so is the `new`/`edit` refusal of a
+  parent that was not an Epic and of a Story without one.
+- Container exemptions are gone. A task other tasks name as their `PARENT` owes
+  the same records as anything else - `closed-missing-review`,
+  `closed-missing-retro`, `closed-unchecked` and `inconsistent-gates` all apply
+  to it. What survives is the close guard: a task cannot close as `DONE` while
+  a child of its own is open, and that now runs for every task rather than for
+  a declared kind.
+- Every `TASK.md` owes the same two sections once the `PLAN` gate is earned -
+  `## Steps` and `## Definition of Done`. The kind-specific section sets
+  (`## Done Means`/`## Child Tasks`, `## Question`) are gone.
+- `SPIKE.md` is no longer a schema record. `missing-spike-record`,
+  `bad-spike-status` and `dangling-seeded-task` are gone, `tatr scaffold` no
+  longer writes one, and `tatr context` no longer lists one. A `SPIKE.md` a
+  task carries is now an ordinary untyped note, like `NOTES.md`.
+- `tatr frontier <ID>` works on any task and no longer refuses a non-Epic. A
+  task nothing names as its parent has an empty frontier and exits 0.
+
+### Added
+
+- Leaving `UNDERSTANDING` requires a schema-clean `DECISION.md`: a task cannot
+  be planned before something records what it is for and which direction was
+  chosen. It earns no gate, so nothing is written down about having met it and
+  the edge asks again every time it is walked - including after a rewind. The
+  whole `DECISION.md` rule set runs, so the edge cannot mint a record the lint
+  would flag. `tatr flow --dry-run` predicts the refusal like any other.
+- `tatr migrate` converts v1 records too: it deletes the `- KIND: ` line and
+  keeps every other byte, reporting `<id>	KIND: <value> -> dropped`. It still
+  converts v0 records in the same pass, and remains dry-run by default.
+
 ## v1.0.1 - 2026-08-03
 
 ### Changed

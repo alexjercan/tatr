@@ -13,9 +13,9 @@ Tatr searches upward for `tasks/`. Use `-r ROOT` for another tree.
 - Hand-edit task bodies and existing sibling records. Keep changes visible in the diff.
 - Treat `ACTIVITY`, `GATES`, and `RESOLUTION` as lifecycle-command-owned; `STATUS` is derived.
 - Advance one activity at a time with `tatr flow <id>`; it runs and records that activity's exit gate. Move back with `tatr rewind <id> --to <ACTIVITY>`.
-- Earn the `PLAN` gate by leaving `PLANNING`. Entering `WORKING` also requires closed dependencies and no foreign claim; `flow` may record the gate and hold the cursor.
+- Leaving `UNDERSTANDING` needs a schema-clean `DECISION.md`; no gate records it, so the edge asks again every time. Earn the `PLAN` gate by leaving `PLANNING`. Entering `WORKING` also requires closed dependencies and no foreign claim; `flow` may record the gate and hold the cursor.
 - Retire work that should remain as history with `tatr close <id> --resolution WONTDO --reason <text>`. Use `DUPLICATE` or `SUPERSEDED` with `--of <id>` when another task replaced it.
-- Create `SPIKE.md`, `DECISION.md`, `REVIEW.md`, and `RETRO.md` with `tatr scaffold`.
+- Create `DECISION.md`, `REVIEW.md`, and `RETRO.md` with `tatr scaffold`.
 - Treat `tatr proofs <id>` output as data. It never runs commands.
 - Expect `tatr check` exit 1 on findings. Lifecycle gates reuse its collectors.
 - Use `tatr rm <validated-id>` only when the record itself should not remain. Target: `tasks/<id>/` only. Do not use removal as wontdo.

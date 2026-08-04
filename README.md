@@ -20,11 +20,12 @@ primarily a toy project inspired by Tsoding's streams.
 - **Human-readable IDs**: Each task gets a timestamp-based HUID (format: `YYYYMMDD-HHMMSS`)
 - **Metadata support**: Track status, priority, and tags for each task
 - **Guarded lifecycle**: a freely moving `ACTIVITY` cursor, an earned `GATES` set that only `tatr flow` writes, and a `RESOLUTION` that records why work stopped
-- **One record schema**: `tatr scaffold` writes the sibling records (SPIKE, DECISION, REVIEW, RETRO) from the same in-code table `tatr check` validates them against
+- **One record schema**: `tatr scaffold` writes the sibling records (DECISION, REVIEW, RETRO) from the same in-code table `tatr check` validates them against
 - **Structured DoD proofs**: `tatr proofs` prints each Definition of Done proof as data - tatr never executes any of it
-- **Epic graph**: `PARENT` and `DEPENDS ON` are validated as a graph - dangling links, duplicates, self-links and cycles are findings, not silent waits
-- **Parallel sessions**: `tatr frontier` shows the open work under an Epic, and `tatr claim` divides it between sessions with an atomic filesystem claim
-- **Phase context**: `tatr context <id> --phase <phase>` prints only the artifact paths one flow phase needs
+- **One kind of record**: every task is a task. An epic, a story or a spike is a title, not a type - the tool has no opinion about which is which
+- **Task graph**: `PARENT` and `DEPENDS ON` are validated as a graph - dangling links, duplicates, self-links and cycles are findings, not silent waits
+- **Parallel sessions**: `tatr frontier` shows the open work under any task, and `tatr claim` divides it between sessions with an atomic filesystem claim
+- **Phase context**: `tatr context <id> --phase <phase>` prints only the artifact paths one phase of work needs
 - **Full CRUD**: Create, show, edit, and remove tasks entirely from the CLI
 - **Flexible listing**: Sort by creation date, priority, or title, and filter with a query language
 - **Automation-friendly**: Non-interactive commands make it easy for scripts and agents to drive
@@ -108,8 +109,8 @@ tatr new "Fix memory leak in parser"
 # Create a task with metadata
 tatr new "Add unit tests" -p 80 -t testing,bug
 
-# Create a Story under an Epic, blocked on another task
-tatr new "Add the frontier view" -k STORY -P 20260730-153122 -d 20260730-153325
+# Create a child task under a container, blocked on another task
+tatr new "Add the frontier view" -P 20260730-153122 -d 20260730-153325
 
 # Create a task with the description body from a file (or '-' for stdin)
 tatr new "Refactor the loader" -p 60 -t refactor -b body.md
@@ -122,7 +123,6 @@ tatr -r /path/to/project new "Task title"
 - `-p, --priority <value>`: Set task priority (default: 0, higher values = higher priority)
 - `-t, --tags <value>...`: Comma-separated tags
 - `-b, --body-file <path>`: Read the description body from a file; `-` reads stdin
-- `-k, --kind <value>`: Set kind (TASK, EPIC, STORY, SPIKE; default: TASK)
 - `-P, --parent <id>`: Set the parent task ID
 - `-d, --depends-on <id>...`: Set the dependency task IDs
 
@@ -131,16 +131,18 @@ empty value clears an optional relationship field: `tatr edit <id> -P ""` drops
 the parent and `-d ""` drops every dependency.
 
 Relationships are checked before the record is written, so `new` cannot create a
-task that `tatr check` would flag the moment it exists: `-k STORY` requires a
-`-P`, and every `-P`/`-d` must name a task that exists, with `-P` naming a
-`KIND: EPIC`. A refused create creates nothing at all.
+task that `tatr check` would flag the moment it exists: every `-P`/`-d` must
+name a task that exists. Any task may be any task's parent - being a container
+is having children, not declaring a type. A refused create creates nothing at
+all.
 
 ```console
-$ tatr new "Add the frontier view" -k STORY
-ERROR: A KIND: STORY belongs to an Epic: pass -P/--parent <epic id>
-
 $ tatr new "Add the frontier view" -P 20260101-999999
 ERROR: Parent '20260101-999999' does not exist
+
+$ tatr new "Add the frontier view" -k STORY
+ERROR: '-k' was removed: KIND is not a field: every record under tasks/ is a task
+  say what a task is in its title; a container is a task others name as their PARENT
 ```
 
 `edit` applies the same rule to the references it is asked to set. An edit that
@@ -187,8 +189,8 @@ needs correcting. Scripts chaining `tatr ls && ...` should account for that.
 
 The `-f` flag takes a small query language over task fields. Fields are written
 with a leading colon, combined with operators and grouped with parentheses.
-The fields are `:status`, `:priority`, `:title`, `:tags`, `:kind`,
-`:activity`, `:gates`, `:resolution`, `:parent` and `:depends`:
+The fields are `:status`, `:priority`, `:title`, `:tags`, `:activity`,
+`:gates`, `:resolution`, `:parent` and `:depends`:
 
 ```bash
 # Only open tasks
@@ -200,25 +202,27 @@ tatr ls -f ':tags contains feature'
 # Open feature tasks, combining conditions
 tatr ls -f '(:status eq OPEN) and (:tags contains feature)'
 
-# Every Epic container
-tatr ls -f ':kind eq EPIC'
-
 # Approved work that has not been picked up yet
 tatr ls -f '(:gates contains PLAN) and (:activity in [UNDERSTANDING, PLANNING])'
 
 # Everything that was abandoned rather than finished
 tatr ls -f ':resolution in [WONTDO, DUPLICATE, SUPERSEDED]'
 
-# The children of one Epic, and everything blocked on one task
+# The children of one container, and everything blocked on one task
 tatr ls -f ':parent eq 20260730-153122'
 tatr ls -f ':depends contains 20260730-153325'
 ```
 
-The enum-valued fields (`:status`, `:kind`, `:activity`, `:resolution`) take
-`eq` and `in`; `:parent` takes `eq`; `:tags`, `:depends` and `:gates` take
-`contains`. `:activity` and `:resolution` are nullable, so a record that leaves
-one unset matches no value of it. The retired `:flow_step` and `:plan_status`
-are refused by name with a pointer at the replacement.
+The enum-valued fields (`:status`, `:activity`, `:resolution`) take `eq` and
+`in`; `:parent` takes `eq`; `:tags`, `:depends` and `:gates` take `contains`.
+`:activity` and `:resolution` are nullable, so a record that leaves one unset
+matches no value of it. The retired `:kind`, `:flow_step` and `:plan_status`
+are refused by name with a pointer at the replacement:
+
+```console
+$ tatr ls -f ':kind eq EPIC'
+ERROR: Filter error: line 1, col 1: field ':kind' was retired; KIND was removed: every task is a task; match the title with ':title contains <text>' or the hierarchy with ':parent'
+```
 
 Supported operators include `eq`, `contains`, `in` (with `[...]` lists), and the
 boolean connectives `and`, `or`, `not`. Literal values may contain `.` and `-`
@@ -228,9 +232,9 @@ recursive mode, and applies per section in recursive mode.
 
 **Output format:**
 ```
-tasks/20260331-144635/TASK.md: [PRIORITY: 100, KIND: TASK, STATUS: CLOSED, ACTIVITY: COMPOUNDING, TAGS: feature] Implement filter system
-tasks/20260330-202358/TASK.md: [PRIORITY: 80, KIND: STORY, STATUS: IN_PROGRESS, ACTIVITY: WORKING, TAGS: testing, bug] Add unit tests
-tasks/20260329-123700/TASK.md: [PRIORITY: 0, KIND: TASK, STATUS: OPEN, ACTIVITY: -, TAGS: ] Fix memory leak in parser
+tasks/20260331-144635/TASK.md: [PRIORITY: 100, STATUS: CLOSED, ACTIVITY: COMPOUNDING, TAGS: feature] Implement filter system
+tasks/20260330-202358/TASK.md: [PRIORITY: 80, STATUS: IN_PROGRESS, ACTIVITY: WORKING, TAGS: testing, bug] Add unit tests
+tasks/20260329-123700/TASK.md: [PRIORITY: 0, STATUS: OPEN, ACTIVITY: -, TAGS: ] Fix memory leak in parser
 ```
 
 ### Showing a Task
@@ -258,15 +262,14 @@ tatr edit 20260331-144635 -p 90 -T "Implement query filter language"
 # Replace the tag set (edit replaces tags, it does not merge them)
 tatr edit 20260331-144635 -t feature -t parser
 
-# Re-home a Story and replace its dependencies
-tatr edit 20260331-144635 -k STORY -P 20260730-153122 -d 20260730-153325
+# Re-home a child task and replace its dependencies
+tatr edit 20260331-144635 -P 20260730-153122 -d 20260730-153325
 ```
 
 **Options:**
 - `-T, --title <value>`: New task title
 - `-p, --priority <value>`: New priority (non-negative integer)
 - `-t, --tags <value>...`: New tags, replacing the existing set
-- `-k, --kind <value>`: New kind (TASK, EPIC, STORY, SPIKE)
 - `-P, --parent <id>`: New parent task ID (empty value clears it)
 - `-d, --depends-on <id>...`: New dependency task IDs (empty value clears them)
 
@@ -282,6 +285,9 @@ ERROR: '--status' was removed: STATUS is not settable through `new` or `edit`
 $ tatr edit 20260730-185007 --activity WORKING
 ERROR: '--activity' was removed: ACTIVITY is not settable through `new` or `edit`
   move the cursor with `tatr flow <ID>` or `tatr rewind <ID> --to <ACTIVITY>`
+$ tatr edit 20260730-185007 --kind EPIC
+ERROR: '--kind' was removed: KIND is not a field: every record under tasks/ is a task
+  say what a task is in its title; a container is a task others name as their PARENT
 ```
 
 (The transcripts here elide the `tatr.c:<line>:` source location every
@@ -337,16 +343,21 @@ prints one.
 
 | Leaving       | Earns    | Requires                                                                                       |
 | ------------- | -------- | ---------------------------------------------------------------------------------------------- |
-| UNDERSTANDING | -        | nothing: picking a task up proves nothing                                                        |
-| PLANNING      | `PLAN`   | `## Steps` and `## Definition of Done` well-formed, every DoD item carrying a proof, a graph position whose references resolve, and any `SPIKE.md` held to its schema |
+| UNDERSTANDING | -        | a schema-clean `DECISION.md`: what the work is for, and which direction was chosen               |
+| PLANNING      | `PLAN`   | `## Steps` and `## Definition of Done` well-formed, every DoD item carrying a proof, and a graph position whose references resolve |
 | WORKING       | -        | nothing: handing work to review costs nothing; leaving review is what is expensive               |
 | REVIEWING     | `REVIEW` | a `REVIEW.md` whose latest `- VERDICT:` is APPROVE, with no unticked BLOCKER or MAJOR finding    |
 | COMPOUNDING   | `RETRO`  | a schema-clean `RETRO.md`, plus the close gate below                                             |
 
+Leaving UNDERSTANDING is the one edge with a requirement and no gate. Nothing
+is recorded about having met it, so the edge asks again every time it is walked
+- a rewind to `UNDERSTANDING` and a fresh advance re-reads the `DECISION.md`
+rather than trusting a memory nothing wrote down.
+
 The close gate, which only `--resolution DONE` runs, asks what "done" means
 beyond the individual gates: all three gates actually earned, zero unchecked
 items under `## Steps`, a valid `- STATUS:` on any `DECISION.md` the task
-carries, and every child of an Epic CLOSED. `tatr flow` out of `COMPOUNDING`
+carries, and every child of the task CLOSED. `tatr flow` out of `COMPOUNDING`
 earns `RETRO` and closes as `DONE` in one motion, so the happy path stays one
 verb; `tatr close --resolution DONE` does the same thing for a caller who wants
 to name it.
@@ -355,12 +366,11 @@ The other three resolutions run no gate at all and are legal from any activity.
 Anything can be abandoned at any time, and demanding proof before letting go of
 a task is exactly backward.
 
-`KIND: EPIC` containers are exempt from exactly what `tatr check` already
-exempts them from - review presence, retro presence, unchecked Steps and
-`inconsistent-gates` - because an Epic's record lives in its children. Their own
-sections, their dependencies, any `REVIEW.md` they do carry and their
-`DECISION.md` are checked like anyone else's, and every child must be CLOSED
-before the container may be.
+Nothing is exempt from any of this. A container - a task others name as their
+`PARENT` - is still a task: it owes the same sections, the same review and the
+same retro as anything else, and on top of that it cannot close while a child
+of its own is open. A record that genuinely should not be held to a rule says so
+in `tasks/EXEMPTIONS.md`, where the waiver is visible and reviewable.
 
 **A refused gate writes nothing.** Every precondition is evaluated before
 anything is mutated, and all unmet ones are reported rather than one per round
@@ -371,6 +381,12 @@ refusal it predicts, tensed:
 ```console
 $ tatr flow 20260802-211009
 Task 20260802-211009 moved - -> UNDERSTANDING (STATUS: IN_PROGRESS)
+$ tatr flow 20260802-211009
+ERROR: Refusing to advance 20260802-211009 from UNDERSTANDING: 1 precondition(s) not met
+  - there is no DECISION.md: the understanding has not been recorded; write one with `tatr scaffold 20260802-211009 DECISION`
+  Record unchanged.
+$ tatr scaffold 20260802-211009 DECISION
+tasks/20260802-211009/DECISION.md	DECISION
 $ tatr flow 20260802-211009
 Task 20260802-211009 moved UNDERSTANDING -> PLANNING (STATUS: IN_PROGRESS)
 $ tatr flow 20260802-211009
@@ -493,7 +509,7 @@ went: not deleted, derived.
 READY == GATES contains PLAN and ACTIVITY < WORKING and deps CLOSED and unclaimed
 ```
 
-[`tatr frontier`](#working-an-epic-in-parallel) answers that query.
+[`tatr frontier`](#working-a-container-in-parallel) answers that query.
 
 **Options:**
 - `flow`: `-n, --dry-run` probes the advance - it evaluates every precondition
@@ -507,15 +523,18 @@ would flag: both read the same artifacts through the same helpers. A record that
 is already in the wrong state is corrected by hand in `TASK.md`, where the fix
 shows up in the diff and a reviewer sees it.
 
-### Migrating v0 Records
+### Migrating Legacy Records
 
-The record format changed in v1.0.0. Every command refuses a record that still
-carries `- FLOW STEP: `, so the migration is total rather than opt-in - an
-unmigrated record is not ignored, it is unreadable:
+The record format changed twice: v1.0.0 replaced the `FLOW STEP` chain, and
+v1.1.0 removed `KIND`. Every command refuses a record that still carries
+`- STATUS: `, `- FLOW STEP: ` or `- KIND: `, so each migration is total rather
+than opt-in - an unmigrated record is not ignored, it is unreadable:
 
 ```console
 $ tatr show 20260101-090000
 ERROR: task_deserialize: this record is in the v0 format (it still carries '- STATUS: '); run `tatr migrate --apply` to convert it
+$ tatr show 20260101-091500
+ERROR: task_deserialize: this record still carries '- KIND: ' (KIND was removed: every task is a task); run `tatr migrate --apply` to convert it
 ```
 
 `tatr migrate` is dry-run by default and prints one line per record it would
@@ -524,10 +543,12 @@ change:
 ```console
 $ tatr migrate
 20260101-090000	FLOW STEP: PLANNED, PLAN STATUS: APPROVED -> ACTIVITY: PLANNING, GATES: PLAN, RESOLUTION: -
-1 record(s) would change; nothing was written. Re-run with --apply.
+20260101-091500	KIND: EPIC -> dropped
+2 record(s) would change; nothing was written. Re-run with --apply.
 $ tatr migrate --apply
 20260101-090000	FLOW STEP: PLANNED, PLAN STATUS: APPROVED -> ACTIVITY: PLANNING, GATES: PLAN, RESOLUTION: -
-1 record(s) migrated
+20260101-091500	KIND: EPIC -> dropped
+2 record(s) migrated
 ```
 
 The mapping is record-local, so the command works unchanged in any repository:
@@ -544,12 +565,15 @@ The mapping is record-local, so the command works unchanged in any repository:
 | `- PLAN STATUS: DRAFT` or `NOT_REQUIRED` | no `PLAN` gate                     |
 | `REVIEW.md` with a latest APPROVE | the `REVIEW` gate                         |
 | `RETRO.md` present              | the `RETRO` gate                            |
+| `- KIND: <any>`                 | dropped; there is one kind of record        |
 
 Only metadata headers move: no `REVIEW.md` or `RETRO.md` body is rewritten. A
-schema version bump is a different thing from backfilling history.
+schema version bump is a different thing from backfilling history. A v1 record
+is rewritten line-wise - the `- KIND: ` line is deleted and every other byte is
+kept - so a migration cannot quietly reformat a body.
 
-`tatr migrate` is the only v0-format knowledge in the v1 binary, and it is
-removed again in v1.1.0.
+`tatr migrate` is the only legacy-format knowledge in the binary, and it is
+quarantined there on purpose.
 
 ### Removing a Task
 
@@ -576,8 +600,8 @@ tatr check 20260331-144635    # lint one task
 **Default rules:**
 - `bad-record-schema`: a record does not match its schema - the wrong title
   prefix, a missing or empty required `- KEY:` header field, or a missing or
-  empty required `## ` section. Applies to `TASK.md` (kind-specific sections,
-  see below), `SPIKE.md`, `DECISION.md`, `REVIEW.md` and `RETRO.md`.
+  empty required `## ` section. Applies to `TASK.md` (see below),
+  `DECISION.md`, `REVIEW.md` and `RETRO.md`.
 - `bad-review-round`: a `REVIEW.md` has no `## Round 1` heading, or its rounds
   are not numbered from 1 without gaps.
 - `bad-verdict`: a review round has no `- VERDICT:` line, or one outside
@@ -590,11 +614,6 @@ tatr check 20260331-144635    # lint one task
 - `bad-proof-syntax`: a `## Definition of Done` item names no `test:`, `cmd:`
   or `manual:` proof. A wrapped bullet's continuation lines count as part of
   the item.
-- `missing-spike-record`: a planned `KIND: SPIKE` task has no `SPIKE.md`.
-- `bad-spike-status`: a `SPIKE.md` `- STATUS:` value outside
-  RECOMMENDED|INCONCLUSIVE|DROPPED.
-- `dangling-seeded-task`: a task ID under a `SPIKE.md`'s `## Next steps`
-  section has no `TASK.md`.
 - `dangling-decision-task`: a `DECISION.md`'s `- TASK:` pointer is not a task
   ID, or names a task that does not exist.
 - `nonreciprocal-supersede`: a supersede link resolves in only one direction -
@@ -609,8 +628,6 @@ tatr check 20260331-144635    # lint one task
 - `parent-cycle` / `dependency-cycle`: following `PARENT` or `DEPENDS ON` from
   the task returns to it. Every member of a cycle is reported; a task merely
   downstream of one is not.
-- `bad-epic-relationship`: a `PARENT` that does not name a `KIND: EPIC` record,
-  or a `KIND: STORY` with no parent at all.
 - `unused-exemption`: an entry in `tasks/EXEMPTIONS.md` never fired on a full
   scan (reported against the task it names).
 - `closed-unchecked`: a `RESOLUTION: DONE` task still has unchecked `- [ ]`
@@ -624,7 +641,6 @@ tatr check 20260331-144635    # lint one task
   single chain made this unrepresentable by conflating position with proof;
   two free axes can disagree, so a rule has to say so. Work started without an
   approved plan is the `PLANNING` case of this rule and has no rule of its own.
-  `KIND: EPIC` containers are exempt.
 - `dangling-duplicate-of`: a `- DUPLICATE OF: ` that names the task itself or
   a task that does not exist.
 - `dropped-missing-reason`: a `RESOLUTION: WONTDO` task has no non-empty
@@ -635,39 +651,33 @@ tatr check 20260331-144635    # lint one task
   BLOCKER|MAJOR|MINOR|NIT.
 - `malformed-header`: TASK.md is missing/unreadable, or its title and metadata
   block do not parse. This covers every invalid metadata value: the parser
-  validates the exact token it consumes, so `- ACTIVITY: PLANNED`,
-  `- KIND: EPICS`, a trailing space after a value or a CRLF tail all land
-  here rather than in a rule of their own. A record still carrying
-  `- FLOW STEP: ` is a v0 record and lands here too; `tatr migrate` is the fix.
+  validates the exact token it consumes, so `- ACTIVITY: PLANNED`, a trailing
+  space after a value or a CRLF tail all land here rather than in a rule of
+  their own. A record still carrying `- FLOW STEP: ` or `- KIND: ` is a legacy
+  record and lands here too; `tatr migrate` is the fix.
 - `bad-decision-status`: a task's `DECISION.md` (when present) has a `- STATUS:`
   value that is not `ACCEPTED` nor `SUPERSEDED by <ref>`, or has no STATUS line.
 - `dangling-supersede`: a `DECISION.md` supersede reference - in a
   `SUPERSEDED by <ref>` status or a `- Supersedes: <ref>` line - does not
   resolve to an existing `tasks/<id>/DECISION.md`.
 
-The plan-gate requirement applies only once an ordinary task's cursor is past
+The plan-gate requirement applies only once a task's cursor is past
 `PLANNING`, so unstarted backlog items are never asked for one.
-`KIND: EPIC` marks an explicit /flow epic, sprint, version, release, or
-multi-feature container. The container's broader record lives in that task's
-own `TASK.md` sections, such as `## Epic`, `## Done Means`, `## Child Tasks`,
-`## Decisions`, and `## Manual Acceptance`; child tasks carry the per-task
-review and retro records. Do not create a container task for one requested
-thing. Containers are exempt from the record-completeness rules
-(`closed-missing-review`, `closed-missing-retro`), from `closed-unchecked`
-(a frozen container's step boxes stay verbatim, since superseded or dropped
-children are honest history), and from `inconsistent-gates` (the plan gate
-applies to the work tasks underneath it).
 
-The `DECISION.md` and `SPIKE.md` rules are presence-gated: a task without such
-a sibling is never flagged for its contents, so they need no migration of
-existing tasks.
+There is no container type and no container exemption. A task other tasks name
+as their `PARENT` is a task like any other, held to every rule here, and its
+children are simply the records that point at it. A record that genuinely
+should not be held to a rule says so in `tasks/EXEMPTIONS.md`.
+
+The `DECISION.md` rules are presence-gated for `check`: a task without one is
+never flagged for its contents. (`tatr flow` does ask for one on the way out of
+`UNDERSTANDING`, which is a lifecycle precondition rather than a lint rule.)
 
 `## Steps` and `## Definition of Done` are the plan gate's output, so
 `bad-record-schema` asks for them only once `PLAN` is in `GATES` - a task
-`tatr new` just created is not a finding the moment it exists. The required
-sections are kind-specific: `TASK`/`STORY` owe `## Steps` and
-`## Definition of Done`, `EPIC` owes `## Done Means` and `## Child Tasks`, and
-`SPIKE` owes `## Question` plus a `SPIKE.md` sibling.
+`tatr new` just created is not a finding the moment it exists. Every task owes
+the same two sections: whatever a task is called, a plan is steps and a
+definition of what done means.
 
 The same rules gate the lifecycle. `tatr flow` reads them through the same
 functions `check` does, so a transition can never mint a record the lint would
@@ -675,8 +685,8 @@ immediately flag: the `PLAN` gate requires the plan sections, their proofs and
 a well-formed place in the graph, the `REVIEW` gate requires a schema-clean
 REVIEW.md, and closing as `DONE` requires all three gates earned plus a
 schema-clean RETRO.md and DECISION.md. Two guards are the graph's alone: a task
-another session has claimed cannot be entered into `WORKING`, and a
-`KIND: EPIC` cannot close while any of its children is not CLOSED. A refusal
+another session has claimed cannot be entered into `WORKING`, and a task cannot
+close while any of its children is not CLOSED. A refusal
 names the same rule slug the lint would print:
 
 ```console
@@ -690,11 +700,11 @@ ERROR: Refusing to advance 20260101-100000 from PLANNING: 2 precondition(s) not 
 #### Historical exemptions
 
 Records written before a rule existed are classified in `tasks/EXEMPTIONS.md`
-rather than rewritten - the flow trail is append-only history. One line per
+rather than rewritten - the record trail is append-only history. One line per
 suppressed finding:
 
 ```markdown
-- 20260329-123700 bad-review-round: pre-flow REVIEW.md, single verdict, no rounds
+- 20260329-123700 bad-review-round: legacy REVIEW.md, single verdict, no rounds
 ```
 
 An entry suppresses that rule for that task alone. Any rule can be exempted the
@@ -715,7 +725,7 @@ tatr scaffold 20260331-144635 --list      # every kind, its path and presence
 tatr scaffold 20260331-144635 RETRO -n    # print the path, write nothing
 ```
 
-Kinds are `SPIKE`, `DECISION`, `REVIEW` and `RETRO`. `TASK.md` is created by
+Kinds are `DECISION`, `REVIEW` and `RETRO`. `TASK.md` is created by
 `tatr new` instead - it is typed metadata rather than a prose record.
 
 There is no `--force`: scaffolding refuses to overwrite an existing record, and
@@ -724,7 +734,6 @@ an existing record is edited by hand, in the diff, where a reviewer sees it.
 ```console
 $ tatr scaffold 20260730-153325 --list
 TASK	/repo/tasks/20260730-153325/TASK.md	present
-SPIKE	/repo/tasks/20260730-153325/SPIKE.md	missing
 DECISION	/repo/tasks/20260730-153325/DECISION.md	present
 REVIEW	/repo/tasks/20260730-153325/REVIEW.md	present
 RETRO	/repo/tasks/20260730-153325/RETRO.md	present
@@ -765,9 +774,9 @@ tab-separated fields.
 **Options:**
 - `-k, --kind <KIND>`: only list proofs of one kind (`test`, `cmd` or `manual`)
 
-### Working an Epic in Parallel
+### Working a Container in Parallel
 
-`tatr frontier <epic-id>` prints the open work under an Epic, one row per child
+`tatr frontier <id>` prints the open work under a task, one row per child
 and never a task body - the point is to decide what to pick up without loading
 the whole map:
 
@@ -781,7 +790,7 @@ CLAIMED	20260101-410002	p70	PLANNING+PLAN	Someone has it	claimed-by=agent-a
 
 `READY` is the derived query the old `PLANNED` node used to stand for: the
 `PLAN` gate earned, the cursor still below `WORKING`, every dependency CLOSED,
-and nobody holding a claim. Anything else under the Epic is open work you
+and nobody holding a claim. Anything else under the parent is open work you
 cannot pick up, which is what `BLOCKED` means here; `blocked-by` names the
 dependencies when dependencies are the reason, and is omitted when they are
 not. The fourth column prints the row's activity and its gates, because
@@ -790,7 +799,9 @@ approved.
 
 The order is deterministic: `READY` before `BLOCKED` before `CLAIMED`, then
 priority descending, then ID ascending. A closed child is not open work and
-does not appear; neither does a task that is not a child of this Epic.
+does not appear; neither does a task that is not a child of this one. Any task
+may have children, so any task may have a frontier; one with no children prints
+nothing at all.
 
 `tatr claim <id>` takes a task for the current session, `tatr release <id>`
 gives it back, and `tatr claims` lists what is held:
@@ -863,7 +874,7 @@ belongs in `.gitignore` (this repository ignores it).
 
 ### Listing a Phase's Context
 
-`tatr context <id> --phase <phase>` prints the artifact paths one flow phase
+`tatr context <id> --phase <phase>` prints the artifact paths one phase
 needs, and nothing else - paths only, never contents:
 
 ```console
@@ -873,7 +884,6 @@ $ tatr context 20260101-410003 --phase review
 
 $ tatr context 20260101-410003 --phase understand
 /repo/tasks/20260101-410003/TASK.md	present
-/repo/tasks/20260101-410003/SPIKE.md	missing
 /repo/tasks/20260101-410003/DECISION.md	missing
 /repo/tasks/20260101-410000/TASK.md	present
 ```
@@ -881,15 +891,15 @@ $ tatr context 20260101-410003 --phase understand
 Phases are `understand`, `plan`, `work`, `review`, `compound`, `resume` and
 `landing` (default `resume`, which lists everything because it has no idea
 where it is picking up from). `understand`, `plan` and `resume` also list the
-parent Epic's `TASK.md`: a Story cannot be understood without the container
-that gave it its shape.
+`PARENT`'s `TASK.md`: a child task cannot be understood without the task that
+gave it its shape.
 
 A record the phase owns is listed whether or not it exists yet, because the
 caller needs the path in order to create it - `review` names `REVIEW.md` before
 there is one.
 
 **Options:**
-- `-P, --phase <PHASE>`: the flow phase (default: `resume`)
+- `-P, --phase <PHASE>`: the phase (default: `resume`)
 
 ### Global Options
 
@@ -904,7 +914,6 @@ Tasks are stored as Markdown files with structured metadata. Each task file (`TA
 
 - PRIORITY: 100
 - TAGS: feature, enhancement
-- KIND: TASK
 - ACTIVITY: -
 - GATES: -
 - RESOLUTION: -
@@ -916,9 +925,11 @@ Can span multiple lines and include any markdown formatting.
 ```
 
 The metadata is one flat block directly under the title, read in exactly this
-order. The first six fields are required and always written back; `-` is how
+order. The first five fields are required and always written back; `-` is how
 each of the three nullable ones says it is unset, so the field set a record
-carries never depends on the values in it. `DUPLICATE OF`, `PARENT` and
+carries never depends on the values in it. There is no `- KIND: ` line: every
+record under `tasks/` is a task, and what kind of work it is belongs in the
+title. `DUPLICATE OF`, `PARENT` and
 `DEPENDS ON` are optional and appear only when set, so a task with no
 relationships carries no empty relationship lines. There is no `- STATUS: `
 line: STATUS is derived from `ACTIVITY` and `RESOLUTION` at every read.
@@ -941,9 +952,6 @@ would not parse - a newline in a title or tag is the usual cause - and a failed
 `ACTIVITY` and no `RESOLUTION`), `CLOSED` (a `RESOLUTION`). Reported by every
 command, stored by none.
 
-**Kind values:** `TASK` (the default), `EPIC` (an explicit /flow container),
-`STORY` (a unit of work under an Epic), `SPIKE` (an exploration).
-
 **Activity values:** `-`, `UNDERSTANDING`, `PLANNING`, `WORKING`, `REVIEWING`,
 `COMPOUNDING`.
 
@@ -963,9 +971,9 @@ resolved is the advance into `WORKING`, which requires every `DEPENDS ON` id
 to name an existing task that is CLOSED. A parent in another repository is not expressible as a `PARENT` and
 belongs in the body prose.
 
-There is no migration path from the pre-v2 format and no compatibility mode.
-A record missing these fields is rejected with a diagnostic naming the file and
-the field it stopped at; correct such a record by hand.
+A record still carrying `- STATUS: `, `- FLOW STEP: ` or `- KIND: ` is a
+legacy record: it is rejected with a diagnostic naming the file and the field
+it stopped at, and `tatr migrate --apply` is the one path forward.
 
 ## Project Structure
 
@@ -977,8 +985,7 @@ your-project/
 │   │   ├── TASK.md
 │   │   ├── REVIEW.md          # optional sibling records, written by
 │   │   ├── RETRO.md           # `tatr scaffold` and validated by `tatr check`
-│   │   ├── DECISION.md
-│   │   └── SPIKE.md
+│   │   └── DECISION.md
 │   ├── 20260330-202358/
 │   │   └── TASK.md
 │   └── 20260329-123700/
@@ -989,7 +996,7 @@ your-project/
 The tool searches for a `tasks/` directory starting from your current directory and walking up the tree. This allows you to run `tatr` from any subdirectory of your project.
 
 Only `TASK.md` is required. The sibling records are optional per task; which ones
-a task owes depends on where it is in the flow (see [Checking Task
+a task owes depends on where it is in its lifecycle (see [Checking Task
 Artifacts](#checking-task-artifacts)). `EXEMPTIONS.md` sits beside the task
 directories, not inside one, because it classifies records across the backlog.
 

@@ -2,7 +2,6 @@
 
 - PRIORITY: 20
 - TAGS: chore, cleanup
-- KIND: TASK
 - ACTIVITY: UNDERSTANDING
 - GATES: -
 - RESOLUTION: -

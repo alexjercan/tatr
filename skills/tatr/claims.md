@@ -2,7 +2,7 @@
 
 ## Frontier
 
-`tatr frontier <epic-id>` prints open children:
+`tatr frontier <id>` prints a task's open children:
 
 ```text
 <READY|BLOCKED|CLAIMED><TAB><id><TAB>p<priority><TAB><activity>[+<gates>]<TAB><title>

@@ -2,7 +2,6 @@
 
 - PRIORITY: 85
 - TAGS: feature, flow, epic, parallel
-- KIND: TASK
 - ACTIVITY: COMPOUNDING
 - GATES: PLAN REVIEW RETRO
 - RESOLUTION: DONE

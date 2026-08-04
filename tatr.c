@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#define TATR_VERSION "1.0.1"
+#define TATR_VERSION "1.1.0"
 
 // Format-checks a vararg reporter, so a message built with SS_Fmt but missing
 // its SS_Arg is a compile error rather than a garbage finding. MinGW's default
@@ -93,32 +93,10 @@ static Aids_String_Slice Task_Status_Strings[] = {
 // No task_status_from_string: STATUS is never read from a record. It is
 // derived by task_derived_status and only ever printed or filtered on.
 
-// KIND is what makes a record an Epic container: it replaces the old `goal`
-// tag, so a container cannot be conjured (or revoked) by editing a tag list.
-typedef enum {
-    Task_Kind_TASK,
-    Task_Kind_EPIC,
-    Task_Kind_STORY,
-    Task_Kind_SPIKE
-} Task_Kind;
-
-static Aids_String_Slice Task_Kind_Strings[] = {
-    [Task_Kind_TASK] = (Aids_String_Slice) { .str = (unsigned char *)"TASK", .len = 4 },
-    [Task_Kind_EPIC] = (Aids_String_Slice) { .str = (unsigned char *)"EPIC", .len = 4 },
-    [Task_Kind_STORY] = (Aids_String_Slice) { .str = (unsigned char *)"STORY", .len = 5 },
-    [Task_Kind_SPIKE] = (Aids_String_Slice) { .str = (unsigned char *)"SPIKE", .len = 5 }
-};
-
-#define KIND_VALUES_CSTR "TASK, EPIC, STORY or SPIKE"
-
-static boolean task_kind_from_string(const Aids_String_Slice *slice, Task_Kind *out) {
-    int value = 0;
-    if (!enum_from_string(slice, Task_Kind_Strings, ENUM_COUNT(Task_Kind_Strings), &value)) {
-        return false;
-    }
-    *out = (Task_Kind)value;
-    return true;
-}
+// There is no KIND. Every record under tasks/ is a task: an epic, a story and
+// a spike differ in what their title says and in how they are linked, not in
+// what the tool does with them. A container is a task other tasks name as
+// their PARENT, and nothing else.
 
 // ACTIVITY is a cursor over the five things a task can be having done to it.
 // It is nullable - an unstarted task is at no activity at all - and it moves
@@ -250,7 +228,6 @@ static boolean task_resolution_from_string(const Aids_String_Slice *slice, Task_
 typedef struct {
     unsigned int priority;
     Aids_Array tags; /* Aids_String_Slice */
-    Task_Kind kind;
     boolean has_activity;
     Task_Activity activity;
     unsigned int gates;          /* bitset over Task_Gate */
@@ -266,6 +243,8 @@ typedef struct {
 Aids_String_Slice STATUS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- STATUS: ", .len = 10 };
 Aids_String_Slice PRIORITY_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- PRIORITY: ", .len = 12 };
 Aids_String_Slice TAGS_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- TAGS: ", .len = 8 };
+// The v1 spelling, kept only so a record that still carries it is refused by
+// name with a pointer at `tatr migrate` rather than as a shapeless parse error.
 Aids_String_Slice KIND_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- KIND: ", .len = 8 };
 Aids_String_Slice ACTIVITY_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- ACTIVITY: ", .len = 12 };
 Aids_String_Slice GATES_FORMAT = (Aids_String_Slice) { .str = (unsigned char *)"- GATES: ", .len = 9 };
@@ -322,7 +301,6 @@ static void task_init_empty(Task *task) {
     task->title = (Aids_String_Slice) {0};
     task->description = (Aids_String_Slice) {0};
     task->meta.priority = 0;
-    task->meta.kind = Task_Kind_TASK;
     task->meta.has_activity = false;
     task->meta.activity = Task_Activity_UNDERSTANDING;
     task->meta.gates = 0;
@@ -462,15 +440,9 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
 
-    // - KIND / ACTIVITY / GATES / RESOLUTION: always written, in this order.
-    // The nullable three write "-" rather than being omitted: the field set a
-    // record carries must not depend on the values in it.
-    if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
-                                   SS_Arg(KIND_FORMAT),
-                                   SS_Arg(Task_Kind_Strings[task.meta.kind])) != AIDS_OK) {
-        aids_log(AIDS_ERROR, "task_serialize: Failed to append kind: %s", aids_failure_reason());
-        return_defer(AIDS_ERR);
-    }
+    // - ACTIVITY / GATES / RESOLUTION: always written, in this order. All
+    // three are nullable and write "-" rather than being omitted: the field
+    // set a record carries must not depend on the values in it.
     if (aids_string_builder_append(&builder, SS_Fmt SS_Fmt "\n",
                                    SS_Arg(ACTIVITY_FORMAT),
                                    SS_Arg(field_value_or_unset(task.meta.has_activity,
@@ -638,36 +610,26 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     }
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // - KIND: TASK | EPIC | STORY | SPIKE
-    // This is where a record stops looking like a v1 one, so it is the right
-    // place to say so: there is no compatibility path to fall back to.
-    if (!aids_string_slice_starts_with(&buffer, KIND_FORMAT)) {
-        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the TAGS line "
-                 "(v1 field order: PRIORITY, TAGS, KIND, ACTIVITY, GATES, RESOLUTION, "
-                 "[DUPLICATE OF], [PARENT], [DEPENDS ON]); correct the record by hand", SS_Arg(KIND_FORMAT));
-        return_defer(AIDS_ERR);
-    }
-    aids_string_slice_skip(&buffer, KIND_FORMAT.len);
-    Aids_String_Slice kind_slice;
-    if (!aids_string_slice_tokenize(&buffer, '\n', &kind_slice)) {
-        aids_log(AIDS_ERROR, "task_deserialize: Failed to parse kind from buffer");
-        return_defer(AIDS_ERR);
-    }
-    if (!task_kind_from_string(&kind_slice, &task->meta.kind)) {
-        aids_log(AIDS_ERROR, "task_deserialize: invalid KIND '" SS_Fmt "' (use " KIND_VALUES_CSTR "; whitespace and line endings count)",
-                 SS_Arg(kind_slice));
-        return_defer(AIDS_ERR);
-    }
-    aids_string_slice_skip_while(&buffer, isspace);
-
     // - ACTIVITY: - | UNDERSTANDING | ... | COMPOUNDING
+    // A v1 record carries "- KIND: " where a v2 one carries "- ACTIVITY: ".
+    // KIND is gone - every record is a task - and a record that still declares
+    // one is named here rather than falling through as a shapeless parse error.
+    if (aids_string_slice_starts_with(&buffer, KIND_FORMAT)) {
+        aids_log(AIDS_ERROR, "task_deserialize: this record still carries '" SS_Fmt
+                 "' (KIND was removed: every task is a task); run `tatr migrate --apply` to convert it",
+                 SS_Arg(KIND_FORMAT));
+        return_defer(AIDS_ERR);
+    }
     if (aids_string_slice_starts_with(&buffer, FLOW_STEP_FORMAT)) {
         aids_log(AIDS_ERROR, "task_deserialize: this record is in the v0 format (it still carries '"
                  SS_Fmt "'); run `tatr migrate --apply` to convert it", SS_Arg(FLOW_STEP_FORMAT));
         return_defer(AIDS_ERR);
     }
     if (!aids_string_slice_starts_with(&buffer, ACTIVITY_FORMAT)) {
-        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the KIND line", SS_Arg(ACTIVITY_FORMAT));
+        aids_log(AIDS_ERROR, "task_deserialize: expected '" SS_Fmt "' after the TAGS line "
+                 "(field order: PRIORITY, TAGS, ACTIVITY, GATES, RESOLUTION, "
+                 "[DUPLICATE OF], [PARENT], [DEPENDS ON]); correct the record by hand",
+                 SS_Arg(ACTIVITY_FORMAT));
         return_defer(AIDS_ERR);
     }
     aids_string_slice_skip(&buffer, ACTIVITY_FORMAT.len);
@@ -1110,21 +1072,23 @@ static boolean argparse_reject_retired_workflow_flags(const Tatr_Context *ctx) {
     static const struct {
         const char *short_name;
         const char *long_name;
-        const char *field;
+        const char *what;    // the clause after "was removed: "
         const char *pointer;
     } retired[] = {
-        {"-s", "--status", "STATUS",
+        {"-k", "--kind", "KIND is not a field: every record under tasks/ is a task",
+         "say what a task is in its title; a container is a task others name as their PARENT"},
+        {"-s", "--status", "STATUS is not settable through `new` or `edit`",
          "STATUS is derived from ACTIVITY and RESOLUTION; it is not stored at all"},
-        {"-f", "--flow-step", "FLOW STEP",
+        {"-f", "--flow-step", "FLOW STEP is not settable through `new` or `edit`",
          "FLOW STEP was replaced by ACTIVITY, GATES and RESOLUTION; move the task with "
          "`tatr flow <ID>`, `tatr rewind <ID> --to <ACTIVITY>` or `tatr close <ID> --resolution <R>`"},
-        {"-S", "--plan-status", "PLAN STATUS",
+        {"-S", "--plan-status", "PLAN STATUS is not settable through `new` or `edit`",
          "PLAN STATUS became the PLAN gate, recorded by `tatr flow <ID>` out of PLANNING"},
-        {"-a", "--activity", "ACTIVITY",
+        {"-a", "--activity", "ACTIVITY is not settable through `new` or `edit`",
          "move the cursor with `tatr flow <ID>` or `tatr rewind <ID> --to <ACTIVITY>`"},
-        {"-g", "--gates", "GATES",
+        {"-g", "--gates", "GATES is not settable through `new` or `edit`",
          "a gate is earned by `tatr flow <ID>` and cleared by `tatr rewind <ID> --to <ACTIVITY>`"},
-        {"-x", "--resolution", "RESOLUTION",
+        {"-x", "--resolution", "RESOLUTION is not settable through `new` or `edit`",
          "close the task with `tatr close <ID> --resolution <R>`, reopen it with `tatr reopen <ID>`"},
     };
 
@@ -1134,8 +1098,7 @@ static boolean argparse_reject_retired_workflow_flags(const Tatr_Context *ctx) {
                 strcmp(ctx->argv[i], retired[j].long_name) != 0) {
                 continue;
             }
-            aids_log(AIDS_ERROR, "'%s' was removed: %s is not settable through `new` or `edit`",
-                     ctx->argv[i], retired[j].field);
+            aids_log(AIDS_ERROR, "'%s' was removed: %s", ctx->argv[i], retired[j].what);
             fprintf(stderr, "  %s\n", retired[j].pointer);
             return true;
         }
@@ -1144,17 +1107,9 @@ static boolean argparse_reject_retired_workflow_flags(const Tatr_Context *ctx) {
 }
 
 // Registers the v2 metadata options shared by `new` and `edit`, so the two
-// subcommands cannot drift apart in flag names or descriptions. Kind and
-// relationships only: the workflow fields belong to `tatr flow`.
+// subcommands cannot drift apart in flag names or descriptions. Relationships
+// only: the workflow fields belong to `tatr flow`.
 static void argparse_add_v2_meta_arguments(Argparse_Parser *parser) {
-    argparse_add_argument(parser, (Argparse_Options){
-        .short_name = 'k',
-        .long_name = "kind",
-        .description = "Task kind (" KIND_VALUES_CSTR ")",
-        .type = ARGUMENT_TYPE_VALUE,
-        .required = 0
-    });
-
     argparse_add_argument(parser, (Argparse_Options){
         .short_name = 'P',
         .long_name = "parent",
@@ -1176,15 +1131,6 @@ static void argparse_add_v2_meta_arguments(Argparse_Parser *parser) {
 // Validates before mutating anything the caller will write, so a bad value
 // leaves the record on disk untouched. Returns false after logging.
 static boolean task_apply_v2_meta_arguments(Argparse_Parser *parser, Task *task) {
-    char *kind_str = argparse_get_value(parser, "kind");
-    if (kind_str != NULL) {
-        Aids_String_Slice slice = aids_string_slice_from_cstr(kind_str);
-        if (!task_kind_from_string(&slice, &task->meta.kind)) {
-            aids_log(AIDS_ERROR, "Invalid kind '%s': expected " KIND_VALUES_CSTR, kind_str);
-            return false;
-        }
-    }
-
     // An empty value is how the optional relationship fields are cleared.
     char *parent_str = argparse_get_value(parser, "parent");
     if (parent_str != NULL) {
@@ -1225,21 +1171,16 @@ static boolean task_apply_v2_meta_arguments(Argparse_Parser *parser, Task *task)
     return true;
 }
 
-// Checks that a new task's PARENT and DEPENDS ON name records that exist, and
-// that a Story is given the Epic it belongs to. Returns false after logging.
-// This is the same question graph_node_problems asks of an existing record; it
-// is asked here as well because `new` is the one producer that could otherwise
-// create a task the lint rejects on sight, and there is no gate between the
-// two.
+// Checks that a new task's PARENT and DEPENDS ON name records that exist.
+// Returns false after logging. This is the same question graph_node_problems
+// asks of an existing record; it is asked here as well because `new` is the one
+// producer that could otherwise create a task the lint rejects on sight, and
+// there is no gate between the two.
 static boolean new_relationships_resolve(const Aids_String_Slice *cwd, const Task *task) {
     Aids_String_Slice tasks_dir = {0};
     boolean ok = true;
 
     if (task->meta.parent.len == 0 && task->meta.depends_on.count == 0) {
-        if (task->meta.kind == Task_Kind_STORY) {
-            aids_log(AIDS_ERROR, "A KIND: STORY belongs to an Epic: pass -P/--parent <epic id>");
-            return false;
-        }
         return true; // nothing to resolve, so no tasks dir needed
     }
     if (tasks_dir_path_build(cwd, &tasks_dir) != AIDS_OK) {
@@ -1259,18 +1200,10 @@ static boolean new_relationships_resolve(const Aids_String_Slice *cwd, const Tas
                 AIDS_FREE(raw.str);
                 ok = false;
             } else {
-                parent._buffer = raw.str;
-                if (parent.meta.kind != Task_Kind_EPIC) {
-                    aids_log(AIDS_ERROR, "Parent '" SS_Fmt "' is KIND: " SS_Fmt ", not EPIC: only a container has children",
-                             SS_Arg(task->meta.parent), SS_Arg(Task_Kind_Strings[parent.meta.kind]));
-                    ok = false;
-                }
+                parent._buffer = raw.str; // any task may parent any task
             }
             task_cleanup(&parent);
         }
-    } else if (task->meta.kind == Task_Kind_STORY) {
-        aids_log(AIDS_ERROR, "A KIND: STORY belongs to an Epic: pass -P/--parent <epic id>");
-        ok = false;
     }
 
     for (size_t i = 0; i < task->meta.depends_on.count; ++i) {
@@ -1570,9 +1503,8 @@ static void task_print(Aids_String_Slice tasks_dir, Aids_String_Slice huid, Task
 
     // STATUS is printed even though it is not stored: it is the one-word answer
     // to "where is this", and a reader should not have to derive it themselves.
-    printf(": [PRIORITY: %u, KIND: " SS_Fmt ", STATUS: " SS_Fmt ", ACTIVITY: " SS_Fmt ", TAGS: ",
+    printf(": [PRIORITY: %u, STATUS: " SS_Fmt ", ACTIVITY: " SS_Fmt ", TAGS: ",
            task.meta.priority,
-           SS_Arg(Task_Kind_Strings[task.meta.kind]),
            SS_Arg(Task_Status_Strings[task_derived_status(&task.meta)]),
            SS_Arg(field_value_or_unset(task.meta.has_activity,
                                        Task_Activity_Strings[task.meta.activity])));
@@ -1775,11 +1707,10 @@ static int main_edit(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
-    // Only when this edit SETS a relationship or a kind: an edit that touches
-    // the title must not be blocked by a dangling reference it did not create,
-    // but an edit that writes one is the same producer `new` is.
+    // Only when this edit SETS a relationship: an edit that touches the title
+    // must not be blocked by a dangling reference it did not create, but an
+    // edit that writes one is the same producer `new` is.
     if ((argparse_get_value(&parser, "parent") != NULL ||
-         argparse_get_value(&parser, "kind") != NULL ||
          argparse_get_values(&parser, "depends-on", (char *[ARGPARSE_CAPACITY]){0}) > 0) &&
         !new_relationships_resolve(&ctx->cwd, &task)) {
         return_defer(1);
@@ -2909,15 +2840,15 @@ typedef enum {
     TATR_FILTER_FIELD_TYPE_TAGS,
     TATR_FILTER_FIELD_TYPE_PRIORITY,
     TATR_FILTER_FIELD_TYPE_TITLE,
-    TATR_FILTER_FIELD_TYPE_KIND,
     TATR_FILTER_FIELD_TYPE_ACTIVITY,
     TATR_FILTER_FIELD_TYPE_RESOLUTION,
     TATR_FILTER_FIELD_TYPE_GATES,
     TATR_FILTER_FIELD_TYPE_PARENT,
     TATR_FILTER_FIELD_TYPE_DEPENDS,
-    // The two v0 spellings, recognized only so they can be refused by name.
+    // The retired spellings, recognized only so they can be refused by name.
     TATR_FILTER_FIELD_TYPE_RETIRED_FLOW_STEP,
     TATR_FILTER_FIELD_TYPE_RETIRED_PLAN_STATUS,
+    TATR_FILTER_FIELD_TYPE_RETIRED_KIND,
     TATR_FILTER_FIELD_TYPE_UNKNOWN
 } Tatr_Filter_Field_Type;
 
@@ -2959,7 +2890,7 @@ static Tatr_Filter_Field_Type tatr_filter_get_field_type(Aids_String_Slice field
         return TATR_FILTER_FIELD_TYPE_TITLE;
     }
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_KIND) == 0) {
-        return TATR_FILTER_FIELD_TYPE_KIND;
+        return TATR_FILTER_FIELD_TYPE_RETIRED_KIND;
     }
     if (aids_string_slice_compare(&field_name, &FIELD_NAME_ACTIVITY) == 0) {
         return TATR_FILTER_FIELD_TYPE_ACTIVITY;
@@ -2998,11 +2929,6 @@ static const Aids_String_Slice *tatr_filter_enum_table(Tatr_Filter_Field_Type fi
             *field_label = "status";
             *values_hint = STATUS_VALUES_CSTR;
             return Task_Status_Strings;
-        case TATR_FILTER_FIELD_TYPE_KIND:
-            *count = ENUM_COUNT(Task_Kind_Strings);
-            *field_label = "kind";
-            *values_hint = KIND_VALUES_CSTR;
-            return Task_Kind_Strings;
         case TATR_FILTER_FIELD_TYPE_ACTIVITY:
             *count = ENUM_COUNT(Task_Activity_Strings);
             *field_label = "activity";
@@ -3024,7 +2950,6 @@ static const Aids_String_Slice *tatr_filter_enum_table(Tatr_Filter_Field_Type fi
 static int tatr_filter_enum_value(Tatr_Filter_Field_Type field_type, const Task *task) {
     switch (field_type) {
         case TATR_FILTER_FIELD_TYPE_STATUS: return (int)task_derived_status(&task->meta);
-        case TATR_FILTER_FIELD_TYPE_KIND: return (int)task->meta.kind;
         case TATR_FILTER_FIELD_TYPE_ACTIVITY:
             return task->meta.has_activity ? (int)task->meta.activity : -1;
         case TATR_FILTER_FIELD_TYPE_RESOLUTION:
@@ -3047,6 +2972,11 @@ static boolean tatr_filter_retired_field(Tatr_Filter_Field_Type field_type,
         case TATR_FILTER_FIELD_TYPE_RETIRED_PLAN_STATUS:
             *name = "plan_status";
             *pointer = "use ':gates contains PLAN'";
+            return true;
+        case TATR_FILTER_FIELD_TYPE_RETIRED_KIND:
+            *name = "kind";
+            *pointer = "KIND was removed: every task is a task; match the title with "
+                       "':title contains <text>' or the hierarchy with ':parent'";
             return true;
         default:
             return false;
@@ -3884,17 +3814,11 @@ static Decision_Status artifact_decision_status(Aids_String_Slice decision,
     return Decision_Status_MISSING;
 }
 
-// An EPIC container is exempt from the record-completeness rules: its
-// aggregate record lives in its own TASK.md while child tasks carry the review
-// and retro records, so demanding those files would force a fabricated one;
-// and its frozen step boxes stay verbatim (superseded or dropped children are
-// honest history) rather than being ticked to silence the lint. It may also
-// sit IN_PROGRESS without a plan approval of its own - the plan gate applies
-// to the work tasks underneath it. `check` and `flow` share the predicate so
-// the lint and the lifecycle exempt the same records.
-static boolean check_task_is_container(const Task *task) {
-    return task->meta.kind == Task_Kind_EPIC;
-}
+// There is no exemption for a container. A task that other tasks name as their
+// PARENT is still a task: it owes the same sections, the same review and the
+// same retro as anything else, because nothing in the record says it is
+// special. A record that genuinely should not be held to a rule says so in
+// tasks/EXEMPTIONS.md, where the waiver is visible and reviewable.
 
 // ---------------------------------------------------------------------------
 // Record schemas: the one in-code source for what each sibling record looks
@@ -3909,7 +3833,6 @@ static boolean check_task_is_container(const Task *task) {
 
 typedef enum {
     Record_Kind_TASK,
-    Record_Kind_SPIKE,
     Record_Kind_DECISION,
     Record_Kind_REVIEW,
     Record_Kind_RETRO
@@ -3947,17 +3870,9 @@ static const Record_Schema RECORD_SCHEMAS[] = {
         .file_name = TASK_FILE_NAME_CSTR,
         .title_prefix = "# ",
         .fields = {NULL},
-        // TASK sections are kind-specific; see task_required_sections.
+        // TASK sections come from task_required_sections, not the table: they
+        // are owed only once the PLAN gate is earned.
         .sections = {NULL},
-        .body_template = NULL,
-    },
-    [Record_Kind_SPIKE] = {
-        .name = "SPIKE",
-        .file_name = "SPIKE.md",
-        .title_prefix = "# Spike: ",
-        .fields = {"- DATE: ", "- STATUS: ", "- TAGS: ", NULL},
-        .sections = {"## Question", "## Context", "## Options considered",
-                     "## Recommendation", "## Open questions", "## Next steps", NULL},
         .body_template = NULL,
     },
     [Record_Kind_DECISION] = {
@@ -3989,7 +3904,7 @@ static const Record_Schema RECORD_SCHEMAS[] = {
 };
 
 #define RECORD_KIND_COUNT ENUM_COUNT(RECORD_SCHEMAS)
-#define RECORD_VALUES_CSTR "TASK, SPIKE, DECISION, REVIEW or RETRO"
+#define RECORD_VALUES_CSTR "TASK, DECISION, REVIEW or RETRO"
 
 static boolean record_kind_from_string(const Aids_String_Slice *slice, Record_Kind *out) {
     for (size_t i = 0; i < RECORD_KIND_COUNT; ++i) {
@@ -4002,17 +3917,6 @@ static boolean record_kind_from_string(const Aids_String_Slice *slice, Record_Ki
     return false;
 }
 
-// The allowed values of a SPIKE.md's "- STATUS: " line, as the spike skill
-// defines them: the exploration either landed on a direction, could not answer
-// its question, or ruled the idea out. There is no fourth answer.
-static Aids_String_Slice Spike_Status_Strings[] = {
-    (Aids_String_Slice) { .str = (unsigned char *)"RECOMMENDED", .len = 11 },
-    (Aids_String_Slice) { .str = (unsigned char *)"INCONCLUSIVE", .len = 12 },
-    (Aids_String_Slice) { .str = (unsigned char *)"DROPPED", .len = 7 }
-};
-
-#define SPIKE_STATUS_VALUES_CSTR "RECOMMENDED, INCONCLUSIVE or DROPPED"
-
 // The allowed values of a REVIEW.md round's "- VERDICT: " line.
 static Aids_String_Slice Verdict_Strings[] = {
     (Aids_String_Slice) { .str = (unsigned char *)"APPROVE", .len = 7 },
@@ -4021,21 +3925,12 @@ static Aids_String_Slice Verdict_Strings[] = {
 
 #define VERDICT_VALUES_CSTR "APPROVE or REQUEST_CHANGES"
 
-// The "## " sections a TASK.md must carry, by kind. An Epic container's record
-// IS its own TASK.md - the done definition and the child queue live there -
-// while a work task carries the Steps and the proofs. A SPIKE task's research
-// lives in its SPIKE.md sibling, so its TASK.md is only asked for a Question.
-static const char *const *task_required_sections(Task_Kind kind) {
+// The "## " sections every TASK.md must carry once its plan is blessed. One
+// list, because there is one kind of record: whatever a task is called, a plan
+// is steps and a definition of what done means.
+static const char *const *task_required_sections(void) {
     static const char *work[] = {"## Steps", "## Definition of Done", NULL};
-    static const char *epic[] = {"## Done Means", "## Child Tasks", NULL};
-    static const char *spike[] = {"## Question", NULL};
-    switch (kind) {
-    case Task_Kind_EPIC:  return epic;
-    case Task_Kind_SPIKE: return spike;
-    case Task_Kind_TASK:
-    case Task_Kind_STORY: return work;
-    }
-    return work; // unreachable: the enum is closed
+    return work;
 }
 
 // The value of a "- KEY: " line, with any inline comment stripped and trimmed.
@@ -4631,62 +4526,6 @@ static boolean check_supersede_is_reciprocal(const Aids_String_Slice *tasks_dir,
     return reciprocal;
 }
 
-// bad-spike-status / dangling-seeded-task, plus the SPIKE.md schema. Fires on
-// PRESENCE: any SPIKE.md is validated, whatever the task's KIND, because
-// `tatr scaffold <id> SPIKE` will write one for any task. Only the
-// missing-spike-record rule is kind-gated, and that lives in check_task.
-static void spike_record_problems(const Aids_String_Slice *tasks_dir,
-                                  Aids_String_Slice spike,
-                                  Record_Problems *problems) {
-    record_schema_problems(Record_Kind_SPIKE, spike, NULL, problems);
-
-    Aids_String_Slice status = {0};
-    if (artifact_field(spike, "- STATUS: ", &status) && status.len > 0) {
-        record_enum_problem(problems, "bad-spike-status", "SPIKE.md STATUS", status,
-                            Spike_Status_Strings, ENUM_COUNT(Spike_Status_Strings),
-                            SPIKE_STATUS_VALUES_CSTR);
-    }
-
-    // Every task ID named under "## Next steps" must resolve: a spike whose
-    // seeded pointers dangle has recorded a direction nobody can pick up.
-    Aids_String_Slice any_heading = aids_string_slice_from_cstr("## ");
-    Aids_String_Slice want = aids_string_slice_from_cstr("## Next steps");
-    Aids_String_Slice scan = spike;
-    Aids_String_Slice line = {0};
-    boolean inside = false;
-    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
-        Aids_String_Slice l = line;
-        aids_string_slice_trim_right(&l);
-        if (aids_string_slice_starts_with(&l, any_heading)) {
-            if (inside) {
-                break;
-            }
-            inside = aids_string_slice_compare(&l, &want) == 0;
-            continue;
-        }
-        if (!inside) {
-            continue;
-        }
-        for (unsigned long i = 0; i + (HUID_LENGTH - 1) <= l.len; ++i) {
-            Aids_String_Slice candidate = aids_string_slice_from_parts(l.str + i, HUID_LENGTH - 1);
-            if (!ishuid(&candidate)) {
-                continue;
-            }
-            char path_buffer[PATH_MAX];
-            if (snprintf(path_buffer, sizeof(path_buffer), SS_Fmt "/" SS_Fmt "/%s",
-                         SS_Arg(*tasks_dir), SS_Arg(candidate), TASK_FILE_NAME_CSTR) < 0) {
-                continue;
-            }
-            if (access(path_buffer, F_OK) != 0) {
-                record_problems_add(problems, "dangling-seeded-task",
-                                    "SPIKE.md seeds '" SS_Fmt "' which has no TASK.md",
-                                    SS_Arg(candidate));
-            }
-            i += HUID_LENGTH - 2; // consume the match
-        }
-    }
-}
-
 // bad-proof-syntax: every "## Definition of Done" item must carry at least one
 // test:, cmd: or manual: proof. A criterion nothing can check is a wish.
 static void dod_proof_problems(Aids_String_Slice task_raw, Record_Problems *problems) {
@@ -4831,12 +4670,12 @@ static void decision_record_problems(const Aids_String_Slice *tasks_dir,
 // gate set, while `flow` passes true because it is about to record the gate.
 // That is what lets the plan gate refuse to mint an approved plan the lint
 // would immediately flag.
-static void task_record_problems(Task_Kind kind, boolean plan_gate,
+static void task_record_problems(boolean plan_gate,
                                  Aids_String_Slice task_raw,
                                  Record_Problems *problems) {
     if (plan_gate) {
         record_schema_problems(Record_Kind_TASK, task_raw,
-                               task_required_sections(kind), problems);
+                               task_required_sections(), problems);
     }
     dod_proof_problems(task_raw, problems);
 }
@@ -4862,7 +4701,6 @@ static int string_slice_compare_fn(const void *a, const void *b) {
 typedef struct {
     Aids_String_Slice huid;    // borrowed from the node's own owned copy
     Aids_String_Slice title;
-    Task_Kind kind;
     Task_Status status;        // derived, cached at load
     boolean has_activity;
     Task_Activity activity;
@@ -4951,7 +4789,6 @@ static Aids_Result task_graph_load(const Aids_String_Slice *tasks_dir, Task_Grap
             if (task_deserialize(raw, &task) == AIDS_OK) {
                 node.parsed = true;
                 node.title = task.title;
-                node.kind = task.meta.kind;
                 node.status = task_derived_status(&task.meta);
                 node.has_activity = task.meta.has_activity;
                 node.activity = task.meta.activity;
@@ -5083,7 +4920,7 @@ static boolean graph_depends_reaches(const Task_Graph *graph,
     return false; // the reference does not resolve; missing-dependency says so
 }
 
-// missing-parent / self-parent / parent-cycle / bad-epic-relationship /
+// missing-parent / self-parent / parent-cycle /
 // missing-dependency / duplicate-dependency / self-dependency /
 // dependency-cycle: everything one task's place in the graph is held to.
 // Collected as data like every other record rule, so `check` prints them and
@@ -5104,12 +4941,6 @@ static void graph_node_problems(const Task_Graph *graph,
                 record_problems_add(problems, "missing-parent",
                                     "PARENT '" SS_Fmt "' does not exist", SS_Arg(node->parent));
             } else {
-                if (parent->parsed && parent->kind != Task_Kind_EPIC) {
-                    record_problems_add(problems, "bad-epic-relationship",
-                                        "PARENT '" SS_Fmt "' is KIND: " SS_Fmt ", not EPIC",
-                                        SS_Arg(node->parent),
-                                        SS_Arg(Task_Kind_Strings[parent->kind]));
-                }
                 if (graph_chain_returns_to(graph, node->huid, node->parent, graph_parent_next)) {
                     record_problems_add(problems, "parent-cycle",
                                         "the PARENT chain from '" SS_Fmt "' returns to this task",
@@ -5117,9 +4948,6 @@ static void graph_node_problems(const Task_Graph *graph,
                 }
             }
         }
-    } else if (node->kind == Task_Kind_STORY) {
-        record_problems_add(problems, "bad-epic-relationship",
-                            "KIND: STORY has no PARENT (a Story belongs to an Epic)");
     }
 
     for (size_t i = 0; i < node->depends_on.count; ++i) {
@@ -5611,34 +5439,28 @@ static void flow_unmet_add_problems(Flow_Unmet *unmet, const Record_Problems *pr
 // Each gate is the exit requirement of the activity that produces it:
 //
 //   PLAN    leaving PLANNING     the sections the plan produces, their DoD
-//                                proofs, a resolvable graph position, and any
-//                                SPIKE.md held to its schema
+//                                proofs, and a resolvable graph position
 //   REVIEW  leaving REVIEWING    an approved, well-formed REVIEW.md
 //   RETRO   leaving COMPOUNDING  a schema-clean RETRO.md
 //
-// Leaving UNDERSTANDING and leaving WORKING produce no gate and cost nothing:
-// picking a task up and handing it to review are not claims about it.
+// Leaving WORKING produces no gate and costs nothing: handing work to review
+// is not a claim about it. Leaving UNDERSTANDING produces no gate either, but
+// it does have a precondition of its own - see flow_understanding_preconditions.
 //
 // This is what keeps AGENTS.md's tying invariant true: `flow` and `check` ask
 // the SAME collector functions the same questions, so no transition can mint a
 // record the lint would immediately flag.
 //
-// KIND: EPIC is exempt from exactly what `tatr check` exempts it from - review
-// presence, retro presence and unchecked Steps - because an Epic container's
-// record lives in its children. Its own sections, its dependencies and its
-// DECISION.md are checked like anyone's.
+// Nothing is exempt: every task is a task, so every task owes the same proof.
 static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
                                     const Task_Graph *graph,
                                     const Aids_String_Slice *huid,
-                                    const Task *task,
                                     Aids_String_Slice task_raw,
                                     Task_Gate gate,
                                     Flow_Unmet *unmet) {
-    boolean exempt = check_task_is_container(task);
-
     if (gate == Task_Gate_PLAN) {
         Record_Problems problems = {0};
-        task_record_problems(task->meta.kind, true, task_raw, &problems);
+        task_record_problems(true, task_raw, &problems);
         // The task's place in the graph, read from the same loader `check`
         // reads: a dependency that does not exist must be a refusal, not one
         // more thing to wait for.
@@ -5647,30 +5469,12 @@ static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
             graph_node_problems(graph, node, &problems);
         }
         flow_unmet_add_problems(unmet, &problems);
-
-        // Any SPIKE.md the task carries is held to its schema; only its
-        // ABSENCE is a question for a SPIKE-kind task, matching `check`.
-        Aids_String_Slice spike = {0};
-        if (!task_sibling_read(tasks_dir, huid, "SPIKE.md", &spike)) {
-            if (task->meta.kind == Task_Kind_SPIKE) {
-                flow_unmet_add(unmet, "missing-spike-record: KIND: SPIKE task has no SPIKE.md");
-            }
-        } else {
-            Record_Problems spike_problems = {0};
-            spike_record_problems(tasks_dir, spike, &spike_problems);
-            flow_unmet_add_problems(unmet, &spike_problems);
-            AIDS_FREE(spike.str);
-        }
     }
 
     if (gate == Task_Gate_RETRO) {
-        // Presence is the container-exempt part; a RETRO.md that IS there is
-        // held to its schema whatever the kind.
         Aids_String_Slice retro = {0};
         if (!task_sibling_read(tasks_dir, huid, "RETRO.md", &retro)) {
-            if (!exempt) {
-                flow_unmet_add(unmet, "there is no RETRO.md: the retro has not been written");
-            }
+            flow_unmet_add(unmet, "there is no RETRO.md: the retro has not been written");
         } else {
             Record_Problems problems = {0};
             record_schema_problems(Record_Kind_RETRO, retro, NULL, &problems);
@@ -5682,14 +5486,7 @@ static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
     if (gate == Task_Gate_REVIEW) {
         Aids_String_Slice review = {0};
         if (!task_sibling_read(tasks_dir, huid, "REVIEW.md", &review)) {
-            // Only the PRESENCE of the record is exempt for a container -
-            // exactly as `check` exempts it from closed-missing-review but
-            // never from closed-not-approved. A REVIEW.md an Epic does carry
-            // is held to the same verdict as anyone's, so no transition can
-            // produce a state the lint would then flag.
-            if (!exempt) {
-                flow_unmet_add(unmet, "there is no REVIEW.md: the work has not been reviewed");
-            }
+            flow_unmet_add(unmet, "there is no REVIEW.md: the work has not been reviewed");
         } else {
             Aids_String_Slice verdict = {0};
             Aids_String_Slice approve = aids_string_slice_from_cstr("APPROVE");
@@ -5699,10 +5496,7 @@ static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
                 flow_unmet_add(unmet, "the latest REVIEW.md verdict is '" SS_Fmt "', not APPROVE",
                                SS_Arg(verdict));
             }
-            // The record's SHAPE is never exempt: a container that carries a
-            // REVIEW.md is held to the same schema as anyone's, or the
-            // transition would mint a state the lint flags. The open
-            // BLOCKER/MAJOR count lives in review_round_problems as
+            // The open BLOCKER/MAJOR count lives in review_round_problems as
             // approve-with-open-findings and is not repeated here: the verdict
             // check above already refuses anything but APPROVE, so the two
             // conditions coincide and one message is enough.
@@ -5714,6 +5508,27 @@ static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
         }
     }
 
+}
+
+// The one precondition on leaving UNDERSTANDING. No gate is earned for it -
+// understanding is not a claim about the work - but a task cannot be planned
+// before someone has written down what it is FOR and which direction was
+// chosen, and DECISION.md is where that is written. The whole DECISION.md rule
+// set runs, not a subset: `check` reads the same collector, so leaving
+// UNDERSTANDING cannot mint a record the lint would immediately flag.
+static void flow_understanding_preconditions(const Aids_String_Slice *tasks_dir,
+                                             const Aids_String_Slice *huid,
+                                             Flow_Unmet *unmet) {
+    Aids_String_Slice decision = {0};
+    if (!task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
+        flow_unmet_add(unmet, "there is no DECISION.md: the understanding has not been recorded; "
+                       "write one with `tatr scaffold " SS_Fmt " DECISION`", SS_Arg(*huid));
+        return;
+    }
+    Record_Problems problems = {0};
+    decision_record_problems(tasks_dir, huid, decision, &problems);
+    flow_unmet_add_problems(unmet, &problems);
+    AIDS_FREE(decision.str);
 }
 
 // The close gate, which only `--resolution DONE` runs. It asks what "done"
@@ -5730,12 +5545,9 @@ static void flow_gate_preconditions(const Aids_String_Slice *tasks_dir,
 static void flow_close_preconditions(const Aids_String_Slice *tasks_dir,
                                      const Task_Graph *graph,
                                      const Aids_String_Slice *huid,
-                                     const Task *task,
                                      Aids_String_Slice task_raw,
                                      unsigned int gates,
                                      Flow_Unmet *unmet) {
-    boolean exempt = check_task_is_container(task);
-
     for (size_t g = 0; g < ENUM_COUNT(Task_Gate_Strings); ++g) {
         if ((gates & TASK_GATE_BIT(g)) == 0) {
             flow_unmet_add(unmet, "the " SS_Fmt " gate has not been earned; walk it with `tatr flow "
@@ -5743,11 +5555,13 @@ static void flow_close_preconditions(const Aids_String_Slice *tasks_dir,
         }
     }
 
-    // An Epic's work is its children's: it cannot be done while any of them
-    // is not. A child that was abandoned is CLOSED with the resolution
-    // recorded - there is no optional-child marker, because leaving one OPEN to
-    // mean "not required" would make this guard unfalsifiable.
-    if (task->meta.kind == Task_Kind_EPIC && graph != NULL) {
+    // A container's work is its children's: it cannot be done while any of
+    // them is not. Being a container is not a declared kind - it is having
+    // children - so this runs for every task and finds nothing for most. A
+    // child that was abandoned is CLOSED with the resolution recorded; there
+    // is no optional-child marker, because leaving one OPEN to mean "not
+    // required" would make this guard unfalsifiable.
+    if (graph != NULL) {
         for (size_t i = 0; i < graph->nodes.count; ++i) {
             Graph_Node *child = NULL;
             if (aids_array_get((Aids_Array *)&graph->nodes, i, (void **)&child) != AIDS_OK ||
@@ -5764,11 +5578,9 @@ static void flow_close_preconditions(const Aids_String_Slice *tasks_dir,
             }
         }
     }
-    if (!exempt) {
-        size_t unchecked = artifact_count_unchecked_steps(task_raw);
-        if (unchecked > 0) {
-            flow_unmet_add(unmet, "%zu unchecked Steps item(s) remain", unchecked);
-        }
+    size_t unchecked = artifact_count_unchecked_steps(task_raw);
+    if (unchecked > 0) {
+        flow_unmet_add(unmet, "%zu unchecked Steps item(s) remain", unchecked);
     }
     Aids_String_Slice decision = {0};
     if (task_sibling_read(tasks_dir, huid, "DECISION.md", &decision)) {
@@ -5939,10 +5751,16 @@ static int main_flow(const Tatr_Context *ctx) {
     // The record half. Everything here is a fact about the record, so an unmet
     // one is a flat refusal: nothing is written and nothing is claimed.
     if (has_gate) {
-        flow_gate_preconditions(&tasks_dir, &graph, &id, &task, raw, gate, &unmet);
+        flow_gate_preconditions(&tasks_dir, &graph, &id, raw, gate, &unmet);
+    }
+    // Leaving UNDERSTANDING earns no gate, so its requirement is re-asked every
+    // time the edge is walked rather than recorded in GATES.
+    if (!closes && task.meta.has_activity &&
+        task.meta.activity == Task_Activity_UNDERSTANDING) {
+        flow_understanding_preconditions(&tasks_dir, &id, &unmet);
     }
     if (closes) {
-        flow_close_preconditions(&tasks_dir, &graph, &id, &task, raw,
+        flow_close_preconditions(&tasks_dir, &graph, &id, raw,
                                  task.meta.gates | (has_gate ? TASK_GATE_BIT(gate) : 0u), &unmet);
     }
     if (unmet.count > 0) {
@@ -6359,7 +6177,7 @@ static int main_close(const Tatr_Context *ctx) {
         if (task_graph_load(&tasks_dir, &graph) != AIDS_OK) {
             return_defer(1);
         }
-        flow_close_preconditions(&tasks_dir, &graph, &id, &task, raw, task.meta.gates, &unmet);
+        flow_close_preconditions(&tasks_dir, &graph, &id, raw, task.meta.gates, &unmet);
         if (unmet.count > 0) {
             aids_log(AIDS_ERROR, "Refusing to close " SS_Fmt " as DONE: %zu precondition(s) not met",
                      SS_Arg(id), unmet.count);
@@ -6762,20 +6580,18 @@ static size_t check_task(Check_Exemptions *ex,
 
     // Metadata values no longer need a re-scan here: the parser validates the
     // exact token it consumes (trailing spaces and CRLF tails included), so an
-    // invalid KIND, ACTIVITY, GATES or RESOLUTION has already been reported
-    // above as a parse failure. What the parser does NOT police is the body, so
-    // the kind's required sections are checked from the schema table.
+    // invalid ACTIVITY, GATES or RESOLUTION has already been reported above as
+    // a parse failure. What the parser does NOT police is the body, so the
+    // required sections are checked from the schema table.
     //
     // Only once the PLAN gate is earned, though: `## Steps` and
     // `## Definition of Done` ARE the plan gate's output, so demanding them of
     // an unplanned record would make every task `tatr new` creates a finding
-    // the moment it exists. The same reasoning covers a SPIKE task's SPIKE.md -
-    // the research doc is written during the spike, not at the instant the task
-    // is filed.
+    // the moment it exists.
     plan_gate = (task.meta.gates & TASK_GATE_BIT(Task_Gate_PLAN)) != 0;
     {
         Record_Problems problems = {0};
-        task_record_problems(task.meta.kind, plan_gate, raw, &problems);
+        task_record_problems(plan_gate, raw, &problems);
         findings += check_report_problems(ex, huid, &problems);
     }
 
@@ -6790,33 +6606,13 @@ static size_t check_task(Check_Exemptions *ex,
         }
     }
 
-    // A SPIKE task's research lives in its SPIKE.md sibling; without one the
-    // task records a question and no answer. Its ABSENCE is what depends on
-    // the task's KIND; the contents of any SPIKE.md that does exist are
-    // checked on presence alone, whatever the task's kind, because
-    // `tatr scaffold <id> SPIKE` will write one for any task.
-    {
-        Aids_String_Slice spike = {0};
-        if (!task_sibling_read(tasks_dir, huid, "SPIKE.md", &spike)) {
-            if (task.meta.kind == Task_Kind_SPIKE && plan_gate) {
-                findings += check_finding(ex, huid, "missing-spike-record",
-                                          "KIND: SPIKE task has no SPIKE.md");
-            }
-        } else {
-            Record_Problems problems = {0};
-            spike_record_problems(tasks_dir, spike, &problems);
-            findings += check_report_problems(ex, huid, &problems);
-            AIDS_FREE(spike.str);
-        }
-    }
-
     // inconsistent-gates: a cursor past an activity whose gate the record does
     // not carry. This is precisely the drift the chain made unrepresentable by
     // conflating position with proof, so it needs a rule now that the two axes
     // are free to disagree. Work started without an approved plan - the v0
     // `unplanned-in-progress` rule - is the PLANNING case of exactly this, so
     // it has no rule of its own.
-    if (task.meta.has_activity && !check_task_is_container(&task)) {
+    if (task.meta.has_activity) {
         for (size_t a = 0; a < (size_t)task.meta.activity; ++a) {
             Task_Gate gate = Task_Gate_PLAN;
             if (activity_exit_gate((Task_Activity)a, &gate) &&
@@ -6864,7 +6660,7 @@ static size_t check_task(Check_Exemptions *ex,
     closed_done = task.meta.has_resolution &&
                   task.meta.resolution == Task_Resolution_DONE;
 
-    if (closed_done && !check_task_is_container(&task)) {
+    if (closed_done) {
         size_t unchecked = artifact_count_unchecked_steps(raw);
         if (unchecked > 0) {
             findings += check_finding(ex, huid, "closed-unchecked",
@@ -6904,7 +6700,7 @@ review_checks:
         }
     }
 
-    if (task_loaded && closed_done && !check_task_is_container(&task)) {
+    if (task_loaded && closed_done) {
         if (!has_review) {
             findings += check_finding(ex, huid, "closed-missing-review",
                                       "CLOSED task has no REVIEW.md");
@@ -7073,8 +6869,7 @@ defer:
 // must pass `tatr check` with its placeholders still in place, or the author
 // has to guess the shape before they can write anything. Everything else gets
 // a TODO the author replaces.
-static Aids_Result scaffold_field_value(Record_Kind kind,
-                                        const char *field,
+static Aids_Result scaffold_field_value(const char *field,
                                         Aids_String_Slice task_huid,
                                         Aids_String_Builder *out) {
     if (strcmp(field, "- TASK: ") == 0) {
@@ -7088,12 +6883,7 @@ static Aids_Result scaffold_field_value(Record_Kind kind,
         return aids_string_builder_append(out, "%s", now);
     }
     if (strcmp(field, "- STATUS: ") == 0) {
-        // The first value of the kind's vocabulary: a decision record is
-        // written when the decision is made, a spike doc when it has a
-        // recommendation.
-        if (kind == Record_Kind_SPIKE) {
-            return aids_string_builder_append(out, SS_Fmt, SS_Arg(Spike_Status_Strings[0]));
-        }
+        // A decision record is written when the decision is made.
         return aids_string_builder_append(out, "ACCEPTED");
     }
     if (strcmp(field, "- REVIEW ROUNDS: ") == 0) {
@@ -7123,7 +6913,7 @@ static Aids_Result scaffold_render(Record_Kind kind,
         if (aids_string_builder_append(&sb, "%s", schema->fields[i]) != AIDS_OK) {
             return_defer(AIDS_ERR);
         }
-        if (scaffold_field_value(kind, schema->fields[i], task_huid, &sb) != AIDS_OK) {
+        if (scaffold_field_value(schema->fields[i], task_huid, &sb) != AIDS_OK) {
             return_defer(AIDS_ERR);
         }
         if (aids_string_builder_append(&sb, "\n") != AIDS_OK) {
@@ -7692,7 +7482,7 @@ defer:
 }
 
 // ---------------------------------------------------------------------------
-// frontier: the open work under an Epic, at a glance. Prints one row per child,
+// frontier: the open work under a task, at a glance. Prints one row per child,
 // never a task body - the point is to decide what to pick up without loading
 // the whole map. Deterministic: READY before BLOCKED before CLAIMED, then
 // priority descending, then ID ascending.
@@ -7737,12 +7527,12 @@ static int main_frontier(const Tatr_Context *ctx) {
     Aids_Array rows = {0};
     boolean rows_initialized = false;
 
-    argparse_parser_init(&parser, "tatr frontier", "Show the open work under an Epic", TATR_VERSION);
+    argparse_parser_init(&parser, "tatr frontier", "Show the open work under a task", TATR_VERSION);
 
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'I',
         .long_name = "id",
-        .description = "Epic task ID (format YYYYMMDD-HHMMSS)",
+        .description = "Parent task ID (format YYYYMMDD-HHMMSS)",
         .type = ARGUMENT_TYPE_POSITIONAL,
         .required = 1
     });
@@ -7768,14 +7558,11 @@ static int main_frontier(const Tatr_Context *ctx) {
         return_defer(1);
     }
 
-    Graph_Node *epic = task_graph_find(&graph, id);
-    if (epic == NULL || !epic->parsed) {
+    // Any task may have children, so any task may have a frontier. An empty
+    // one prints nothing, which is the honest answer for a task nothing names.
+    Graph_Node *container = task_graph_find(&graph, id);
+    if (container == NULL || !container->parsed) {
         aids_log(AIDS_ERROR, "Task " SS_Fmt " could not be read", SS_Arg(id));
-        return_defer(1);
-    }
-    if (epic->kind != Task_Kind_EPIC) {
-        aids_log(AIDS_ERROR, "Task " SS_Fmt " is KIND: " SS_Fmt ", not EPIC: a frontier is the open work under a container",
-                 SS_Arg(id), SS_Arg(Task_Kind_Strings[epic->kind]));
         return_defer(1);
     }
 
@@ -7797,7 +7584,7 @@ static int main_frontier(const Tatr_Context *ctx) {
         // READY is the derived query PLANNED used to be a node for: the plan
         // gate is earned, the cursor has not entered WORKING yet, the
         // dependencies are finished and nobody holds it. Anything else under
-        // the epic is open work you cannot pick up, which is what BLOCKED
+        // the parent is open work you cannot pick up, which is what BLOCKED
         // means here - the `blocked-by` column names the dependencies when
         // dependencies are the reason.
         boolean deps_closed = true;
@@ -7905,7 +7692,7 @@ defer:
 }
 
 // ---------------------------------------------------------------------------
-// context: the minimal artifact path set a flow phase needs. Paths only, never
+// context: the minimal artifact path set one phase of work needs. Paths only, never
 // contents - a caller reads what it decides to read, and a phase that owns a
 // record it has not written yet still needs the path to create it.
 // ---------------------------------------------------------------------------
@@ -7932,19 +7719,19 @@ static Aids_String_Slice Phase_Strings[] = {
 
 #define PHASE_VALUES_CSTR "understand, plan, work, review, compound, resume or landing"
 
-// The record kinds each phase owns, terminated by -1. Derived from what the
-// flow skills actually read and write at each step: understanding reads the
+// The record kinds each phase owns, terminated by -1. Derived from what a
+// caller actually reads and writes at each step: understanding reads the
 // research and the decision, planning writes the decision, work reads the
 // review it must answer, compound writes the retro, and landing needs the
 // records that go into the commit. `resume` is the one phase that wants
 // everything, because it has no idea where it is picking up from.
 static const int *phase_record_kinds(Phase phase) {
-    static const int understand[] = {Record_Kind_TASK, Record_Kind_SPIKE, Record_Kind_DECISION, -1};
-    static const int plan[]       = {Record_Kind_TASK, Record_Kind_SPIKE, Record_Kind_DECISION, -1};
+    static const int understand[] = {Record_Kind_TASK, Record_Kind_DECISION, -1};
+    static const int plan[]       = {Record_Kind_TASK, Record_Kind_DECISION, -1};
     static const int work[]       = {Record_Kind_TASK, Record_Kind_DECISION, Record_Kind_REVIEW, -1};
     static const int review[]     = {Record_Kind_TASK, Record_Kind_REVIEW, -1};
     static const int compound[]   = {Record_Kind_TASK, Record_Kind_REVIEW, Record_Kind_RETRO, -1};
-    static const int resume[]     = {Record_Kind_TASK, Record_Kind_SPIKE, Record_Kind_DECISION,
+    static const int resume[]     = {Record_Kind_TASK, Record_Kind_DECISION,
                                      Record_Kind_REVIEW, Record_Kind_RETRO, -1};
     static const int landing[]    = {Record_Kind_TASK, Record_Kind_REVIEW, Record_Kind_RETRO, -1};
     switch (phase) {
@@ -7959,8 +7746,8 @@ static const int *phase_record_kinds(Phase phase) {
     return resume; // unreachable: the enum is closed
 }
 
-// The understand phase is the one that needs to look OUTWARD: a Story cannot be
-// understood without the Epic that gave it its shape.
+// The understand phase is the one that needs to look OUTWARD: a child task
+// cannot be understood without the parent that gave it its shape.
 static boolean phase_includes_parent(Phase phase) {
     return phase == Phase_UNDERSTAND || phase == Phase_PLAN || phase == Phase_RESUME;
 }
@@ -7974,7 +7761,7 @@ static int main_context(const Tatr_Context *ctx) {
     boolean task_initialized = false;
 
     argparse_parser_init(&parser, "tatr context",
-                         "Show the artifact paths a flow phase needs", TATR_VERSION);
+                         "Show the artifact paths a phase of work needs", TATR_VERSION);
 
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'I',
@@ -7987,7 +7774,7 @@ static int main_context(const Tatr_Context *ctx) {
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'P',
         .long_name = "phase",
-        .description = "Flow phase (" PHASE_VALUES_CSTR "; default: resume)",
+        .description = "Phase (" PHASE_VALUES_CSTR "; default: resume)",
         .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
@@ -8054,10 +7841,10 @@ defer:
 }
 
 // ---------------------------------------------------------------------------
-// migrate: the one place in this binary that knows the v0 record format.
-// Everything else refuses a v0 record on sight, so this command is the only
-// path from a pre-1.0 backlog to a readable one. It is quarantined here on
-// purpose and is removed again in v1.1.0.
+// migrate: the one place in this binary that knows the superseded record
+// formats - v0's FLOW STEP chain and v1's KIND line. Everything else refuses a
+// legacy record on sight, so this command is the only path from an old backlog
+// to a readable one. It is quarantined here on purpose.
 //
 // The mapping is record-local - it reads one task directory and writes one
 // TASK.md - so the command works unchanged in any repository, without a tatr
@@ -8122,13 +7909,14 @@ static boolean migrate_parse_v0(Aids_String_Slice buffer, Task *task,
     }
     aids_string_slice_skip_while(&buffer, isspace);
 
+    // KIND was a v0/v1 field and is not one now: the value is read only to get
+    // past it, exactly as the v0 STATUS value is.
     if (!aids_string_slice_starts_with(&buffer, KIND_FORMAT)) {
         return false;
     }
     aids_string_slice_skip(&buffer, KIND_FORMAT.len);
     Aids_String_Slice kind_slice = {0};
-    if (!aids_string_slice_tokenize(&buffer, '\n', &kind_slice) ||
-        !task_kind_from_string(&kind_slice, &task->meta.kind)) {
+    if (!aids_string_slice_tokenize(&buffer, '\n', &kind_slice)) {
         return false;
     }
     aids_string_slice_skip_while(&buffer, isspace);
@@ -8245,6 +8033,56 @@ static boolean migrate_apply_mapping(const Aids_String_Slice *tasks_dir,
     return true;
 }
 
+// The v1 -> v2 mapping: drop the "- KIND: " line and keep everything else
+// byte for byte. A kind was never load-bearing - it selected which sections a
+// TASK.md owed and which records were exempt, and both of those are now one
+// answer for every task - so nothing has to be derived from the value that goes
+// away. *kind receives the dropped value for reporting, and *out an owned copy
+// of the rewritten record.
+//
+// Line-wise rather than field-wise: the record is otherwise already in the
+// current format, so re-serializing it would be a chance to lose a body this
+// command has no business touching. Only the metadata header is considered - a
+// "- KIND: " line under the description is prose, and prose is left alone.
+// Returns false when the record carries no KIND line at all, writing nothing.
+static boolean migrate_strip_kind(Aids_String_Slice raw, Aids_String_Slice *kind,
+                                  Aids_String_Slice *out) {
+    Aids_String_Slice scan = raw;
+    Aids_String_Slice line = {0};
+    Aids_String_Builder builder = {0};
+    Aids_String_Slice field_prefix = aids_string_slice_from_cstr("- ");
+    boolean in_header = false;
+
+    aids_string_builder_init(&builder);
+    while (aids_string_slice_tokenize(&scan, '\n', &line)) {
+        if (aids_string_slice_starts_with(&line, field_prefix)) {
+            in_header = true;
+        } else if (in_header) {
+            break; // the metadata block ended before any KIND line
+        }
+        if (aids_string_slice_starts_with(&line, KIND_FORMAT)) {
+            Aids_String_Slice value = line;
+            aids_string_slice_skip(&value, KIND_FORMAT.len);
+            aids_string_slice_trim(&value);
+            // The rest of the record follows verbatim: `scan` is everything
+            // after the newline this line was terminated by.
+            if (aids_string_builder_append_slice(&builder, scan) != AIDS_OK) {
+                break;
+            }
+            *kind = value;
+            aids_string_builder_to_slice(&builder, out);
+            return true;
+        }
+        if (aids_string_builder_append_slice(&builder, line) != AIDS_OK ||
+            aids_string_builder_append(&builder, "\n") != AIDS_OK) {
+            break;
+        }
+    }
+
+    aids_string_builder_free(&builder);
+    return false;
+}
+
 static int main_migrate(const Tatr_Context *ctx) {
     int result = 0;
     Argparse_Parser parser = {0};
@@ -8254,7 +8092,7 @@ static int main_migrate(const Tatr_Context *ctx) {
     size_t migrated = 0;
     size_t failed = 0;
 
-    argparse_parser_init(&parser, "tatr migrate", "Convert v0 task records to the v1 format", TATR_VERSION);
+    argparse_parser_init(&parser, "tatr migrate", "Convert legacy task records to the current format", TATR_VERSION);
 
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 'a',
@@ -8296,10 +8134,52 @@ static int main_migrate(const Tatr_Context *ctx) {
         Aids_String_Slice step = {0};
         Aids_String_Slice plan = {0};
         if (!migrate_parse_v0(raw, &task, &step, &plan)) {
-            // Already v1, or a record this command must not guess at. Either
-            // way it is left exactly as it is; `tatr check` is what reports a
-            // record nothing can read.
+            // Not a v0 record. It may still be a v1 one carrying a KIND
+            // line, which is a line to delete rather than a format to map.
             task_cleanup(&task);
+            Aids_String_Slice kind = {0};
+            Aids_String_Slice stripped = {0};
+            if (migrate_strip_kind(raw, &kind, &stripped)) {
+                printf(SS_Fmt "\tKIND: " SS_Fmt " -> dropped\n", SS_Arg(*entry), SS_Arg(kind));
+                migrated++;
+                if (apply) {
+                    Aids_String_Slice path = {0};
+                    if (task_file_path_build(&tasks_dir, entry, &path) != AIDS_OK) {
+                        AIDS_FREE(stripped.str);
+                        AIDS_FREE(raw.str);
+                        return_defer(1);
+                    }
+                    // Never write a record that cannot be read back: the
+                    // stripped bytes are parsed before they land on disk.
+                    Task verify = {0};
+                    task_init_empty(&verify);
+                    Aids_Result parsed = task_deserialize(stripped, &verify);
+                    verify._buffer = NULL; // the verify task borrows `stripped`
+                    task_cleanup(&verify);
+                    if (parsed != AIDS_OK) {
+                        aids_log(AIDS_ERROR, SS_Fmt ": the record would not parse back without "
+                                 "its KIND line; leaving it alone", SS_Arg(*entry));
+                        AIDS_FREE(path.str);
+                        AIDS_FREE(stripped.str);
+                        AIDS_FREE(raw.str);
+                        failed++;
+                        continue;
+                    }
+                    Aids_Result written = aids_io_write(&path, &stripped, "w");
+                    AIDS_FREE(path.str);
+                    if (written != AIDS_OK) {
+                        aids_log(AIDS_ERROR, SS_Fmt ": failed to write the migrated record",
+                                 SS_Arg(*entry));
+                        AIDS_FREE(stripped.str);
+                        AIDS_FREE(raw.str);
+                        return_defer(1);
+                    }
+                }
+                AIDS_FREE(stripped.str);
+            }
+            // Anything else is already current, or a record this command must
+            // not guess at. Either way it is left exactly as it is; `tatr
+            // check` is what reports a record nothing can read.
             AIDS_FREE(raw.str);
             continue;
         }
@@ -8354,7 +8234,7 @@ static int main_migrate(const Tatr_Context *ctx) {
     }
 
     if (migrated == 0) {
-        printf("No v0 records found: nothing to migrate\n");
+        printf("No legacy records found: nothing to migrate\n");
     } else if (!apply) {
         printf("%zu record(s) would change; nothing was written. Re-run with --apply.\n", migrated);
     } else {
@@ -8395,13 +8275,13 @@ static void tatr_print_help(Argparse_Parser *parser) {
     fprintf(stderr, "  rm           Remove a task by ID\n");
     fprintf(stderr, "  scaffold     Create a missing sibling record from the schema\n");
     fprintf(stderr, "  proofs       List the Definition of Done proofs of a task\n");
-    fprintf(stderr, "  frontier     Show the open work under an Epic\n");
-    fprintf(stderr, "  context      Show the artifact paths a flow phase needs\n");
+    fprintf(stderr, "  frontier     Show the open work under a task\n");
+    fprintf(stderr, "  context      Show the artifact paths a phase of work needs\n");
     fprintf(stderr, "  claim        Claim a task for this session\n");
     fprintf(stderr, "  release      Release a claim on a task\n");
     fprintf(stderr, "  claims       List the claims in this tasks directory\n");
     fprintf(stderr, "  check        Lint task artifacts for process drift\n");
-    fprintf(stderr, "  migrate      Convert v0 task records to the v1 format\n");
+    fprintf(stderr, "  migrate      Convert legacy task records to the current format\n");
     fprintf(stderr, "\n");
 }
 
