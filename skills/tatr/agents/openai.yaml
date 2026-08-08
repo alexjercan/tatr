@@ -2,3 +2,5 @@ interface:
   display_name: "Tatr"
   short_description: "Track file-backed project tasks"
   default_prompt: "Use $tatr to inspect the backlog and update task state."
+policy:
+  allow_implicit_invocation: false

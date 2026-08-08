@@ -1,7 +1,9 @@
 ---
 name: tatr
 description: Create, list, query, and edit Markdown tasks with the tatr CLI.
+disable-model-invocation: true
 ---
+
 # Tatr
 
 Task: `tasks/<YYYYMMDD-HHMMSS>/TASK.md`.
