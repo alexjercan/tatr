@@ -2,6 +2,16 @@
 
 All notable changes to tatr are documented here.
 
+## v2.0.1 - 2026-08-08
+
+### Added
+
+- `tatr new -b, --body FILE` reads a task body from a Markdown file.
+- `tatr new -b -` reads a task body from stdin.
+
+Body input is read before task creation. An unreadable input exits non-zero and
+does not create a task directory.
+
 ## v2.0.0 - 2026-08-08
 
 `tatr` is a small task tracker again. Tasks contain a title, `STATUS`,
