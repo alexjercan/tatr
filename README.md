@@ -55,6 +55,14 @@ Creates a task. Options:
 - `-t, --tags`: repeat for multiple tags
 - `-b, --body`: read the Markdown body from a file, or from stdin with `-`
 
+The body is stored after the generated metadata without modification. Input
+must be readable before tatr creates the task directory.
+
+```bash
+tatr new "Fix parser" -b details.md
+tatr new "Fix parser" -b - < details.md
+```
+
 ### ls
 
 Loads and validates each selected `TASK.md`. Options:

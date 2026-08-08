@@ -23,11 +23,14 @@ Optional body.
 Commands:
 
 ```bash
-tatr new "Title" -p 100 -t bug
+tatr new "Title" -p 100 -t bug -b details.md
+printf 'Body from stdin.\n' | tatr new "Title" --body -
 tatr ls --sort priority
 tatr ls --filter ':status eq OPEN'
 tatr edit <id> --status IN_PROGRESS
 ```
 
 Use `-r ROOT` for another project. Valid statuses: `OPEN`, `IN_PROGRESS`,
-`CLOSED`. Invalid task files are errors. Edit task bodies directly.
+`CLOSED`. For `new`, pass `-b FILE` to read the body from a Markdown file or
+`-b -` to read stdin. Input read failure creates no task. Edit existing task
+bodies directly.

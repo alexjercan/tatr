@@ -1,74 +1,49 @@
 # AGENTS.md
 
-Project-specific guidance. Global `AGENTS.md` still applies.
+Project guidance. Global `AGENTS.md` still applies.
 
 ## Project
 
-- tatr: offline C CLI for Markdown tasks under `tasks/`.
-- Task ID: timestamp HUID `YYYYMMDD-HHMMSS`.
-- Program: single translation unit, `tatr.c`.
-- Vendored headers: `aids.h`, `argparse.h`.
-- Build: `Makefile`, Nix toolchain.
-- Tests: `checker.sh` integration suite.
-- User docs: `README.md`.
+- Offline C CLI for Markdown tasks under `tasks/`.
+- Production: `tatr.c`; vendored: `aids.h`, `argparse.h`.
+- Integration tests: `checker.sh`; user docs: `README.md`.
+- Formatting: `CONVENTIONS.md`.
 
-## Build
+## Build and test
 
 ```bash
 nix develop -c make
-nix develop -c make windows
-nix develop -c make clean
-```
-
-- Bare builds blocked by default.
-- Provisioned non-Nix toolchain: `TATR_ALLOW_BARE_BUILD=1`.
-- Keep clang, gcc, and MinGW warning-clean under `-Wall -Wextra`.
-
-## Test
-
-```bash
 nix develop -c ./checker.sh
-nix develop -c ./checker.sh -v
 nix develop -c ./checker.sh --memcheck
+nix develop -c make clean all CC=gcc
+nix develop -c make windows
 ```
 
-- Run after every code change.
-- Prefer integration tests and runnable CLI paths.
-- Cover refusal and success paths.
-- New check rule: write the exact-message assertion first; use `grep -qx`.
-- Expected failure under `set -e`: follow the existing split-declaration pattern in `checker.sh`.
-- Generated task ID: use `new_task_id`.
-- Negative assertions: avoid fixture names containing another fixture's slug.
-- New guard: remove its side effect, rebuild, and confirm its own test fails.
-- Mutant crash, hang, or corruption: add the invariant at the use site.
-- Restore each mutation immediately after observing failure.
+- Bare builds require `TATR_ALLOW_BARE_BUILD=1`.
+- Keep clang, gcc, and MinGW warning-clean under `-Wall -Wextra`.
+- Run the integration suite after each code change.
+- Cover success and refusal paths.
+- For a new rule, write the exact-message check first with `grep -qx`.
+- Under `set -e`, capture expected failures with the existing split pattern.
+- Mutation check: remove the new side effect, rebuild, confirm its test fails,
+  then restore it immediately.
 
-## Code
+## Implementation
 
 - Keep production code in `tatr.c`.
-- Command shape: `static int main_<cmd>` with its own parser and `defer:` cleanup.
-- Wire commands into dispatch and `tatr_print_help`.
-- Resolution: reuse `task_resolve`.
-- Persistence: reuse `task_load`, `task_save`, `task_serialize`, `task_deserialize`.
-- Memory: explicit ownership, full `defer:` cleanup, zero memcheck leaks.
-- Errors: non-zero exit plus clear `aids_log(AIDS_ERROR, ...)` message.
-- Writes: validate fully before mutation; never half-apply.
-- Deletion: validated HUID only; target only `tasks/<id>/`.
-- Directory scans: `aids_io_listdir` includes `.` and `..`; skip both.
-
-## Workflow invariants
-
-- Tracker, lifecycle, records, claims, and proofs: load `skills/tatr/SKILL.md`.
-- Rule ownership: collectors return problems as data.
-- Check output: only `check_report_problems`.
-- Flow findings: only `flow_unmet_add_problems`.
-- Cross-cutting rule: shared collector used by both `check` and `flow`.
+- Commands use `static int main_<cmd>`, a local parser, and `defer:` cleanup.
+- Reuse task resolution, load, save, serialization, and deserialization helpers.
+- Validate all input before mutation. Never half-apply a write.
+- Own memory explicitly. Require full cleanup and zero memcheck leaks.
+- Errors: non-zero exit and a clear `aids_log(AIDS_ERROR, ...)` message.
+- New task bodies: `-b, --body PATH`; `-` means stdin. Read before creation.
+- Directory scans include `.` and `..`; skip both.
 
 ## Agent workflow
 
-- Tracker: `tasks/`; usage in `skills/tatr/SKILL.md`. Every record is a task; a container is a task others name as `PARENT`.
-- Examples/retention: `checker.sh`; retain task-specific evidence in `tasks/<id>/`.
-- Domain docs: `README.md`; implementation truth in `tatr.c`.
-- Research/network: offline-first; task research belongs in the task's own `NOTES.md` and the decision it produced in `DECISION.md`.
-- Checks/records: `checker.sh`, `tatr check`, and scaffolded task records.
-- Knowledge: central repo `/home/alex/personal/agent-knowledge`; project=tatr; tags=tasks,c,workflow,agents. Advisory only; failed writes stay in RETRO.
+- Tracker and usage: `tasks/`, `skills/tatr/SKILL.md`.
+- Examples and test evidence: `checker.sh` or the task directory.
+- Domain docs: `README.md`; implementation truth: `tatr.c`.
+- Research: offline-first; keep durable decisions in the task body.
+- Knowledge: `/home/alex/personal/agent-knowledge`; project `tatr`; tags
+  `tasks,c,workflow,agents`. Advisory only.
