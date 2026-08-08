@@ -34,7 +34,8 @@ No other task records or metadata exist. Invalid task files make `tatr ls` and
 ## Commands
 
 ```bash
-tatr new "Fix parser" --priority 100 --tags bug --tags parser
+tatr new "Fix parser" --priority 100 --tags bug --tags parser --body details.md
+printf 'Body from stdin.\n' | tatr new "Fix parser" --body -
 tatr ls
 tatr ls --sort priority
 tatr ls --filter ':status eq OPEN'
@@ -52,6 +53,7 @@ Creates a task. Options:
 - `-s, --status`: default `OPEN`
 - `-p, --priority`: default `0`; higher values sort first
 - `-t, --tags`: repeat for multiple tags
+- `-b, --body`: read the Markdown body from a file, or from stdin with `-`
 
 ### ls
 

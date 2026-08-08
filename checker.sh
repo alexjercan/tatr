@@ -83,6 +83,32 @@ test_new() {
     grep -qx -- '- TAGS: cli, simple' "$file"
 }
 
+test_new_body() {
+    local dir file output exit_code
+    dir="$(new_project)"
+    printf '# File body\n\nContent from file.\n' > "$dir/body.md"
+    run_tatr -r "$dir" new 'File input' --body "$dir/body.md" >/dev/null || return 1
+    file="$(find "$dir/tasks" -name TASK.md)"
+    [ -n "$file" ] || return 1
+    tail -n 3 "$file" | grep -qx 'Content from file.' || return 1
+
+    dir="$(new_project)"
+    printf '# Stdin body\n\nContent from stdin.\n' > "$dir/stdin.md"
+    run_tatr -r "$dir" new 'Stdin input' -b - < "$dir/stdin.md" >/dev/null || return 1
+    file="$(find "$dir/tasks" -name TASK.md)"
+    [ -n "$file" ] || return 1
+    tail -n 3 "$file" | grep -qx 'Content from stdin.' || return 1
+
+    dir="$(new_project)"
+    set +e
+    output="$(run_tatr -r "$dir" new 'Missing body' --body "$dir/missing.md" 2>&1)"
+    exit_code=$?
+    set -e
+    [ "$exit_code" -ne 0 ] || return 1
+    printf '%s\n' "$output" | grep -qx ".*Failed to read body from '$dir/missing.md': Failed to open file '$dir/missing.md' for reading" || return 1
+    [ "$(find "$dir/tasks" -name TASK.md | wc -l)" -eq 0 ] || return 1
+}
+
 write_tasks() {
     local dir="$1"
     mkdir "$dir/tasks/20260101-000001" "$dir/tasks/20260101-000002" "$dir/tasks/20260101-000003"
@@ -157,6 +183,7 @@ test_invalid_new_values_fail() {
 
 check 'help has only retained commands' test_help_surface
 check 'new writes the three metadata fields' test_new
+check 'new reads body from a file or stdin' test_new_body
 check 'ls sorts and queries' test_ls_sort_and_query
 check 'edit updates fields and keeps body' test_edit
 check 'ls fails on invalid TASK.md' test_invalid_task_fails_ls

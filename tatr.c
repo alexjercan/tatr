@@ -542,6 +542,14 @@ static int main_new(const Tatr_Context *ctx) {
         .required = 0
     });
 
+    argparse_add_argument(&parser, (Argparse_Options){
+        .short_name = 'b',
+        .long_name = "body",
+        .description = "Read task body from a Markdown file or stdin (-)",
+        .type = ARGUMENT_TYPE_VALUE,
+        .required = 0
+    });
+
     if (argparse_parse(&parser, ctx->argc, ctx->argv) != ARG_OK) {
         return_defer(1);
     }
@@ -581,6 +589,19 @@ static int main_new(const Tatr_Context *ctx) {
             return_defer(1);
         }
         task.meta.status = task_status_from_string(&status_slice);
+    }
+
+    char *body_path = argparse_get_value(&parser, "body");
+    if (body_path != NULL) {
+        Aids_String_Slice body = {0};
+        Aids_String_Slice path = aids_string_slice_from_cstr(body_path);
+        const Aids_String_Slice *read_path = strcmp(body_path, "-") == 0 ? NULL : &path;
+        if (aids_io_read(read_path, &body, "r") != AIDS_OK) {
+            aids_log(AIDS_ERROR, "Failed to read body from '%s': %s", body_path, aids_failure_reason());
+            return_defer(1);
+        }
+        task.description = body;
+        task._buffer = body.str;
     }
 
     char huid_str[HUID_LENGTH] = {0};
