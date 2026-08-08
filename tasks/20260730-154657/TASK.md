@@ -1,11 +1,8 @@
 # Add transactional flow lifecycle commands and guards
 
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature, flow, lifecycle
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
-- DEPENDS ON: 20260730-153325
 
 ## Story
 

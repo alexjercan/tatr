@@ -1,10 +1,8 @@
 # Tighten tatr skill references
 
+- STATUS: CLOSED
 - PRIORITY: 0
 - TAGS: docs, skill
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

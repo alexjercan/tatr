@@ -1,11 +1,8 @@
 # Require user disposition for lesson promotions
 
+- STATUS: CLOSED
 - PRIORITY: 80
 - TAGS: feature, flow, lessons
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
-- DEPENDS ON: 20260730-153325, 20260730-154745
 
 ## Story
 

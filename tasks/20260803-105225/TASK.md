@@ -1,10 +1,8 @@
 # Make tatr flow --dry-run a real precondition probe
 
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: tatr, flow, cli
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 `tatr flow --dry-run` currently returns before any precondition is evaluated
 (`tatr.c:5917`, right after the edge and gate are computed). It prints the edge

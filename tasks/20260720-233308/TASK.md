@@ -1,10 +1,8 @@
 # tatr check: historical tag also exempts closed-unchecked
 
+- STATUS: CLOSED
 - PRIORITY: 55
 - TAGS: feature
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

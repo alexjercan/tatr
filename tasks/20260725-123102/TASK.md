@@ -1,10 +1,8 @@
 # Update docs for TASK.md epic containers
 
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: docs, flow
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

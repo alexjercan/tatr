@@ -1,10 +1,8 @@
 # Centralize tasks by adding a recursive mode
 
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature, historical
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 I would like to have a flag like `-R, --recursive` for the `ls` command that
 will search in all subdirectories for `tasks` folder and list all of them,

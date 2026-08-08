@@ -1,11 +1,8 @@
 # retro-completeness: mark pre-flow tasks historical, reconcile stray retros
 
+- STATUS: CLOSED
 - PRIORITY: 30
 - TAGS: chore
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
-- PARENT: 20260720-225230
 
 ## Story
 

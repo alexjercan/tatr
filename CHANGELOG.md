@@ -2,6 +2,26 @@
 
 All notable changes to tatr are documented here.
 
+## v2.0.0 - 2026-08-08
+
+`tatr` is a small task tracker again. Tasks contain a title, `STATUS`,
+`PRIORITY`, `TAGS`, and an optional Markdown body.
+
+### Changed (breaking)
+
+- The command surface is `new`, `ls`, `edit`, `help`, and `version` only.
+- `ls` validates every selected task and fails on malformed TASK.md files.
+- Existing repository tasks use the reduced schema. A normalization script is
+  available at `scripts/normalize-tasks.sh` for old lifecycle records.
+- Documentation and the tatr skill describe only the reduced format.
+
+### Removed
+
+- Lifecycle, planning, review, retro, claim, proof, check, scaffold, context,
+  migration, removal, and show commands.
+- Workflow metadata, exemptions, and sibling task records such as NOTES.md,
+  DECISION.md, REVIEW.md, RETRO.md, SPIKE.md, and GOAL.md.
+
 ## v1.1.0 - 2026-08-05
 
 `KIND` is removed. Every record under `tasks/` is a task: an epic, a story and

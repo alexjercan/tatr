@@ -1,11 +1,8 @@
 # Add bad-decision-status and dangling-supersede checks to tatr check
 
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
-- PARENT: 20260722-151939
 
 ## Story
 

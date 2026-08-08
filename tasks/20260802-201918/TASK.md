@@ -1,10 +1,8 @@
 # Replace the FLOW STEP chain with ACTIVITY, GATES and RESOLUTION
 
+- STATUS: CLOSED
 - PRIORITY: 95
 - TAGS: feature, lifecycle, breaking
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

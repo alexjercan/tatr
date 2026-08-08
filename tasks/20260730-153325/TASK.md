@@ -1,10 +1,8 @@
 # Add typed v2 workflow schema and correct tatr history by hand
 
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature, flow, schema, breaking
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

@@ -1,10 +1,8 @@
 # Add show command to display a single task by ID
 
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 Agents driving the plan-work-review cycle need to read the full details of a
 single task by its HUID, not just the one-line `ls` summary. Add a `show`

@@ -1,10 +1,8 @@
 # Implement Task Tracker
 
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: feature, historical
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 Task Tracker is a `TODO` management tool. This is insipired from
 <https://github.com/tsoding>'s streams where he uses it for some projects.

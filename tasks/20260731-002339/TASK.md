@@ -1,10 +1,8 @@
 # Write the test-first-for-check-messages practice into AGENTS.md
 
+- STATUS: CLOSED
 - PRIORITY: 60
 - TAGS: docs, testing, lessons
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

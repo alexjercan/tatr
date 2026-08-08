@@ -1,10 +1,8 @@
 # new: fail on same-second ID collision; add --body-file
 
+- STATUS: CLOSED
 - PRIORITY: 80
 - TAGS: feature, historical
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 ## What changed
 

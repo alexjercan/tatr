@@ -1,10 +1,8 @@
 # Add AGENTS.md and document new agent commands
 
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: docs
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 Once `show`, `edit` and `rm` exist, the docs must reflect them and the repo
 needs an AGENTS.md that orients an agent working on tatr.

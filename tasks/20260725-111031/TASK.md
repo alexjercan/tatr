@@ -1,10 +1,8 @@
 # Add flow-state lint for planned work
 
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature, flow
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

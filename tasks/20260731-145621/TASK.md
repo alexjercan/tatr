@@ -1,10 +1,8 @@
 # Cut v0.2.0: bump version and compact the CHANGELOG
 
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: release, docs, build
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

@@ -1,10 +1,8 @@
 # Condense tatr skill into referenced docs
 
+- STATUS: CLOSED
 - PRIORITY: 65
 - TAGS: docs, skill, build
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

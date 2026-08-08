@@ -1,10 +1,8 @@
 # Remove lesson ledger ownership from tatr
 
+- STATUS: CLOSED
 - PRIORITY: 70
 - TAGS: tatr, knowledge, lessons, migration, tooling
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

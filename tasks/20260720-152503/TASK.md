@@ -1,10 +1,8 @@
 # Add check subcommand: lint task artifacts for process drift
 
+- STATUS: CLOSED
 - PRIORITY: 90
 - TAGS: feature
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 

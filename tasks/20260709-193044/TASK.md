@@ -1,10 +1,8 @@
 # Allow dots and dashes in filter literals so version tags like v0.1.0 parse
 
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: bug
-- ACTIVITY: COMPOUNDING
-- GATES: REVIEW RETRO
-- RESOLUTION: DONE
 
 The filter query language cannot match version-style tags. Running
 `tatr ls -f ':tags contains v0.1.0'` fails to parse because the filter lexer

@@ -1,10 +1,8 @@
 # Add a Windows tatr.exe build
 
+- STATUS: CLOSED
 - PRIORITY: 85
 - TAGS: feature, build, windows
-- ACTIVITY: COMPOUNDING
-- GATES: PLAN REVIEW RETRO
-- RESOLUTION: DONE
 
 ## Story
 
