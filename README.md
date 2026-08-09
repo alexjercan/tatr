@@ -72,7 +72,9 @@ Loads and validates each selected `TASK.md`. Options:
 - `-R, --recursive`: find nested projects
 
 Query fields: `:status`, `:priority`, `:tags`, `:title`. Operators: `eq`, `in`,
-`contains`, `and`, `or`, `not`. Examples:
+`contains`, `and`, `or`, `not`. Bare literals start with a letter, digit, or
+`_`. Later characters can also be `.` or `-`, so tags such as `v0.1.0` and
+`release-candidate` work. Bare literals cannot start with `.` or `-`. Examples:
 
 ```bash
 tatr ls -f ':tags contains bug'

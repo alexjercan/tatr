@@ -128,6 +128,27 @@ test_ls_sort_and_query() {
     [ "$(printf '%s\n' "$output" | sed 's/.*] //' | paste -sd, -)" = 'High,Closed' ]
 }
 
+test_filter_tag_literal_punctuation() {
+    local dir dotted_output dashed_output output exit_code
+    dir="$(new_project)"
+    mkdir "$dir/tasks/20000101-000001"
+    printf '# Unrelated\n\n- STATUS: OPEN\n- PRIORITY: 0\n- TAGS: other\n' > "$dir/tasks/20000101-000001/TASK.md"
+    run_tatr -r "$dir" new Punctuation -t v0.1.0 -t release-candidate >/dev/null
+
+    dotted_output="$(run_tatr -r "$dir" ls --filter ':tags contains v0.1.0')"
+    printf '%s\n' "$dotted_output" | grep -qx '.*\[PRIORITY: 0, TAGS: v0.1.0, release-candidate\] Punctuation' || return 1
+
+    dashed_output="$(run_tatr -r "$dir" ls --filter ':tags contains release-candidate')"
+    printf '%s\n' "$dashed_output" | grep -qx '.*\[PRIORITY: 0, TAGS: v0.1.0, release-candidate\] Punctuation' || return 1
+
+    set +e
+    output="$(run_tatr -r "$dir" ls --filter ':tags contains .hidden' 2>&1)"
+    exit_code=$?
+    set -e
+    [ "$exit_code" -ne 0 ] || return 1
+    printf '%s\n' "$output" | grep -qx ".*Filter error: line 1, col 16: expected field, identifier, list, or '(', got invalid token" || return 1
+}
+
 test_edit() {
     local dir file
     dir="$(new_project)"
@@ -185,6 +206,7 @@ check 'help has only retained commands' test_help_surface
 check 'new writes the three metadata fields' test_new
 check 'new reads body from a file or stdin' test_new_body
 check 'ls sorts and queries' test_ls_sort_and_query
+check 'ls filters tag literals containing dots and dashes' test_filter_tag_literal_punctuation
 check 'edit updates fields and keeps body' test_edit
 check 'ls fails on invalid TASK.md' test_invalid_task_fails_ls
 check 'removed commands fail' test_removed_commands_fail

@@ -1252,6 +1252,10 @@ static void tatr_filter_lexer_skip_whitespace(Tatr_Filter_Lexer *lexer) {
     }
 }
 
+static int tatr_filter_is_literal_char(char ch) {
+    return isalnum((unsigned char)ch) || ch == '_' || ch == '.' || ch == '-';
+}
+
 static void tatr_filter_lexer_init(Tatr_Filter_Lexer *lexer, Aids_String_Slice input) {
     lexer->input = input;
     lexer->pos = 0;
@@ -1330,7 +1334,7 @@ static Aids_Result tatr_filter_lexer_next(Tatr_Filter_Lexer *lexer, Tatr_Filter_
     }
 
     if (isalpha(lexer->ch) || lexer->ch == '_' || isdigit(lexer->ch)) {
-        while (isalnum(lexer->ch) || lexer->ch == '_') {
+        while (tatr_filter_is_literal_char(lexer->ch)) {
             tatr_filter_lexer_read(lexer);
         }
 
