@@ -42,6 +42,7 @@ nix develop -c make windows
 ## Agent workflow
 
 - Tracker and usage: `tasks/`, `skills/tatr/SKILL.md`.
+- Releases and publishing: `RELEASE.md`, `.github/workflows/release.yml`.
 - Examples and test evidence: `checker.sh` or the task directory.
 - Domain docs: `README.md`; implementation truth: `tatr.c`.
 - Research: offline-first; keep durable decisions in the task body.

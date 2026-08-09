@@ -2,6 +2,14 @@
 
 All notable changes to tatr are documented here.
 
+## v2.0.2 - 2026-08-09
+
+### Fixed
+
+- Bare filter literals accept `.` and `-` after the first character, so tags
+  such as `v2.0.2` and `release-candidate` can be used with `tatr ls --filter`.
+  Leading `.` and `-` remain invalid.
+
 ## v2.0.1 - 2026-08-08
 
 ### Added
