@@ -1,15 +1,36 @@
 # AGENTS.md
 
-Project guidance. Global `AGENTS.md` still applies.
+Repository guidance. Global `~/AGENTS.md` applies.
 
 ## Project
 
 - Offline C CLI for Markdown tasks under `tasks/`.
-- Production: `tatr.c`; vendored: `aids.h`, `argparse.h`.
-- Integration tests: `checker.sh`; user docs: `README.md`.
-- Formatting: `CONVENTIONS.md`.
+- Production: `tatr.c`. Vendored: `aids.h`, `argparse.h`.
+- User docs: `README.md`. Formatting: `CONVENTIONS.md`.
 
-## Build and test
+## Agent workflow
+
+- Tracker/epics: use this repository's `tasks/`; keep one requested change per
+  task and link related task IDs in the body.
+- Examples/retention: `checker.sh` is the executable behavior catalog; keep
+  task-specific evidence with the task.
+- Domain docs: `README.md` for behavior, `tatr.c` for implementation, and
+  `RELEASE.md` for publishing.
+- Research/network: work offline from local sources.
+- Checks/records: run the suite below; keep durable decisions in task records.
+
+## Rules
+
+- Keep production code in `tatr.c`.
+- Commands use `static int main_<cmd>`, a local parser, and `defer:` cleanup.
+- Reuse task resolution, load, save, serialization, and parsing helpers.
+- Validate all input before mutation. Never half-apply a write.
+- Own memory explicitly. Keep memcheck at zero leaks.
+- Errors require nonzero exit and a clear `aids_log(AIDS_ERROR, ...)` message.
+- New rules need an exact-message refusal test first.
+- Directory scans include `.` and `..`; skip both.
+
+## Checks
 
 ```bash
 nix develop -c make
@@ -19,32 +40,4 @@ nix develop -c make clean all CC=gcc
 nix develop -c make windows
 ```
 
-- Bare builds require `TATR_ALLOW_BARE_BUILD=1`.
-- Keep clang, gcc, and MinGW warning-clean under `-Wall -Wextra`.
-- Run the integration suite after each code change.
-- Cover success and refusal paths.
-- For a new rule, write the exact-message check first with `grep -qx`.
-- Under `set -e`, capture expected failures with the existing split pattern.
-- Mutation check: remove the new side effect, rebuild, confirm its test fails,
-  then restore it immediately.
-
-## Implementation
-
-- Keep production code in `tatr.c`.
-- Commands use `static int main_<cmd>`, a local parser, and `defer:` cleanup.
-- Reuse task resolution, load, save, serialization, and deserialization helpers.
-- Validate all input before mutation. Never half-apply a write.
-- Own memory explicitly. Require full cleanup and zero memcheck leaks.
-- Errors: non-zero exit and a clear `aids_log(AIDS_ERROR, ...)` message.
-- New task bodies: `-b, --body PATH`; `-` means stdin. Read before creation.
-- Directory scans include `.` and `..`; skip both.
-
-## Agent workflow
-
-- Tracker and usage: `tasks/`, `skills/tatr/SKILL.md`.
-- Releases and publishing: `RELEASE.md`, `.github/workflows/release.yml`.
-- Examples and test evidence: `checker.sh` or the task directory.
-- Domain docs: `README.md`; implementation truth: `tatr.c`.
-- Research: offline-first; keep durable decisions in the task body.
-- Knowledge: `/home/alex/personal/agent-knowledge`; project `tatr`; tags
-  `tasks,c,workflow,agents`. Advisory only.
+Bare builds require `TATR_ALLOW_BARE_BUILD=1`.
