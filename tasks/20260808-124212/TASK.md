@@ -1,6 +1,6 @@
 # Add new body input
 
-- STATUS: OPEN
+- STATUS: CLOSED
 - PRIORITY: 100
 - TAGS: cli
 
