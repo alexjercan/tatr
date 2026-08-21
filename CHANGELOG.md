@@ -2,6 +2,12 @@
 
 All notable changes to tatr are documented here.
 
+## v2.0.3 - 2026-08-21
+
+### Changed
+
+- The exported tatr skill is model-invocable, so agents can discover its task format and valid status values when working with tasks.
+
 ## v2.0.2 - 2026-08-09
 
 ### Fixed

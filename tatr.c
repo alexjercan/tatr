@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <limits.h>
 
-#define TATR_VERSION "2.0.2"
+#define TATR_VERSION "2.0.3"
 
 #define HUID_FORMAT_CSTR "%Y%m%d-%H%M%S"
 #define HUID_LENGTH 16 // "20240630-235959" + null terminator
