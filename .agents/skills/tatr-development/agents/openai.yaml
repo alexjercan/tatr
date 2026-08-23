@@ -1,0 +1,6 @@
+interface:
+  display_name: "Tatr development"
+  short_description: "Develop and verify the Tatr CLI"
+  default_prompt: "Use $tatr-development to change and verify Tatr behavior."
+policy:
+  allow_implicit_invocation: true
