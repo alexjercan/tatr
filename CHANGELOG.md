@@ -2,6 +2,13 @@
 
 All notable changes to tatr are documented here.
 
+## v3.0.0 - 2026-08-30
+
+### Removed
+
+- **Breaking:** `IN_PROGRESS` is no longer a valid task status. Tasks, command
+  arguments, and status filters now accept only `OPEN` and `CLOSED`.
+
 ## v2.0.3 - 2026-08-21
 
 ### Changed

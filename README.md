@@ -26,7 +26,7 @@ Each task is `tasks/YYYYMMDD-HHMMSS/TASK.md`:
 Optional Markdown body.
 ```
 
-Valid statuses: `OPEN`, `IN_PROGRESS`, `CLOSED`.
+Valid statuses: `OPEN`, `CLOSED`.
 
 No other task records or metadata exist. Invalid task files make `tatr ls` and
 `tatr edit` fail.
@@ -39,7 +39,7 @@ printf 'Body from stdin.\n' | tatr new "Fix parser" --body -
 tatr ls
 tatr ls --sort priority
 tatr ls --filter ':status eq OPEN'
-tatr edit 20260808-113322 --status IN_PROGRESS --priority 80
+tatr edit 20260808-113322 --status CLOSED --priority 80
 tatr help
 tatr version
 ```
@@ -79,7 +79,7 @@ Query fields: `:status`, `:priority`, `:tags`, `:title`. Operators: `eq`, `in`,
 ```bash
 tatr ls -f ':tags contains bug'
 tatr ls -f '(:status eq OPEN) and (:priority eq 100)'
-tatr ls -f ':status in [OPEN, IN_PROGRESS]'
+tatr ls -f ':status in [OPEN, CLOSED]'
 ```
 
 ### edit

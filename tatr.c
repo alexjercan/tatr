@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <limits.h>
 
-#define TATR_VERSION "2.0.3"
+#define TATR_VERSION "3.0.0"
 
 #define HUID_FORMAT_CSTR "%Y%m%d-%H%M%S"
 #define HUID_LENGTH 16 // "20240630-235959" + null terminator
@@ -26,13 +26,11 @@ typedef struct {
 
 typedef enum {
     Task_Status_OPEN,
-    Task_Status_IN_PROGRESS,
     Task_Status_CLOSED
 } Task_Status;
 
 static Aids_String_Slice Task_Status_Strings[] = {
     [Task_Status_OPEN] = (Aids_String_Slice) { .str = (unsigned char *)"OPEN", .len = 4 },
-    [Task_Status_IN_PROGRESS] = (Aids_String_Slice) { .str = (unsigned char *)"IN_PROGRESS", .len = 11 },
     [Task_Status_CLOSED] = (Aids_String_Slice) { .str = (unsigned char *)"CLOSED", .len = 6 }
 };
 
@@ -133,7 +131,7 @@ static Aids_Result task_serialize(Task task, Aids_String_Slice *buffer) {
         return_defer(AIDS_ERR);
     }
 
-    // - STATUS: OPEN | IN_PROGRESS | CLOSED
+    // - STATUS: OPEN | CLOSED
     if (aids_string_builder_append(&builder, SS_Fmt, SS_Arg(STATUS_FORMAT)) != AIDS_OK) {
         aids_log(AIDS_ERROR, "task_serialize: Failed to append status format: %s", aids_failure_reason());
         return_defer(AIDS_ERR);
@@ -223,7 +221,7 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
     aids_string_slice_skip(&task->title, 2);
     aids_string_slice_skip_while(&buffer, isspace);
 
-    // - STATUS: OPEN | IN_PROGRESS | CLOSED
+    // - STATUS: OPEN | CLOSED
     if (!aids_string_slice_starts_with(&buffer, STATUS_FORMAT)) {
         aids_log(AIDS_ERROR, "task_deserialize: Buffer does not start with expected status format");
         return_defer(AIDS_ERR);
@@ -235,7 +233,7 @@ static Aids_Result task_deserialize(Aids_String_Slice buffer, Task *task) {
         return_defer(AIDS_ERR);
     }
     if (!task_status_is_valid(&status_slice)) {
-        aids_log(AIDS_ERROR, "Invalid status in TASK.md: expected OPEN, IN_PROGRESS or CLOSED");
+        aids_log(AIDS_ERROR, "Invalid status in TASK.md: expected OPEN or CLOSED");
         return_defer(AIDS_ERR);
     }
     task->meta.status = task_status_from_string(&status_slice);
@@ -537,7 +535,7 @@ static int main_new(const Tatr_Context *ctx) {
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 's',
         .long_name = "status",
-        .description = "Task status (OPEN, IN_PROGRESS, CLOSED)",
+        .description = "Task status (OPEN, CLOSED)",
         .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
@@ -585,7 +583,7 @@ static int main_new(const Tatr_Context *ctx) {
     if (status_str != NULL) {
         Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
         if (!task_status_is_valid(&status_slice)) {
-            aids_log(AIDS_ERROR, "Invalid status '%s': expected OPEN, IN_PROGRESS or CLOSED", status_str);
+            aids_log(AIDS_ERROR, "Invalid status '%s': expected OPEN or CLOSED", status_str);
             return_defer(1);
         }
         task.meta.status = task_status_from_string(&status_slice);
@@ -775,7 +773,7 @@ static int main_edit(const Tatr_Context *ctx) {
     argparse_add_argument(&parser, (Argparse_Options){
         .short_name = 's',
         .long_name = "status",
-        .description = "New task status (OPEN, IN_PROGRESS, CLOSED)",
+        .description = "New task status (OPEN, CLOSED)",
         .type = ARGUMENT_TYPE_VALUE,
         .required = 0
     });
@@ -822,7 +820,7 @@ static int main_edit(const Tatr_Context *ctx) {
     if (status_str != NULL) {
         Aids_String_Slice status_slice = aids_string_slice_from_cstr(status_str);
         if (!task_status_is_valid(&status_slice)) {
-            aids_log(AIDS_ERROR, "Invalid status '%s': expected OPEN, IN_PROGRESS or CLOSED", status_str);
+            aids_log(AIDS_ERROR, "Invalid status '%s': expected OPEN or CLOSED", status_str);
             return_defer(1);
         }
         task.meta.status = task_status_from_string(&status_slice);
@@ -1900,11 +1898,11 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
     if (op == TATR_FILTER_COMPARISON_OP_EQ) {
         // eq: field eq value
         if (field_type == TATR_FILTER_FIELD_TYPE_STATUS) {
-            // Right side must be an identifier (status value like OPEN, CLOSED, IN_PROGRESS)
+            // Right side must be an identifier (status value like OPEN or CLOSED)
             if (right->kind != TATR_FILTER_AST_NODE_KIND_IDENTIFIER) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
-                snprintf(error_msg, error_msg_size, "line %lu, col %lu: status comparison requires an identifier (OPEN, IN_PROGRESS, or CLOSED)", line, column);
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: status comparison requires an identifier (OPEN or CLOSED)", line, column);
                 return false;
             }
             // Validate status value
@@ -1913,7 +1911,7 @@ static boolean tatr_filter_typecheck_comparison(Tatr_Filter_Ast_Node *node, Tatr
             if (aids_string_slice_compare(&right->data.identifier.value, &status_str) != 0) {
                 unsigned long line, column;
                 tatr_filter_lexer_position_info(lexer, right->info.index, &line, &column);
-                snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid status value '" SS_Fmt "' (must be OPEN, IN_PROGRESS, or CLOSED)",
+                snprintf(error_msg, error_msg_size, "line %lu, col %lu: invalid status value '" SS_Fmt "' (must be OPEN or CLOSED)",
                          line, column, SS_Arg(right->data.identifier.value));
                 return false;
             }

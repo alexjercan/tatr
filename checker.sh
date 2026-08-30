@@ -75,10 +75,10 @@ test_help_surface() {
 test_new() {
     local dir file
     dir="$(new_project)"
-    run_tatr -r "$dir" new 'Ship small tatr' -s IN_PROGRESS -p 42 -t cli -t simple >/dev/null
+    run_tatr -r "$dir" new 'Ship small tatr' -s CLOSED -p 42 -t cli -t simple >/dev/null
     file="$(find "$dir/tasks" -name TASK.md)"
     grep -qx '# Ship small tatr' "$file"
-    grep -qx -- '- STATUS: IN_PROGRESS' "$file"
+    grep -qx -- '- STATUS: CLOSED' "$file"
     grep -qx -- '- PRIORITY: 42' "$file"
     grep -qx -- '- TAGS: cli, simple' "$file"
 }
@@ -113,7 +113,7 @@ write_tasks() {
     local dir="$1"
     mkdir "$dir/tasks/20260101-000001" "$dir/tasks/20260101-000002" "$dir/tasks/20260101-000003"
     printf '# Low\n\n- STATUS: OPEN\n- PRIORITY: 1\n- TAGS: cli\n\nbody\n' > "$dir/tasks/20260101-000001/TASK.md"
-    printf '# High\n\n- STATUS: IN_PROGRESS\n- PRIORITY: 100\n- TAGS: cli, bug\n\nbody\n' > "$dir/tasks/20260101-000002/TASK.md"
+    printf '# High\n\n- STATUS: OPEN\n- PRIORITY: 100\n- TAGS: cli, bug\n\nbody\n' > "$dir/tasks/20260101-000002/TASK.md"
     printf '# Closed\n\n- STATUS: CLOSED\n- PRIORITY: 20\n- TAGS: docs\n\nbody\n' > "$dir/tasks/20260101-000003/TASK.md"
 }
 
@@ -121,7 +121,7 @@ test_ls_sort_and_query() {
     local dir output
     dir="$(new_project)"
     write_tasks "$dir"
-    output="$(run_tatr -r "$dir" ls --sort priority --filter '(:status eq IN_PROGRESS) or (:tags contains docs)')"
+    output="$(run_tatr -r "$dir" ls --sort priority --filter '((:status eq OPEN) and (:priority eq 100)) or (:tags contains docs)')"
     [ "$(printf '%s\n' "$output" | grep -c 'High')" -eq 1 ]
     [ "$(printf '%s\n' "$output" | grep -c 'Closed')" -eq 1 ]
     ! printf '%s\n' "$output" | grep -q 'Low'
@@ -162,17 +162,43 @@ test_edit() {
     grep -qx 'body' "$file"
 }
 
-test_invalid_task_fails_ls() {
-    local dir output exit_code
+test_in_progress_is_rejected() {
+    local dir file output exit_code
     dir="$(new_project)"
+
+    set +e
+    output="$(run_tatr -r "$dir" new Bad --status IN_PROGRESS 2>&1)"
+    exit_code=$?
+    set -e
+    [ "$exit_code" -ne 0 ] || return 1
+    printf '%s\n' "$output" | grep -qx ".*Invalid status 'IN_PROGRESS': expected OPEN or CLOSED" || return 1
+    [ "$(find "$dir/tasks" -name TASK.md | wc -l)" -eq 0 ] || return 1
+
     mkdir "$dir/tasks/20260101-000001"
-    printf '# Bad\n\n- STATUS: MAYBE\n- PRIORITY: 1\n- TAGS: bad\n' > "$dir/tasks/20260101-000001/TASK.md"
+    file="$dir/tasks/20260101-000001/TASK.md"
+    printf '# Open\n\n- STATUS: OPEN\n- PRIORITY: 1\n- TAGS: test\n' > "$file"
+    set +e
+    output="$(run_tatr -r "$dir" edit 20260101-000001 --status IN_PROGRESS 2>&1)"
+    exit_code=$?
+    set -e
+    [ "$exit_code" -ne 0 ] || return 1
+    printf '%s\n' "$output" | grep -qx ".*Invalid status 'IN_PROGRESS': expected OPEN or CLOSED" || return 1
+    grep -qx -- '- STATUS: OPEN' "$file" || return 1
+
+    set +e
+    output="$(run_tatr -r "$dir" ls --filter ':status eq IN_PROGRESS' 2>&1)"
+    exit_code=$?
+    set -e
+    [ "$exit_code" -ne 0 ] || return 1
+    printf '%s\n' "$output" | grep -qx ".*Filter error: line 1, col 12: invalid status value 'IN_PROGRESS' (must be OPEN or CLOSED)" || return 1
+
+    printf '# Bad\n\n- STATUS: IN_PROGRESS\n- PRIORITY: 1\n- TAGS: bad\n' > "$file"
     set +e
     output="$(run_tatr -r "$dir" ls 2>&1)"
     exit_code=$?
     set -e
-    [ "$exit_code" -ne 0 ]
-    printf '%s\n' "$output" | grep -q '20260101-000001/TASK.md'
+    [ "$exit_code" -ne 0 ] || return 1
+    printf '%s\n' "$output" | grep -qx '.*Invalid status in TASK.md: expected OPEN or CLOSED' || return 1
 }
 
 test_removed_commands_fail() {
@@ -208,7 +234,7 @@ check 'new reads body from a file or stdin' test_new_body
 check 'ls sorts and queries' test_ls_sort_and_query
 check 'ls filters tag literals containing dots and dashes' test_filter_tag_literal_punctuation
 check 'edit updates fields and keeps body' test_edit
-check 'ls fails on invalid TASK.md' test_invalid_task_fails_ls
+check 'IN_PROGRESS is rejected everywhere' test_in_progress_is_rejected
 check 'removed commands fail' test_removed_commands_fail
 check 'new rejects invalid metadata' test_invalid_new_values_fail
 
