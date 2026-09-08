@@ -8,6 +8,8 @@ Global `~/AGENTS.md` applies. This file defines project-specific instructions.
 - Production code is `tatr.c`. `aids.h` and `argparse.h` are vendored.
 - `README.md` defines behavior. `checker.sh` is the executable behavior catalog.
 - `RELEASE.md` defines publishing.
+- `skills/tatr/` is the Agent Skill this flake exports as `skills.tatr`. Other
+  repositories consume it, so change it with the behavior it describes.
 
 ## Workflow
 
